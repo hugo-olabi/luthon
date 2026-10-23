@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.luthon_cache/
+bench/
+test_file.txt
+*.lua
+.pytest_cache/
+.idea/
+.vscode/
+src/luthon.egg-info/
