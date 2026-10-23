@@ -758,5 +758,135 @@ subprocess.Popen = function(cmd)
   function self:poll() return nil end -- simplified
   return self
 end
+
+-- ast
+ast = {}
+ast.Module = "Module"
+ast.FunctionDef = "FunctionDef"
+ast.AsyncFunctionDef = "AsyncFunctionDef"
+ast.ClassDef = "ClassDef"
+ast.Return = "Return"
+ast.If = "If"
+ast.While = "While"
+ast.For = "For"
+ast.With = "With"
+ast.Try = "Try"
+ast.Assign = "Assign"
+ast.AnnAssign = "AnnAssign"
+ast.AugAssign = "AugAssign"
+ast.Name = "Name"
+ast.Attribute = "Attribute"
+ast.Call = "Call"
+ast.BinOp = "BinOp"
+ast.UnaryOp = "UnaryOp"
+ast.Compare = "Compare"
+ast.Constant = "Constant"
+ast.List = "List"
+ast.Tuple = "Tuple"
+ast.Set = "Set"
+ast.Dict = "Dict"
+ast.ListComp = "ListComp"
+ast.SetComp = "SetComp"
+ast.DictComp = "DictComp"
+ast.GeneratorExp = "GeneratorExp"
+ast.Lambda = "Lambda"
+ast.IfExp = "IfExp"
+ast.BoolOp = "BoolOp"
+ast.Starred = "Starred"
+ast.Subscript = "Subscript"
+ast.Slice = "Slice"
+ast.Eq = "Eq"
+ast.NotEq = "NotEq"
+ast.Lt = "Lt"
+ast.LtE = "LtE"
+ast.Gt = "Gt"
+ast.GtE = "GtE"
+ast.Add = "Add"
+ast.Sub = "Sub"
+ast.Mult = "Mult"
+ast.Div = "Div"
+ast.Mod = "Mod"
+ast.Pow = "Pow"
+
+ast.dump = function(node, indent)
+  indent = indent or 0
+  local pad = string.rep("  ", indent)
+  if type(node) == "table" then
+    local parts = {}
+    parts[#parts+1] = pad .. "table("
+    local first = true
+    for k, v in pairs(node) do
+      if first then first = false else parts[#parts+1] = "," end
+      parts[#parts+1] = "\n" .. pad .. "  " .. tostring(k) .. " = " .. ast.dump(v, indent + 2)
+    end
+    if #parts > 2 then parts[#parts+1] = "\n" .. pad end
+    parts[#parts+1] = ")"
+    return table.concat(parts)
+  elseif type(node) == "string" then
+    return pad .. '"' .. node .. '"'
+  elseif type(node) == "number" then
+    return pad .. tostring(node)
+  elseif type(node) == "boolean" then
+    return pad .. tostring(node)
+  elseif node == nil then
+    return pad .. "nil"
+  else
+    return pad .. type(node)
+  end
+end
+
+ast.parse = function(source)
+  error("ast.parse is not available in Lua target; parse Python source before transpiling", 2)
+end
+
+ast.iter_fields = function(node)
+  if type(node) ~= "table" then return function() return nil end end
+  local keys = {}
+  for k in pairs(node) do keys[#keys+1] = k end
+  table.sort(keys)
+  local i = 0
+  return function()
+    i = i + 1
+    local k = keys[i]
+    if k == nil then return nil end
+    return k, node[k]
+  end
+end
+
+ast.walk = function(node)
+  local visited = {}
+  local stack = {node}
+  return function()
+    while #stack > 0 do
+      local n = table.remove(stack)
+      if type(n) == "table" then
+        if visited[tostring(n)] then
+          -- skip already visited
+        else
+          visited[tostring(n)] = true
+          -- push fields
+          for k, v in pairs(n) do
+            if type(v) == "table" then table.insert(stack, v) end
+          end
+          return n
+        end
+      end
+    end
+    return nil
+  end
+end
+
+ast.fix_missing_locations = function(node)
+  return node
+end
+
+ast.copy_location = function(new_node, old_node)
+  return new_node
+end
+
+ast.increment_lineno = function(node, n)
+  n = n or 1
+  return node
+end
 """
 

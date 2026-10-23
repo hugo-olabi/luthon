@@ -488,7 +488,7 @@ class IRLowerer:
                 root = node.func.value
                 while isinstance(root, ast.Attribute):
                     root = root.value
-                if isinstance(root, ast.Name) and root.id in ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess"):
+                if isinstance(root, ast.Name) and root.id in ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast"):
                     fn = self.lower_expr(node.func)
                     args = [self.lower_expr(a) for a in node.args]
                     kw_table = self._lower_call_keywords(node)
