@@ -10,11 +10,9 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase | Status | Steps |
 |-------|--------|-------|
 | Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
-| Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
-| Phase 2 — Semantic Analyzer in Lua | ✅ Done | 6/6 |
 | Phase 3 — IR Lowerer & Codegen in Lua | ✅ Done | 7/7 |
 | Phase 4 — Complete Stdlib in Lua | ✅ Done | 5/5 |
-| Phase 5 — Import System | ⬜ Todo | 5 |
+| Phase 5 — Import System | 🔄 In Progress | 0/5 |
 | Phase 6 — Unsupported Constructs | ⬜ Todo | 7 |
 | Phase 7 — Bootstrap — Transpile Luthon Itself | ⬜ Todo | 6 |
 | Phase 8 — Correctness & Optimization | ⬜ Todo | 5 |
@@ -75,10 +73,10 @@ Many modules done (math, os, sys, json, random, re, collections, itertools, func
 
 `ModuleLoader` exists in Python with site-packages search. No Lua module system with `sys.modules` cache.
 
-- [ ] Implement `sys.modules` cache in Lua
-- [ ] Implement relative import resolution (`from .foo import bar`)
-- [ ] Implement package `__init__.py` execution and namespace
-- [ ] Implement circular import handling
+- [x] Implement `sys.modules` cache in Lua
+- [x] Implement relative import resolution (`from .foo import bar`)
+- [x] Implement package `__init__.lua` execution and namespace
+- [x] Implement circular import handling
 - [ ] Integrate with `ModuleLoader` so `import luthon.semantic` works in transpiled Lua
 
 ## Phase 6 — Unsupported Constructs (long tail)
