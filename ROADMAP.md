@@ -12,7 +12,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
 | Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
 | Phase 2 — Semantic Analyzer in Lua | ✅ Done | 6/6 |
-| Phase 3 — IR Lowerer & Codegen in Lua | ⬚ Partial | 7 |
+| Phase 3 — IR Lowerer & Codegen in Lua | ✅ Done | 7/7 |
 | Phase 4 — Complete Stdlib in Lua | ⬚ Partial | 8 |
 | Phase 5 — Import System | ⬜ Todo | 5 |
 | Phase 6 — Unsupported Constructs | ⬜ Todo | 7 |
@@ -49,15 +49,15 @@ Python semantic analyzer exists; Lua port complete.
 
 ## Phase 3 — IR Lowerer & Codegen in Lua
 
-IR data model and codegen exist in Python (instr, blocks, goto/labels, closures). Not yet ported to Lua.
+IR data model and codegen exist in Python (instr, blocks, goto/labels, closures). Ported to Lua.
 
-- [ ] Port `Instr, Block, Function, Module` IR dataclasses to Lua
-- [ ] Port statement lowering: `Assign, If, While, For, Return, Try, With, Break, AugAssign`
-- [ ] Port expression lowering: `BinOp, UnaryOp, Compare, Call, Name, Attribute, Subscript, List, Dict, Lambda`
-- [ ] Port control-flow lowering: basic blocks, goto, labels, branch instructions
-- [ ] Port closure/cell boxing: `MAKE_CELL, CELL_GET, CELL_SET`, upvalue propagation
-- [ ] Port class lowering: `MAKE_CLASS, SET_ATTR`, `__init__` synthesis, metatables
-- [ ] Port codegen: `CONST, LOAD, STORE, BINOP, CALL, RETURN, JUMP, BRANCH, MAKE_FUNCTION, MAKE_LIST, MAKE_DICT`
+- [x] Port `Instr, Block, Function, Module` IR dataclasses to Lua
+- [x] Port statement lowering: `Assign, If, While, For, Return, Try, With, Break, AugAssign`
+- [x] Port expression lowering: `BinOp, UnaryOp, Compare, Call, Name, Attribute, Subscript, List, Dict, Lambda`
+- [x] Port control-flow lowering: basic blocks, goto, labels, branch instructions
+- [x] Port closure/cell boxing: `MAKE_CELL, CELL_GET, CELL_SET`, upvalue propagation
+- [x] Port class lowering: `MAKE_CLASS, SET_ATTR`, `__init__` synthesis, metatables
+- [x] Port codegen: `CONST, LOAD, STORE, BINOP, CALL, RETURN, JUMP, BRANCH, MAKE_FUNCTION, MAKE_LIST, MAKE_DICT`
 
 ## Phase 4 — Complete Python Runtime Stdlib in Lua
 
