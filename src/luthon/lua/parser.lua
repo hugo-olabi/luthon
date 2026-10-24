@@ -824,7 +824,9 @@ function Parser:import_stmt()
   self:expect(TT.NAME, "import")
   local names = {}
   repeat
-    local name = self:expect(TT.NAME).value
+    local parts = {self:expect(TT.NAME).value}
+    while self:match(TT.OP, ".") do table.insert(parts, self:expect(TT.NAME).value) end
+    local name = table.concat(parts, ".")
     local alias = nil
     if self:match(TT.NAME, "as") then alias = self:expect(TT.NAME).value end
     table.insert(names, {name = name, asname = alias})

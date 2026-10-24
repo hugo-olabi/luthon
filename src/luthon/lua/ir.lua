@@ -307,6 +307,11 @@ function IRLowerer:lower_stmt(node)
       self:_emit("CALL", {dec_tmp, fn_tmp}, result_tmp)
       self:_emit("STORE", {fn.name, result_tmp})
     end
+  elseif t == "Import" then
+    for _, alias in ipairs(node.names or {}) do
+      local name = alias.asname or alias.name
+      self:_emit("LOAD", {name}, self:_new_tmp())
+    end
   elseif t == "ImportFrom" then
     if node.module then
       local mod_tmp = self:_new_tmp()

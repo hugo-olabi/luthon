@@ -12,7 +12,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
 | Phase 3 — IR Lowerer & Codegen in Lua | ✅ Done | 7/7 |
 | Phase 4 — Complete Stdlib in Lua | ✅ Done | 5/5 |
-| Phase 5 — Import System | 🔄 In Progress | 0/5 |
+| Phase 5 — Import System | 🔄 In Progress | 2/5 |
 | Phase 6 — Unsupported Constructs | ⬜ Todo | 7 |
 | Phase 7 — Bootstrap — Transpile Luthon Itself | ⬜ Todo | 6 |
 | Phase 8 — Correctness & Optimization | ⬜ Todo | 5 |
