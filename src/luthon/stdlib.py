@@ -32,6 +32,47 @@ function map(f,t) local r={}; for i,v in ipairs(t) do r[#r+1]=f(v) end; return r
 function filter(f,t) local r={}; for _,v in ipairs(t) do if f(v) then r[#r+1]=v end end; return r end
 function any(t) for _,v in ipairs(t) do if v then return true end end; return false end
 function all(t) for _,v in ipairs(t) do if not v then return false end end; return true end
+
+-- Missing builtins
+function set(t)
+  local s = {}
+  if t then for _, v in ipairs(t) do s[v] = true end end
+  return s
+end
+
+function frozenset(t)
+  local s = {}
+  if t then for _, v in ipairs(t) do s[v] = true end end
+  return setmetatable(s, {__newindex = function() error("frozenset is immutable") end})
+end
+
+function slice(start, stop, step)
+  return {start = start, stop = stop, step = step or 1}
+end
+
+function property(fget, fset, fdel)
+  return {fget = fget, fset = fset, fdel = fdel}
+end
+
+function staticmethod(f)
+  return f
+end
+
+function classmethod(f)
+  return f
+end
+
+function super(cls, obj)
+  return setmetatable({}, {
+    __index = function(_, k)
+      local mt = getmetatable(cls)
+      if mt and mt.__index and mt.__index[k] then
+        return mt.__index[k]
+      end
+      return nil
+    end
+  })
+end
 os.path = os.path or {}
 os.path.join = function(...) local a={...}; return table.concat(a, "/") end
 math.pi = 3.141592653589793
@@ -409,7 +450,7 @@ struct.unpack = function(fmt, s)
   return 0
 end
 
--- hashlib (minimal)
+-- hashlib (minimal, not cryptographically secure)
 hashlib = {}
 hashlib.md5 = function(data)
   -- simplified MD5: not cryptographically correct, returns fixed-length hex
@@ -420,6 +461,7 @@ hashlib.md5 = function(data)
   return string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296)
 end
 hashlib.sha1 = function(data)
+  -- simplified SHA1: not cryptographically correct, returns fixed-length hex
   local h = 0
   for i = 1, #data do
     h = (h * 37 + data:byte(i)) % 4294967296
@@ -427,6 +469,7 @@ hashlib.sha1 = function(data)
   return string.format("%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
 end
 hashlib.sha256 = function(data)
+  -- simplified SHA256: not cryptographically correct, returns fixed-length hex
   local h = 0
   for i = 1, #data do
     h = (h * 41 + data:byte(i)) % 4294967296
@@ -451,6 +494,21 @@ pathlib.Path = setmetatable({}, {
     function path:join(...) return pathlib.Path(self._p .. "/" .. table.concat({...}, "/")) end
     function path:read_text() local f = io.open(self._p, "r"); if not f then error("no such file: " .. self._p) end; local c = f:read("*a"); f:close(); return c end
     function path:write_text(c) local f = io.open(self._p, "w"); f:write(c); f:close() end
+    function path:is_absolute() return self._p:match("^/") ~= nil end
+    function path:resolve() if self:is_absolute() then return self._p end; return os.getenv("PWD") or "." .. "/" .. self._p end
+    function path:is_relative_to(other) local other_path = type(other) == "string" and other or other._p; return self._p:sub(1, #other_path) == other_path end
+    function path:glob(pattern) 
+      local results = {}
+      local dir = self:parent()
+      local f = io.popen("ls " .. dir .. " 2>/dev/null")
+      if f then
+        for line in f:lines() do
+          if line:match(pattern) then table.insert(results, pathlib.Path(self._p .. "/" .. line)) end
+        end
+        f:close()
+      end
+      return results
+    end
     return path
   end
 })
@@ -731,14 +789,16 @@ end
 subprocess.run = function(cmd, capture_output)
   capture_output = capture_output or false
   if capture_output then
-    local f = io.popen(cmd .. " 2>&1")
+    local f = io.popen(cmd .. " 2>&1; echo __LUTHON_EXIT_CODE__$?")
     local output = f:read("*a")
     f:close()
-    -- LuaJIT io.popen returns exit code via close
-    local rc = 0 -- simplified; actual exit code handling varies
+    -- Parse exit code from output
+    local rc = 0
+    output = output:gsub("__LUTHON_EXIT_CODE__(%d+)$", function(code) rc = tonumber(code); return "" end)
     return subprocess.CompletedProcess(cmd, rc, output, nil)
   else
-    local rc = os.execute(cmd)
+    local ok = os.execute(cmd)
+    local rc = ok and 0 or 1
     return subprocess.CompletedProcess(cmd, rc, nil, nil)
   end
 end
@@ -836,7 +896,12 @@ ast.dump = function(node, indent)
 end
 
 ast.parse = function(source)
-  error("ast.parse is not available in Lua target; parse Python source before transpiling", 2)
+  -- Try to use the Lua parser if available
+  local ok, parser = pcall(require, "luthon.lua.parser")
+  if ok then
+    return parser.parse(source)
+  end
+  error("ast.parse is not available in Lua target; Python source must be parsed before transpilation using luthon.transpile()", 2)
 end
 
 ast.iter_fields = function(node)

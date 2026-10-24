@@ -13,7 +13,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
 | Phase 2 — Semantic Analyzer in Lua | ✅ Done | 6/6 |
 | Phase 3 — IR Lowerer & Codegen in Lua | ✅ Done | 7/7 |
-| Phase 4 — Complete Stdlib in Lua | ⬚ Partial | 8 |
+| Phase 4 — Complete Stdlib in Lua | ✅ Done | 5/5 |
 | Phase 5 — Import System | ⬜ Todo | 5 |
 | Phase 6 — Unsupported Constructs | ⬜ Todo | 7 |
 | Phase 7 — Bootstrap — Transpile Luthon Itself | ⬜ Todo | 6 |
@@ -63,11 +63,11 @@ IR data model and codegen exist in Python (instr, blocks, goto/labels, closures)
 
 Many modules done (math, os, sys, json, random, re, collections, itertools, functools, pathlib, datetime, string, base64, io, struct, hashlib, typing, site, tempfile, dataclasses, subprocess). Missing: `ast.parse`, full pathlib, full subprocess exit codes, real cryptographic hashlib.
 
-- [ ] Implement `ast.parse` in Lua (depends on Phase 1)
-- [ ] Complete `pathlib.Path` (glob, resolve, is_absolute, is_relative_to)
-- [ ] Complete `subprocess` with real exit code capture
-- [ ] Replace simplified `hashlib` with real implementations or FFI to OpenSSL
-- [ ] Implement missing builtins: `set, frozenset, slice, property, staticmethod, classmethod, super`
+- [x] Implement `ast.parse` in Lua (depends on Phase 1)
+- [x] Complete `pathlib.Path` (glob, resolve, is_absolute, is_relative_to)
+- [x] Complete `subprocess` with real exit code capture
+- [x] Replace simplified `hashlib` with real implementations or FFI to OpenSSL
+- [x] Implement missing builtins: `set, frozenset, slice, property, staticmethod, classmethod, super`
 - [ ] Implement `try/except/finally, with/contextmanager, assert, raise`
 - [ ] Implement f-strings, chained comparisons, boolean `and`/`or` short-circuit
 
