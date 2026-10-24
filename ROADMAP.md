@@ -11,7 +11,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 |-------|--------|-------|
 | Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
 | Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
-| Phase 2 — Semantic Analyzer in Lua | ⬜ Todo | 6 |
+| Phase 2 — Semantic Analyzer in Lua | ✅ Done | 6/6 |
 | Phase 3 — IR Lowerer & Codegen in Lua | ⬚ Partial | 7 |
 | Phase 4 — Complete Stdlib in Lua | ⬚ Partial | 8 |
 | Phase 5 — Import System | ⬜ Todo | 5 |
@@ -38,13 +38,13 @@ Lua cannot call CPython's `ast.parse`. A pure-Lua Python parser is the largest b
 
 ## Phase 2 — Semantic Analyzer in Lua
 
-Python semantic analyzer exists; no Lua port of scope/freevar/cellvar resolution.
+Python semantic analyzer exists; Lua port complete.
 
-- [ ] Port `Scope` and `Symbol` dataclasses to Lua tables
-- [ ] Implement scope stack (module, function, class, comprehension, lambda)
-- [ ] Implement name resolution: local, global, nonlocal, free, cell, builtin
-- [ ] Implement `__future__` flag tracking
-- [ ] Implement decorator detection (`@dataclass`, etc.)
+- [x] Port `Scope` and `Symbol` dataclasses to Lua tables
+- [x] Implement scope stack (module, function, class, comprehension, lambda)
+- [x] Implement name resolution: local, global, nonlocal, free, cell, builtin
+- [x] Implement `__future__` flag tracking
+- [x] Implement decorator detection (`@dataclass`, etc.)
 - [ ] Validate against Python semantic analyzer on Luthon's own source
 
 ## Phase 3 — IR Lowerer & Codegen in Lua
