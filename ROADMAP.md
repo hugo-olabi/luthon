@@ -10,7 +10,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase | Status | Steps |
 |-------|--------|-------|
 | Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
-| Phase 1 — Python Parser in Lua | ⬜ Todo | 5 |
+| Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
 | Phase 2 — Semantic Analyzer in Lua | ⬜ Todo | 6 |
 | Phase 3 — IR Lowerer & Codegen in Lua | ⬚ Partial | 7 |
 | Phase 4 — Complete Stdlib in Lua | ⬚ Partial | 8 |
@@ -30,11 +30,11 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 
 Lua cannot call CPython's `ast.parse`. A pure-Lua Python parser is the largest blocker.
 
-- [ ] Define the Lua AST node schema — `Module, FunctionDef, ClassDef, Assign, Name, Call, BinOp, Compare, Constant, List, Dict, Subscript, Attribute, If, While, For, Return, Lambda, Import, etc.`
-- [ ] Write a Python tokenizer/lexer — identifiers, keywords, operators, strings, numbers, comments, indentation/dedent tracking
-- [ ] Write a recursive-descent parser — expressions, statements, suites, function/class definitions, imports
-- [ ] Produce AST nodes matching Luthon's IR input — `lineno, col_offset, args, body, targets, value, ops, comparators`
-- [ ] Validate round-trip against CPython `ast.dump` — parse small Python file, compare structure with CPython output
+- [x] Define the Lua AST node schema — `Module, FunctionDef, ClassDef, Assign, Name, Call, BinOp, Compare, Constant, List, Dict, Subscript, Attribute, If, While, For, Return, Lambda, Import, etc.`
+- [x] Write a Python tokenizer/lexer — identifiers, keywords, operators, strings, numbers, comments, indentation/dedent tracking
+- [x] Write a recursive-descent parser — expressions, statements, suites, function/class definitions, imports
+- [x] Produce AST nodes matching IR lowerer expectations — `lineno, col_offset, args, body, targets, value, ops, comparators`
+- [x] Validate round-trip against CPython `ast.dump` — parse small Python file, compare structure with CPython output
 
 ## Phase 2 — Semantic Analyzer in Lua
 
