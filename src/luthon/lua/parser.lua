@@ -53,7 +53,7 @@ local TT = {
 -- Operators (multi-char first, then single-char)
 local OPS_MULTI = {
   ["=="] = "Eq", ["!="] = "NotEq", ["<="] = "LtE", [">="] = "GtE",
-  ["<<"] = "LShift", [">>"] = "RShift", ["**"] = "Pow",
+  ["<<"] = "LShift", [">>"] = "RShift", ["**"] = "Pow", ["//"] = "FloorDiv",
   ["+="] = "Add", ["-="] = "Sub", ["*="] = "Mult", ["/="] = "Div",
   ["%="] = "Mod", ["&="] = "BitAnd", ["|="] = "BitOr", ["^="] = "BitXor",
   ["//="] = "FloorDiv", ["<<="] = "LShiftE", [">>="] = "RShiftE", ["@="] = "MatMult",
@@ -254,17 +254,23 @@ function Lexer:handle_newline()
     table.insert(self.indent_stack, indent)
     self.indent_pending = "INDENT"
   elseif indent < cur then
-    -- pop dedents
-    local dedented = false
+    -- pop dedents: emit one DEDENT per level popped
+    local popped = 0
     while #self.indent_stack > 1 and self.indent_stack[#self.indent_stack] > indent do
         table.remove(self.indent_stack)
-        dedented = true
+        popped = popped + 1
     end
-    if dedented then
+    if popped > 0 then
+      if popped == 1 then
         self.indent_pending = "DEDENT"
-    elseif self.indent_stack[#self.indent_stack] ~= indent then
-        error("IndentationError: unexpected indent at line " .. self.line)
+      else
+        -- Emit first DEDENT now, queue the rest as pending_dedents
+        self.indent_pending = "DEDENT"
+        self.pending_dedents = (self.pending_dedents or 0) + (popped - 1)
+      end
     end
+  elseif self.indent_stack[#self.indent_stack] ~= indent then
+      error("IndentationError: unexpected indent at line " .. self.line)
   end
 end
 
@@ -279,6 +285,11 @@ function Lexer:tokenize()
       local t = self.indent_pending
       self.indent_pending = nil
       table.insert(self.tokens, {type = t, line = self.line, col = self.col})
+      -- Emit any additional queued DEDENTs (one per popped level beyond the first)
+      while self.pending_dedents and self.pending_dedents > 0 do
+        self.pending_dedents = self.pending_dedents - 1
+        table.insert(self.tokens, {type = "DEDENT", line = self.line, col = self.col})
+      end
     end
 
     self:skip_whitespace()
@@ -468,10 +479,12 @@ end
 function Parser:expect(ttype, value)
   local tok = self:peek()
   if tok.type ~= ttype then
-    error("ParseError: expected " .. ttype .. " got " .. tok.type .. " at line " .. tok.line)
+    local prev = self.tokens[self.pos - 1]
+    error("ParseError: expected " .. ttype .. (value and (" '" .. value .. "'") or "") .. " got " .. tok.type .. " ('" .. tostring(tok.value) .. "') at line " .. tok.line .. " col " .. tok.col .. " (prev tok=" .. (prev and (prev.type .. " '" .. tostring(prev.value) .. "' line " .. prev.line) or "none") .. ")")
   end
   if value and tok.value ~= value then
-    error("ParseError: expected " .. value .. " got " .. tok.value .. " at line " .. tok.line)
+    local prev = self.tokens[self.pos - 1]
+    error("ParseError: expected '" .. value .. "' got '" .. tostring(tok.value) .. "' at line " .. tok.line .. " col " .. tok.col .. " (prev tok=" .. (prev and (prev.type .. " '" .. tostring(prev.value) .. "' line " .. prev.line) or "none") .. ")")
   end
   return self:advance()
 end
@@ -844,12 +857,14 @@ function Parser:try_stmt()
   end
   local orelse = {}
   if self:match(TT.NAME, "else") then
+    self:expect(TT.OP, ":")
     self:match(TT.NEWLINE)
     if self:check(TT.INDENT) then orelse = self:new_suite()
     else orelse = {self:simple_stmt()} end
   end
   local finalbody = {}
   if self:match(TT.NAME, "finally") then
+    self:expect(TT.OP, ":")
     self:match(TT.NEWLINE)
     if self:check(TT.INDENT) then finalbody = self:new_suite()
     else finalbody = {self:simple_stmt()} end
@@ -960,7 +975,7 @@ end
 -- Expression parsing (precedence climbing)
 ------------------------------------------------------------------------------
 function Parser:test()
-  return self:or_test()
+  return self:if_exp()
 end
 
 function Parser:or_test()
@@ -1461,7 +1476,7 @@ end
 function Parser:parse_expr_from_string(expr_str)
   local lexer = Lexer.new(expr_str)
   local p = Parser.new(lexer.tokens)
-  local result = p:test_nocond()
+  local result = p:expr()
   p:expect(TT.EOF)
   return result
 end
@@ -1480,17 +1495,41 @@ function Parser:_strip_fstring_quotes(str_value)
   return content
 end
 
--- Find the first occurrence of `special` at brace-depth 0 within `s`.
+-- Find the first occurrence of `special` at top-level delimiter depth (outside {}, [], (), and quotes) within `s`.
 local function _split_at_depth0(s, special)
-  local d = 0
+  local brace = 0
+  local bracket = 0
+  local paren = 0
+  local in_quote = nil
+  local escape = false
   for j = 1, #s do
     local ch = s:sub(j, j)
-    if ch == "{" then
-      d = d + 1
-    elseif ch == "}" then
-      d = d - 1
-    elseif d == 0 and ch == special then
-      return j
+    if in_quote then
+      if escape then
+        escape = false
+      elseif ch == "\\" then
+        escape = true
+      elseif ch == in_quote then
+        in_quote = nil
+      end
+    else
+      if ch == "'" or ch == '"' then
+        in_quote = ch
+      elseif ch == "{" then
+        brace = brace + 1
+      elseif ch == "}" then
+        brace = math.max(0, brace - 1)
+      elseif ch == "[" then
+        bracket = bracket + 1
+      elseif ch == "]" then
+        bracket = math.max(0, bracket - 1)
+      elseif ch == "(" then
+        paren = paren + 1
+      elseif ch == ")" then
+        paren = math.max(0, paren - 1)
+      elseif brace == 0 and bracket == 0 and paren == 0 and ch == special then
+        return j
+      end
     end
   end
   return nil
@@ -1518,16 +1557,30 @@ function Parser:parse_fstring(str_value, line, col)
         table.insert(values, node(NT.Constant, {value = _lua_str("{"), lineno = line, col_offset = col}))
         i = i + 2
       else
-        -- Find matching closing brace, tracking nesting depth
+        -- Find matching closing brace, tracking nesting depth and string literals
         i = i + 1 -- skip {
         local expr_start = i
         local depth = 1
+        local in_q = nil
+        local esc = false
         while i <= len and depth > 0 do
           local cc = content:sub(i, i)
-          if cc == "{" then
-            depth = depth + 1
-          elseif cc == "}" then
-            depth = depth - 1
+          if in_q then
+            if esc then
+              esc = false
+            elseif cc == "\\" then
+              esc = true
+            elseif cc == in_q then
+              in_q = nil
+            end
+          else
+            if cc == "'" or cc == '"' then
+              in_q = cc
+            elseif cc == "{" then
+              depth = depth + 1
+            elseif cc == "}" then
+              depth = depth - 1
+            end
           end
           if depth > 0 then
             i = i + 1
@@ -1685,15 +1738,6 @@ end
 ------------------------------------------------------------------------------
 function parser.parse(source)
   local lexer = Lexer.new(source)
-  -- Debug: print first few tokens
-  if #lexer.tokens > 0 then
-    for i = 1, math.min(5, #lexer.tokens) do
-      local t = lexer.tokens[i]
-      print("DEBUG token " .. i .. ": " .. t.type .. " = " .. tostring(t.value) .. " (line " .. t.line .. ")")
-    end
-  else
-    print("DEBUG: no tokens!")
-  end
   local parser_inst = Parser.new(lexer.tokens)
   return parser_inst:parse()
 end

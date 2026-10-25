@@ -54,6 +54,12 @@ local function _emit(ins)
       return ins.result .. " = nil"
     end
     if type(v) == "string" then
+      -- If already quoted (starts and ends with matching quotes)
+      if (v:sub(1,1) == '"' and v:sub(-1,-1) == '"') or (v:sub(1,1) == "'" and v:sub(-1,-1) == "'") then
+        local unquoted = v:sub(2, -2)
+        local escaped = unquoted:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+        return ins.result .. " = \"" .. escaped .. "\""
+      end
       local escaped = v:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
       return ins.result .. " = \"" .. escaped .. "\""
     end
@@ -73,6 +79,10 @@ local function _emit(ins)
   elseif o == "BINOP" then
     local l = args[2] or "nil"
     local r = args[3] or "nil"
+    local op_name = (args[1] or ""):lower()
+    if op_name == "floordiv" then
+      return ins.result .. " = math.floor(" .. l .. " / " .. r .. ")"
+    end
     local mapped = _lua_op(args[1])
     return ins.result .. " = " .. l .. " " .. mapped .. " " .. r
   elseif o == "UNOP" then
@@ -112,7 +122,9 @@ local function _emit(ins)
   elseif o == "END_TRY" then
     return "end)\nif not ok then\n    local _exc = err\n    local _exc_matched = false"
   elseif o == "END_CATCH" then
-    return "    if not _exc_matched then error(_exc) end\nend"
+    return "    _exc_matched = true"
+  elseif o == "END_ALL_CATCH" then
+    return "    if not _exc_matched then error(tostring(_exc)) end\nend"
   elseif o == "DO" then
     return "do"
   elseif o == "END" then
@@ -217,6 +229,9 @@ function M.generate(module, skip_prelude)
       local prefix = fn.name:sub(1, dot - 1)
       local meth = fn.name:sub(dot + 1)
       table.insert(out, prefix .. "." .. meth .. " = function(" .. table.concat(fn.params, ", ") .. ")")
+    elseif fn.name == "main" and fn.is_entry_point then
+      -- Module entry point: use a distinct name to avoid recursion with user-defined main()
+      table.insert(out, "local function _luthon_module_entry(" .. table.concat(fn.params, ", ") .. ")")
     else
       table.insert(out, "local function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
     end
@@ -272,9 +287,13 @@ function M.generate(module, skip_prelude)
   -- Runtime helpers for exceptions, asserts and context managers.
   if not skip_prelude then
     table.insert(out, "function _luthon_exc_match(exc, cls)")
-    table.insert(out, "  if type(exc) ~= \"table\" then return false end")
+    table.insert(out, "  if type(exc) ~= \"table\" then")
+    table.insert(out, "    if cls == \"Exception\" or cls == \"BaseException\" or cls == Exception or cls == BaseException then return true end")
+    table.insert(out, "    return false")
+    table.insert(out, "  end")
     table.insert(out, "  local tname = type(cls) == \"string\" and cls or (cls.__name or cls.__type or tostring(cls))")
-    table.insert(out, "  return exc.__type == tname")
+    table.insert(out, "  if tname == \"Exception\" or tname == \"BaseException\" then return true end")
+    table.insert(out, "  return exc.__type == tname or exc.__name == tname")
     table.insert(out, "end")
     table.insert(out, "")
     table.insert(out, "function _luthon_assert_fail(test, msg)")
@@ -286,15 +305,19 @@ function M.generate(module, skip_prelude)
     table.insert(out, "function _luthon_with_exit(ctx) return ctx.__exit__(ctx, nil, nil, nil) end")
     table.insert(out, "")
     -- Exception classes that are both matchable by `except` and constructable via `raise X(...)`.
-    for _, cls in ipairs({"ValueError", "TypeError", "AssertionError", "NameError", "KeyError", "IndexError"}) do
+    for _, cls in ipairs({
+      "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
+      "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+      "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError"
+    }) do
       table.insert(out, cls .. " = {__name = \"" .. cls .. "\", __type = \"" .. cls .. "\"}")
-      table.insert(out, "setmetatable(" .. cls .. ", {__call = function(c, m) return {__type = c.__type, __msg = tostring(m or \"\")} end})")
+      table.insert(out, "setmetatable(" .. cls .. ", {__call = function(c, m) return {__name = c.__name, __type = c.__type, __msg = tostring(m or \"\")} end})")
     end
     table.insert(out, "")
   end
 
   -- Run module-level code
-  table.insert(out, "main()")
+  table.insert(out, "_luthon_module_entry()")
 
   return table.concat(out, "\n") .. "\n"
 end

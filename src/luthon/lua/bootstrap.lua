@@ -56,7 +56,17 @@ function float(x) return tonumber(x) or 0.0 end
 
 function abs(x) return math.abs(x) end
 
-function bool(x) return x ~= nil and x ~= false end
+function bool(x)
+  if x == nil or x == false then return false end
+  if type(x) == "number" then return x ~= 0 end
+  if type(x) == "string" then return #x > 0 end
+  if type(x) == "table" then
+    if x.__bool__ then return x:__bool__() end
+    if x.__len__ then return x:__len__() > 0 end
+    return next(x) ~= nil
+  end
+  return true
+end
 
 function round(x, n)
   n = n or 0
@@ -136,53 +146,52 @@ function all(t)
 end
 
 ------------------------------------------------------------------------------
--- String methods (attached via metatable)
+-- String methods (attached to string table)
 ------------------------------------------------------------------------------
 
-local strmt = {}
-strmt.__index = function(s, k)
-  if type(k) == "string" then
-    if k == "upper" then
-      return function(self) return string.upper(self) end
-    elseif k == "lower" then
-      return function(self) return string.lower(self) end
-    elseif k == "strip" then
-      return function(self) return self:match("^%s*(.-)%s*$") end
-    elseif k == "split" then
-      return function(self, sep)
-        sep = sep or "%s"
-        local r = {}
-        for part in self:gmatch("([^" .. sep .. "]+)") do r[#r + 1] = part end
-        return r
-      end
-    elseif k == "replace" then
-      return function(self, a, b) return self:gsub(a, b) end
-    elseif k == "startswith" then
-      return function(self, p) return self:sub(1, #p) == p end
-    elseif k == "endswith" then
-      return function(self, p) return self:sub(-#p) == p end
-    elseif k == "find" then
-      return function(self, p) return self:find(p, 1, true) end
-    end
-  end
-  return nil
+string.upper = string.upper
+string.lower = string.lower
+string.strip = function(self) return string.match(self, "^%s*(.-)%s*$") end
+string.lstrip = function(self) return string.match(self, "^%s*(.-)$") end
+string.rstrip = function(self) return string.match(self, "^(.-)%s*$") end
+string.split = function(self, sep)
+  sep = sep or "%s"
+  local r = {}
+  for part in string.gmatch(self, "([^" .. sep .. "]+)") do r[#r + 1] = part end
+  return r
 end
-debug.setmetatable("", strmt)
+string.replace = function(self, a, b) return (string.gsub(self, a, b)) end
+string.startswith = function(self, p) return string.sub(self, 1, #p) == p end
+string.endswith = function(self, p) return string.sub(self, -#p) == p end
+string.find = function(self, p)
+  local pos = string.find(self, p, 1, true)
+  return pos and (pos - 1) or -1
+end
+string.join = function(self, t)
+  local r = {}
+  for i, v in ipairs(t or {}) do r[#r + 1] = tostring(v) end
+  return table.concat(r, self)
+end
 
 ------------------------------------------------------------------------------
 -- Exception classes (matchable by except, constructable via raise)
 ------------------------------------------------------------------------------
 
 for _, cls in ipairs({
-  "ValueError", "TypeError", "AssertionError", "NameError",
-  "KeyError", "IndexError",
+  "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
+  "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+  "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError"
 }) do
-  _G[cls] = { __name = cls, __type = cls }
-  setmetatable(_G[cls], {
+  local exc_tbl = { __name = cls, __type = cls }
+  setmetatable(exc_tbl, {
     __call = function(c, m)
-      return { __type = c.__type, __msg = tostring(m or "") }
+      return { __name = c.__name, __type = c.__type, __msg = tostring(m or "") }
     end,
+    __tostring = function(e)
+      return e.__type .. (e.__msg and (": " .. e.__msg) or "")
+    end
   })
+  _G[cls] = exc_tbl
 end
 
 ------------------------------------------------------------------------------
@@ -190,9 +199,15 @@ end
 ------------------------------------------------------------------------------
 
 function _luthon_exc_match(exc, cls)
-  if type(exc) ~= "table" then return false end
+  if type(exc) ~= "table" then
+    if cls == "Exception" or cls == "BaseException" or cls == Exception or cls == BaseException then
+      return true
+    end
+    return false
+  end
   local tname = type(cls) == "string" and cls or (cls.__name or cls.__type or tostring(cls))
-  return exc.__type == tname
+  if tname == "Exception" or tname == "BaseException" then return true end
+  return exc.__type == tname or exc.__name == tname
 end
 
 function _luthon_assert_fail(test, msg)
@@ -261,6 +276,16 @@ end
 
 function _luthon_not_in(a, b)
   return not _luthon_in(a, b)
+end
+
+-- Override error to handle exception tables
+local _error = error
+error = function(err, level)
+  if type(err) == "table" then
+    _error(tostring(err), level or 1)
+  else
+    _error(err, level or 1)
+  end
 end
 
 -- Module system
