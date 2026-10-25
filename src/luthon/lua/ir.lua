@@ -68,10 +68,26 @@ local BINOP_MAP = {
   ["%"] = "mod", ["**"] = "pow", ["//"] = "floordiv",
   ["<"] = "lt", ["<="] = "le", [">"] = "gt", [">="] = "ge",
   ["=="] = "eq", ["!="] = "ne",
+  -- Parser emits capitalized AST operator type names; accept those too.
+  ["Add"] = "add", ["Sub"] = "sub", ["Mult"] = "mul", ["Div"] = "div",
+  ["FloorDiv"] = "floordiv", ["Mod"] = "mod", ["Pow"] = "pow",
+  ["LShift"] = "<<", ["RShift"] = ">>",
+  ["BitAnd"] = "band", ["BitOr"] = "bor", ["BitXor"] = "bxor", ["MatMult"] = "matmul",
+  ["LShiftE"] = "LShift", ["RShiftE"] = "RShift",
 }
 
+local BUILTIN_MODULES = {}
+
 local UNARY_OP_MAP = {
-  ["USub"] = "neg", ["UAdd"] = "pos", ["Not"] = "not",
+  ["USub"] = "neg", ["UAdd"] = "pos", ["Not"] = "not", ["Invert"] = "inv",
+}
+
+local CMPOP_MAP = {
+  ["=="] = "eq", ["!="] = "ne", ["<"] = "lt", ["<="] = "le",
+  [">"] = "gt", [">="] = "ge",
+  ["Eq"] = "eq", ["NotEq"] = "ne", ["Lt"] = "lt", ["LtE"] = "le",
+  ["Gt"] = "gt", ["GtE"] = "ge",
+  ["Is"] = "is", ["IsNot"] = "isnot", ["In"] = "in", ["NotIn"] = "notin",
 }
 
 local CMPOP_MAP = {
@@ -190,6 +206,22 @@ function IRLowerer:lower_stmt(node)
         end
       end
     end
+  elseif t == "Delete" then
+    -- del target -> set to nil (or delete attribute/item)
+    for _, tgt in ipairs(node.targets or {}) do
+      local nil_tmp = self:_new_tmp()
+      self:_emit("CONST", {nil}, nil_tmp)
+      if tgt._type == "Name" then
+        self:_emit("STORE", {tgt.id, nil_tmp})
+      elseif tgt._type == "Attribute" then
+        local obj = self:lower_expr(tgt.value)
+        self:_emit("SET_ATTR", {obj, tgt.attr, nil_tmp})
+      elseif tgt._type == "Subscript" then
+        local base = self:lower_expr(tgt.value)
+        local sl = self:lower_expr(tgt.slice)
+        self:_emit("STORE_SUBSCR", {base, sl, nil_tmp})
+      end
+    end
   elseif t == "AugAssign" then
     local lhs = self:lower_expr(node.target)
     local rhs = self:lower_expr(node.value)
@@ -206,6 +238,17 @@ function IRLowerer:lower_stmt(node)
     else
       self:_emit("RETURN", {})
     end
+  elseif t == "Assert" then
+    -- assert condition [, msg] -> _luthon_assert_fail(condition, msg)
+    local cond = self:lower_expr(node.test)
+    local msg_tmp = nil
+    if node.msg then
+      msg_tmp = self:lower_expr(node.msg)
+    else
+      msg_tmp = self:_new_tmp()
+      self:_emit("CONST", {nil}, msg_tmp)
+    end
+    self:_emit("CALL", {"_luthon_assert_fail", cond, msg_tmp}, self:_new_tmp())
   elseif t == "If" then
     local cond = self:lower_expr(node.test)
     local then_lbl = self:_new_label("then")
@@ -328,8 +371,61 @@ function IRLowerer:lower_stmt(node)
         self:_emit("LOAD", {name}, self:_new_tmp())
       end
     end
+  elseif t == "Try" then
+    -- try/except/finally
+    local try_block = self:_new_block("try")
+    self._cur_block = try_block
+    -- emit TRY_BEGIN marker
+    self:_emit("TRY_BEGIN", {}, self:_new_tmp())
+    -- lower try body
+    for _, s in ipairs(node.body or {}) do
+      self:lower_stmt(s)
+    end
+    -- end try block
+    self:_emit("END_TRY", {}, self:_new_tmp())
+    -- except handlers
+    local handlers = node.handlers or {}
+    local finally_label = self:_new_label("finally")
+    local end_label = self:_new_label("end_try")
+    local handler_blocks = {}
+    for i, h in ipairs(handlers) do
+      local handler_lbl = self:_new_label("except")
+      table.insert(handler_blocks, handler_lbl)
+      self._cur_block = self:_new_block(handler_lbl)
+      -- bind exception variable
+      if h.name then
+        self:_emit("CELL_GET", {"__exc__"}, self:_new_tmp()) -- placeholder
+      end
+      for _, s in ipairs(h.body or {}) do
+        self:lower_stmt(s)
+      end
+      self:_emit("END_CATCH", {}, self:_new_tmp())
+    end
+    -- else clause (not supported yet)
+    if node.orelse and #node.orelse > 0 then
+      -- fall through to except, emit error if no except matched
+      self:_emit("END_TRY", {}, self:_new_tmp())
+    end
+    -- finally block
+    if node.finalbody and #node.finalbody > 0 then
+      self._cur_block = self:_new_block(finally_label)
+      for _, s in ipairs(node.finalbody or {}) do
+        self:lower_stmt(s)
+      end
+      self:_emit("END_TRY", {}, self:_new_tmp())
+    end
+    self._cur_block = self:_new_block(end_label)
   elseif t == "Pass" then
     -- no-op
+  elseif t == "AnnAssign" then
+    -- Annotated assignment: no runtime code needed (type declarations)
+    -- If there's a value, lower it as a regular assignment
+    if node.value then
+      local val = self:lower_expr(node.value)
+      if node.target._type == "Name" then
+        self:_emit("STORE", {node.target.id, val})
+      end
+    end
   elseif t == "ClassDef" then
     -- Check for @dataclass decorator
     local is_dataclass = false
@@ -339,7 +435,7 @@ function IRLowerer:lower_stmt(node)
       elseif dec._type == "Attribute" and dec.attr == "dataclass" then
         is_dataclass = true
       elseif dec._type == "Call" then
-        if dec.func._type == "Name" and df.id == "dataclass" then
+        if dec.func._type == "Name" and dec.func.id == "dataclass" then
           is_dataclass = true
         elseif df._type == "Attribute" and df.attr == "dataclass" then
           is_dataclass = true
@@ -564,6 +660,37 @@ function IRLowerer:lower_expr(node)
     local res = self:_new_tmp()
     self:_emit("BINOP", {self:_binop(node.op), l, r}, res)
     return res
+  elseif t == "BoolOp" then
+    local op = node.op
+    local op_name = type(op) == "string" and op or op._type  -- "And" or "Or"
+    local result = self:_new_tmp()
+    -- Evaluate left operand first
+    local left_tmp = self:lower_expr(node.values[1])
+    local end_lbl = self:_new_label("bool_end")
+    if op_name == "And" then
+        -- a and b: if not a then goto false_label (result is _t1)
+        local false_lbl = self:_new_label("and_false")
+        self:_emit("BRANCH_FALSE", {left_tmp, false_lbl})
+        -- Evaluate right operand
+        local right_tmp = self:lower_expr(node.values[2])
+        self:_emit("STORE", {right_tmp, result})
+        self:_emit("JUMP", {end_lbl})
+        self._cur_block = self:_new_block(false_lbl)
+        self:_emit("STORE", {left_tmp, result})
+        self._cur_block = self:_new_block(end_lbl)
+    elseif op_name == "Or" then
+        -- a or b: if a then goto true_label (result is _t1)
+        local true_lbl = self:_new_label("or_true")
+        self:_emit("BRANCH_TRUE", {left_tmp, true_lbl})
+        -- Evaluate right operand
+        local right_tmp = self:lower_expr(node.values[2])
+        self:_emit("STORE", {right_tmp, result})
+        self:_emit("JUMP", {end_lbl})
+        self._cur_block = self:_new_block(true_lbl)
+        self:_emit("STORE", {left_tmp, result})
+        self._cur_block = self:_new_block(end_lbl)
+    end
+    return result
   elseif t == "UnaryOp" then
     local v = self:lower_expr(node.operand)
     local res = self:_new_tmp()
@@ -571,10 +698,26 @@ function IRLowerer:lower_expr(node)
     return res
   elseif t == "Compare" then
     local l = self:lower_expr(node.left)
-    local r = self:lower_expr(node.comparators[1])
-    local res = self:_new_tmp()
-    self:_emit("CMP", {self:_cmpop(node.ops[1]), l, r}, res)
-    return res
+    local ops = node.ops or {}
+    local comparators = node.comparators or {}
+    local result = self:_new_tmp()
+    local current = l
+    for i, op in ipairs(ops) do
+      local r = self:lower_expr(comparators[i])
+      local cmp_res = self:_new_tmp()
+      self:_emit("CMP", {self:_cmpop(op), l, r}, cmp_res)
+      if i > 1 then
+        -- Combine with previous comparison using AND
+        local prev_res = result
+        local new_res = self:_new_tmp()
+        self:_emit("BINOP", {"and", prev_res, cmp_res}, new_res)
+        result = new_res
+      else
+        result = cmp_res
+      end
+      l = r  -- chain: next comparison starts from current right
+    end
+    return result
   elseif t == "Call" then
     if node.func._type == "Attribute" then
       -- module-level / builtin functions: don't prepend self
@@ -607,6 +750,18 @@ function IRLowerer:lower_expr(node)
     local a = self:lower_expr(node.body)
     local b = self:lower_expr(node.orelse)
     self:_emit("SELECT", {cond, a, b}, res)
+    return res
+  elseif t == "Slice" then
+    -- Slice(lower, upper, step) -> _luthon_slice(lower, upper, step)
+    local lower = node.lower and self:lower_expr(node.lower) or nil
+    local upper = node.upper and self:lower_expr(node.upper) or nil
+    local step = node.step and self:lower_expr(node.step) or nil
+    local args = {}
+    if lower then table.insert(args, lower) end
+    if upper then table.insert(args, upper) end
+    if step then table.insert(args, step) end
+    local res = self:_new_tmp()
+    self:_emit("CALL", {"_luthon_slice", unpack(args)}, res)
     return res
   elseif t == "List" then
     local res = self:_new_tmp()
@@ -650,6 +805,91 @@ function IRLowerer:lower_expr(node)
     self:_emit("JUMP", {loop_lbl})
     self._cur_block = self:_new_block(end_lbl)
     return res
+  elseif t == "SetComp" then
+    -- {elt for target in iter [if cond]} -> set built via SET_ADD
+    local res = self:_new_tmp()
+    self:_emit("MAKE_SET", {}, res)
+    local gen = node.generators[1]
+    local iter_tmp = self:_new_tmp()
+    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
+    local loop_lbl = self:_new_label("scomp")
+    local body_lbl = self:_new_label("sbody")
+    local end_lbl = self:_new_label("send")
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(loop_lbl)
+    local nxt = self:_new_tmp()
+    self:_emit("NEXT", {iter_tmp}, nxt)
+    self:_emit("BRANCH_NONE", {nxt, end_lbl})
+    if gen.target._type == "Name" then
+      self:_emit("STORE", {gen.target.id, nxt})
+    end
+    if gen.ifs and #gen.ifs > 0 then
+      local cond = self:lower_expr(gen.ifs[1])
+      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
+      self._cur_block = self:_new_block(body_lbl)
+    end
+    local val = self:lower_expr(node.elt)
+    self:_emit("SET_ADD", {res, val})
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(end_lbl)
+    return res
+  elseif t == "DictComp" then
+    -- {key: value for target in iter [if cond]} -> dict built via DICT_SET
+    local res = self:_new_tmp()
+    self:_emit("MAKE_DICT", {}, res)
+    local gen = node.generators[1]
+    local iter_tmp = self:_new_tmp()
+    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
+    local loop_lbl = self:_new_label("dcomp")
+    local body_lbl = self:_new_label("dbody")
+    local end_lbl = self:_new_label("dend")
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(loop_lbl)
+    local nxt = self:_new_tmp()
+    self:_emit("NEXT", {iter_tmp}, nxt)
+    self:_emit("BRANCH_NONE", {nxt, end_lbl})
+    if gen.target._type == "Name" then
+      self:_emit("STORE", {gen.target.id, nxt})
+    end
+    if gen.ifs and #gen.ifs > 0 then
+      local cond = self:lower_expr(gen.ifs[1])
+      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
+      self._cur_block = self:_new_block(body_lbl)
+    end
+    local key = self:lower_expr(node.key)
+    local value = self:lower_expr(node.value)
+    self:_emit("DICT_SET", {res, key, value})
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(end_lbl)
+    return res
+  elseif t == "GeneratorExp" then
+    -- (elt for target in iter [if cond]) -> eager list, like ListComp
+    local res = self:_new_tmp()
+    self:_emit("MAKE_LIST", {}, res)
+    local gen = node.generators[1]
+    local iter_tmp = self:_new_tmp()
+    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
+    local loop_lbl = self:_new_label("gen")
+    local body_lbl = self:_new_label("genbody")
+    local end_lbl = self:_new_label("genend")
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(loop_lbl)
+    local nxt = self:_new_tmp()
+    self:_emit("NEXT", {iter_tmp}, nxt)
+    self:_emit("BRANCH_NONE", {nxt, end_lbl})
+    if gen.target._type == "Name" then
+      self:_emit("STORE", {gen.target.id, nxt})
+    end
+    if gen.ifs and #gen.ifs > 0 then
+      local cond = self:lower_expr(gen.ifs[1])
+      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
+      self._cur_block = self:_new_block(body_lbl)
+    end
+    local val = self:lower_expr(node.elt)
+    self:_emit("LIST_APPEND", {res, val})
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(end_lbl)
+    return res
   elseif t == "Dict" then
     local res = self:_new_tmp()
     local items = {}
@@ -680,6 +920,41 @@ function IRLowerer:lower_expr(node)
     local res = self:_new_tmp()
     self:_emit("MAKE_FUNCTION", {fn.name}, res)
     return res
+  elseif t == "JoinedStr" then
+    -- f-string: concatenate all parts using Lua's .. operator.
+    -- FormattedValue parts are wrapped in tostring() since their type is unknown.
+    local values = node.values or {}
+    if #values == 0 then
+      local res = self:_new_tmp()
+      self:_emit("CONST", {""}, res)
+      return res
+    end
+
+    -- Lower the first value
+    local res = self:lower_expr(values[1])
+    if values[1]._type == "FormattedValue" then
+      local tmp = self:_new_tmp()
+      self:_emit("CALL", {"tostring", res}, tmp)
+      res = tmp
+    end
+
+    -- Concatenate remaining values
+    for i = 2, #values do
+      local val = self:lower_expr(values[i])
+      if values[i]._type == "FormattedValue" then
+        local tmp = self:_new_tmp()
+        self:_emit("CALL", {"tostring", val}, tmp)
+        val = tmp
+      end
+      local new_res = self:_new_tmp()
+      self:_emit("BINOP", {"concat", res, val}, new_res)
+      res = new_res
+    end
+
+    return res
+  elseif t == "FormattedValue" then
+    -- {expr[!conv][:format]} -> lower the inner expression; conversion/format handled by JoinedStr
+    return self:lower_expr(node.value)
   else
     -- fallback
     local res = self:_new_tmp()
@@ -694,19 +969,19 @@ end
 
 function IRLowerer:_binop(op)
   if type(op) == "string" then
-    local m = {["+"]="add",["-"]="sub",["*"]="mul",["/"]="div",["%"]="mod",["**"]="pow",["//"]="floordiv",["<"]="lt",["<="]="le",[">"]="gt",[">="]="ge",["=="]="eq",["!="]="ne",["Lt"]="lt",["LtE"]="le",["Gt"]="gt",["GtE"]="ge",["Eq"]="eq",["NotEq"]="ne"}
+    local m = {["+"]="add",["-"]="sub",["*"]="mul",["/"]="div",["%"]="mod",["**"]="pow",["//"]="floordiv",["<"]="lt",["<="]="le",[">"]="gt",[">="]="ge",["=="]="eq",["!="]="ne",
+               ["Add"]="add",["Sub"]="sub",["Mult"]="mul",["Div"]="div",["FloorDiv"]="floordiv",["Mod"]="mod",["Pow"]="pow",
+               ["LShift"]="<<",["RShift"]=">>",["BitAnd"]="band",["BitOr"]="bor",["BitXor"]="bxor",["MatMult"]="matmul"}
     local r = m[op] or op
-    if r ~= op then print("DEBUG _binop string: '" .. op .. "' -> '" .. r .. "'") end
     return r
   end
   local r = BINOP_MAP[op._type] or op._type
-  if r ~= op._type then print("DEBUG _binop table: '" .. tostring(op._type) .. "' -> '" .. r .. "'") end
   return r
 end
 
 function IRLowerer:_unop(op)
   if type(op) == "string" then
-    local m = {["-"]="neg",["+"]="pos",["not"]="not"}
+    local m = {["-"]="neg",["+"]="pos",["not"]="not",["USub"]="neg",["UAdd"]="pos",["Not"]="not",["Invert"]="inv"}
     return m[op] or op
   end
   return UNARY_OP_MAP[op._type] or op._type
@@ -714,7 +989,8 @@ end
 
 function IRLowerer:_cmpop(op)
   if type(op) == "string" then
-    local m = {["=="]="eq",["!="]="ne",["<"]="lt",["<="]="le",[">"]="gt",[">="]="ge",["is"]="eq",["is not"]="ne",["in"]="in",["not in"]="notin"}
+    local m = {["=="]="eq",["!="]="ne",["<"]="lt",["<="]="le",[">"]="gt",[">="]="ge",["is"]="eq",["is not"]="ne",["in"]="in",["not in"]="notin",
+               ["Eq"]="eq",["NotEq"]="ne",["Lt"]="lt",["LtE"]="le",["Gt"]="gt",["GtE"]="ge",["Is"]="is",["IsNot"]="isnot",["In"]="in",["NotIn"]="notin"}
     return m[op] or op
   end
   return CMPOP_MAP[op._type] or op._type

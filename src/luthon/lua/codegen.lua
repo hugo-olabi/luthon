@@ -13,6 +13,7 @@ local M = {}
 local _OP_MAP = {
   ["add"] = "+", ["sub"] = "-", ["mul"] = "*", ["div"] = "/",
   ["mod"] = "%", ["pow"] = "^",
+  ["concat"] = "..",
   ["lt"] = "<", ["le"] = "<=", ["gt"] = ">", ["ge"] = ">=",
   ["eq"] = "==", ["ne"] = "~=",
   ["Lt"] = "<", ["LtE"] = "<=", ["Gt"] = ">", ["GtE"] = ">=",
@@ -24,6 +25,9 @@ local _CMP_MAP = {
   ["gt"] = ">", ["ge"] = ">=",
   ["Lt"] = "<", ["LtE"] = "<=", ["Gt"] = ">", ["GtE"] = ">=",
   ["Eq"] = "==", ["Neq"] = "~=",
+  ["Is"] = "==", ["IsNot"] = "~=",
+  ["is"] = "==", ["isnot"] = "~=",
+  ["In"] = "_luthon_in", ["NotIn"] = "_luthon_not_in",
 }
 
 ------------------------------------------------------------------------------
@@ -49,11 +53,23 @@ local function _emit(ins)
     if v == nil then
       return ins.result .. " = nil"
     end
+    if type(v) == "string" then
+      local escaped = v:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+      return ins.result .. " = \"" .. escaped .. "\""
+    end
     return ins.result .. " = " .. tostring(v)
   elseif o == "LOAD" then
     return ins.result .. " = " .. args[1]
   elseif o == "STORE" then
     return args[1] .. " = " .. args[2]
+  elseif o == "GET_ATTR" then
+    return ins.result .. " = " .. args[1] .. "." .. args[2]
+  elseif o == "SET_ATTR" then
+    return args[1] .. "." .. args[2] .. " = " .. args[3]
+  elseif o == "GET_ITEM" then
+    return ins.result .. " = " .. args[1] .. "[" .. args[2] .. "]"
+  elseif o == "SET_ITEM" then
+    return args[1] .. "[" .. args[2] .. "] = " .. args[3]
   elseif o == "BINOP" then
     local l = args[2] or "nil"
     local r = args[3] or "nil"
@@ -75,8 +91,15 @@ local function _emit(ins)
     return "if " .. args[1] .. " then goto " .. args[2] .. " else goto " .. args[3] .. " end"
   elseif o == "BRANCH_NONE" then
     return "if " .. args[1] .. " == nil then goto " .. args[2] .. " end"
+  elseif o == "BRANCH_TRUE" then
+    return "if " .. args[1] .. " then goto " .. args[2] .. " end"
+  elseif o == "BRANCH_FALSE" then
+    return "if not " .. args[1] .. " then goto " .. args[2] .. " end"
   elseif o == "CMP" then
     local c = _CMP_MAP[args[1]] or args[1]
+    if c == "_luthon_in" or c == "_luthon_not_in" then
+      return ins.result .. " = " .. c .. "(" .. args[2] .. ", " .. args[3] .. ")"
+    end
     return ins.result .. " = (" .. args[2] .. " " .. c .. " " .. args[3] .. ")"
   elseif o == "CALL" then
     local lua_args = {}
@@ -84,6 +107,12 @@ local function _emit(ins)
       table.insert(lua_args, tostring(args[i]))
     end
     return ins.result .. " = " .. args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
+  elseif o == "TRY_BEGIN" then
+    return "local ok, err = pcall(function()"
+  elseif o == "END_TRY" then
+    return "end)\nif not ok then\n    local _exc = err\n    local _exc_matched = false"
+  elseif o == "END_CATCH" then
+    return "    if not _exc_matched then error(_exc) end\nend"
   elseif o == "DO" then
     return "do"
   elseif o == "END" then
@@ -104,7 +133,24 @@ local function _emit(ins)
   elseif o == "MAKE_TUPLE" then
     return ins.result .. " = {" .. table.concat(args, ", ") .. "}"
   elseif o == "MAKE_DICT" then
+    local lines = {ins.result .. " = {}"}
+    for _, it in ipairs(args) do
+      local k, v = it[1], it[2]
+      if k then
+        table.insert(lines, ins.result .. "[" .. k .. "] = " .. v)
+      end
+    end
+    return table.concat(lines, "\n")
+  elseif o == "MAKE_SET" then
     return ins.result .. " = {}"
+  elseif o == "MAKE_TABLE" then
+    return ins.result .. " = {}"
+  elseif o == "STORE_SUBSCR" then
+    return args[1] .. "[" .. args[2] .. "] = " .. args[3]
+  elseif o == "SET_ADD" then
+    return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
+  elseif o == "DICT_SET" then
+    return args[1] .. "[" .. args[2] .. "] = " .. args[3]
   elseif o == "LIST_APPEND" then
     return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
   elseif o == "NEXT" then
@@ -122,8 +168,11 @@ end
 -- Module codegen
 ------------------------------------------------------------------------------
 
-function M.generate(module)
+function M.generate(module, skip_prelude)
   local out = {}
+  if not skip_prelude then
+    table.insert(out, M.prelude())
+  end
 
   -- Collect function names for upvalue propagation
   local fnames = {}
@@ -220,7 +269,62 @@ function M.generate(module)
     table.insert(out, "setmetatable(" .. c .. ", {__call = function(cls, ...) local self = {}; for k,v in pairs(cls) do self[k]=v end; cls.__init__(self, ...); return self end})")
   end
 
+  -- Runtime helpers for exceptions, asserts and context managers.
+  if not skip_prelude then
+    table.insert(out, "function _luthon_exc_match(exc, cls)")
+    table.insert(out, "  if type(exc) ~= \"table\" then return false end")
+    table.insert(out, "  local tname = type(cls) == \"string\" and cls or (cls.__name or cls.__type or tostring(cls))")
+    table.insert(out, "  return exc.__type == tname")
+    table.insert(out, "end")
+    table.insert(out, "")
+    table.insert(out, "function _luthon_assert_fail(test, msg)")
+    table.insert(out, "  if not test then error({__type = \"AssertionError\", __msg = tostring(msg or \"\")}) end")
+    table.insert(out, "  return true")
+    table.insert(out, "end")
+    table.insert(out, "")
+    table.insert(out, "function _luthon_with_enter(ctx) return ctx.__enter__(ctx) end")
+    table.insert(out, "function _luthon_with_exit(ctx) return ctx.__exit__(ctx, nil, nil, nil) end")
+    table.insert(out, "")
+    -- Exception classes that are both matchable by `except` and constructable via `raise X(...)`.
+    for _, cls in ipairs({"ValueError", "TypeError", "AssertionError", "NameError", "KeyError", "IndexError"}) do
+      table.insert(out, cls .. " = {__name = \"" .. cls .. "\", __type = \"" .. cls .. "\"}")
+      table.insert(out, "setmetatable(" .. cls .. ", {__call = function(c, m) return {__type = c.__type, __msg = tostring(m or \"\")} end})")
+    end
+    table.insert(out, "")
+  end
+
+  -- Run module-level code
+  table.insert(out, "main()")
+
   return table.concat(out, "\n") .. "\n"
+end
+
+------------------------------------------------------------------------------
+-- Builtin prelude (shared by every generated module)
+------------------------------------------------------------------------------
+
+function M.prelude()
+  local lines = {}
+  table.insert(lines, "function range(a, b, step)")
+  table.insert(lines, "  if b == nil then a, b = 0, a; step = 1 end")
+  table.insert(lines, "  if step == nil then step = 1 end")
+  table.insert(lines, "  local r = {}")
+  table.insert(lines, "  if step > 0 then for i = a, b - 1, step do r[#r+1] = i end")
+  table.insert(lines, "  else for i = a, b + 1, step do r[#r+1] = i end end")
+  table.insert(lines, "  return r")
+  table.insert(lines, "end")
+  table.insert(lines, "function len(t) return #t end")
+  table.insert(lines, "function list(t) local r = {} for i,v in ipairs(t or {}) do r[i]=v end return r end")
+  table.insert(lines, "function sum(t) local s = 0 for _,v in ipairs(t or {}) do s = s + v end return s end")
+  table.insert(lines, "function iter(t)")
+  table.insert(lines, "  local i = 0")
+  table.insert(lines, "  return function()")
+  table.insert(lines, "    i = i + 1")
+  table.insert(lines, "    if t[i] ~= nil then return t[i] end")
+  table.insert(lines, "    return nil")
+  table.insert(lines, "  end")
+  table.insert(lines, "end")
+  return table.concat(lines, "\n") .. "\n"
 end
 
 return M

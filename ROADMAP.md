@@ -10,10 +10,12 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase | Status | Steps |
 |-------|--------|-------|
 | Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
+| Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
+| Phase 2 — Semantic Analyzer in Lua | ✅ Done | 6/6 |
 | Phase 3 — IR Lowerer & Codegen in Lua | ✅ Done | 7/7 |
 | Phase 4 — Complete Stdlib in Lua | ✅ Done | 5/5 |
-| Phase 5 — Import System | 🔄 In Progress | 2/5 |
-| Phase 6 — Unsupported Constructs | ⬜ Todo | 7 |
+| Phase 5 — Import System & Package Resolution | ✅ Done | 5/5 |
+| Phase 6 — Unsupported Constructs | ✅ Done | 7/7 |
 | Phase 7 — Bootstrap — Transpile Luthon Itself | ⬜ Todo | 6 |
 | Phase 8 — Correctness & Optimization | ⬜ Todo | 5 |
 
@@ -81,23 +83,24 @@ Many modules done (math, os, sys, json, random, re, collections, itertools, func
 
 ## Phase 6 — Unsupported Constructs (long tail)
 
-`try/except`, `with`, `assert`, f-strings, chained comparisons, boolean `and`/`or` not yet in IR.
+All Phase 6 constructs implemented.
 
-- [ ] Implement `try/except/finally` with exception objects and traceback
-- [ ] Implement `with/contextlib.contextmanager`
-- [ ] Implement set/dict comprehensions and generator expressions
-- [ ] Implement f-strings
-- [ ] Implement chained comparisons (`a < b < c`)
-- [ ] Implement boolean `and`/`or` as short-circuit expressions
-- [ ] Implement `del`, `nonlocal`, `global` statement edge cases
+- [x] Implement set/dict comprehensions and generator expressions
+- [x] Implement boolean `and`/`or` as short-circuit expressions
+- [x] Implement `try/except/finally` with exception objects and traceback
+- [x] Implement `with/contextlib.contextmanager`
+- [x] Implement `assert`
+- [x] Implement f-strings
+- [x] Implement chained comparisons (`a < b < c`)
+- [x] Implement `del`, `nonlocal`, `global` statement edge cases
 
 ## Phase 7 — Bootstrap — Transpile Luthon Itself
 
-Not started. Requires Phases 1–6.
+Requires Phases 1–6.
 
-- [ ] Create `bootstrap.lua`: Lua runtime prelude (stdlib + IR runtime helpers)
-- [ ] Write Lua driver `luthon_lua.lua`: read `.py`, parse, analyze, lower to IR, generate Lua
-- [ ] Transpile Luthon's own source files one at a time
+- [x] Create `bootstrap.lua`: Lua runtime prelude (stdlib + IR runtime helpers)
+- [x] Write Lua driver `luthon_lua.lua`: read `.py`, parse, analyze, lower to IR, generate Lua
+- [x] Transpile Luthon's own source files one at a time
 - [ ] Fix semantic mismatches (truthiness, integer division, string methods, exception types)
 - [ ] Run transpiled Luthon under LuaJIT on a small test program
 - [ ] Compare output against CPython Luthon on the same input

@@ -56,7 +56,7 @@ local OPS_MULTI = {
   ["<<"] = "LShift", [">>"] = "RShift", ["**"] = "Pow",
   ["+="] = "Add", ["-="] = "Sub", ["*="] = "Mult", ["/="] = "Div",
   ["%="] = "Mod", ["&="] = "BitAnd", ["|="] = "BitOr", ["^="] = "BitXor",
-  ["//="] = "FloorDiv", ["@="] = "MatMult",
+  ["//="] = "FloorDiv", ["<<="] = "LShiftE", [">>="] = "RShiftE", ["@="] = "MatMult",
   ["@"] = "MatMult", ["->"] = "Arrow", [":="] = "ColonEq",
 }
 local OPS_SINGLE = {
@@ -234,15 +234,21 @@ end
 function Lexer:handle_newline()
   -- Only emit NEWLINE/INDENT/DEDENT at logical line start
   if self.in_paren > 0 then
-    self.newline_pending = "NL"
+    -- Inside parens/brackets, newlines are whitespace - skip entirely
     return
   end
   self.newline_pending = "NEWLINE"
   -- Check indentation of next line (count BEFORE skipping whitespace)
   -- Note: self.pos already points past the \n
+  local save_pos = self.pos
   local indent = 0
   while self:peek() == " " do indent = indent + 1; self:advance() end
   while self:peek() == "\t" do indent = indent + 1; self:advance() end
+  -- Blank line: skip indentation changes
+  if self:peek() == "\n" then
+    self.pos = save_pos
+    return
+  end
   local cur = self.indent_stack[#self.indent_stack]
   if indent > cur then
     table.insert(self.indent_stack, indent)
@@ -298,6 +304,11 @@ function Lexer:tokenize()
     elseif c:match("[0-9]") then
       local num = self:read_number()
       table.insert(self.tokens, {type = TT.NUMBER, value = num, line = self.line, col = self.col})
+    -- Bytes literal prefix: b"..." or B"..." (treated as string in Lua)
+    elseif (c == "b" or c == "B") and (self:peek(1) == '"' or self:peek(1) == "'") then
+      self:advance() -- skip b/B prefix
+      local str = self:read_string()
+      table.insert(self.tokens, {type = TT.STRING, value = str, line = self.line, col = self.col})
     elseif c:match("[%w_]") then
       local word = self:read_ident()
       table.insert(self.tokens, {type = TT.NAME, value = word, line = self.line, col = self.col})
@@ -494,14 +505,18 @@ function Parser:new_suite()
   -- expects NEWLINE already consumed, now expect INDENT
   self:expect(TT.INDENT)
   local stmts = {}
-  while not self:check(TT.DEDENT) and not self:check(TT.EOF) do
-    if self:check(TT.NEWLINE) or self:check(TT.NL) then
+  while not self:check(TT.DEDENT) and not self:check(TT.EOF)
+      and not self:check(TT.NAME, "elif") and not self:check(TT.NAME, "else")
+      and not self:check(TT.NAME, "except") do
+    if self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.COMMENT) then
       self:advance()
     else
       table.insert(stmts, self:stmt())
     end
   end
-  self:expect(TT.DEDENT)
+  if self:check(TT.DEDENT) then
+    self:expect(TT.DEDENT)
+  end
   return stmts
 end
 
@@ -582,17 +597,35 @@ function Parser:small_stmt()
 end
 
 function Parser:expr_stmt()
-  local test = self:test()
-  if self:check(TT.OP, "=") or self:check2(TT.OP, "+=", TT.OP, "-=") or self:check2(TT.OP, "*=", TT.OP, "/=") or self:check2(TT.OP, "%=", TT.OP, "&=") or self:check2(TT.OP, "|=", TT.OP, "|=") or self:check2(TT.OP, "^=", TT.OP, "^=") or self:check2(TT.OP, "//=", TT.OP, "//=") then
+  local test = self:expr()
+  -- Handle tuple unpacking targets: a, b = expr
+  local targets = {test}
+  if self:check(TT.OP, ",") then
+    repeat
+      self:advance() -- consume comma
+      table.insert(targets, self:expect(TT.NAME))
+    until not self:match(TT.OP, ",")
+  end
+  if self:check(TT.OP, "=") or self:check2(TT.OP, "+=", TT.OP, "-=") or self:check2(TT.OP, "*=", TT.OP, "/=") or self:check2(TT.OP, "%=", TT.OP, "&=") or self:check2(TT.OP, "|=", TT.OP, "|=") or self:check2(TT.OP, "^=", TT.OP, "^=") or self:check2(TT.OP, "//=", TT.OP, "//=") or self:check2(TT.OP, "<<=", TT.OP, ">>=") then
     local op_tok = self:advance()
     local op = BINOP_MAP[op_tok.value] or "Assign"
-    local value = self:test()
+    local value = self:expr()
     self:match(TT.NEWLINE)
     if op == "Assign" then
-      return node(NT.Assign, {targets = {test}, value = value, lineno = op_tok.line, col_offset = op_tok.col})
+      return node(NT.Assign, {targets = targets, value = value, lineno = op_tok.line, col_offset = op_tok.col})
     else
       return node(NT.AugAssign, {target = test, op = op, value = value, lineno = op_tok.line, col_offset = op_tok.col})
     end
+  end
+  -- Annotated assignment: target: type [= value]
+  if self:match(TT.OP, ":") then
+    local annotation = self:expr()
+    local value = nil
+    if self:match(TT.OP, "=") then
+      value = self:expr()
+    end
+    self:match(TT.NEWLINE)
+    return node(NT.AnnAssign, {target = test, annotation = annotation, value = value, lineno = 0, col_offset = 0})
   end
   self:match(TT.NEWLINE)
   return node(NT.Expr, {value = test, lineno = test.lineno, col_offset = test.col_offset})
@@ -643,14 +676,18 @@ end
 
 function Parser:arguments()
   local args = {}
+  local defaults = {}
   while not self:check(TT.OP, ")") do
     local arg_name = self:expect(TT.NAME).value
     local annotation = nil
     if self:match(TT.OP, ":") then annotation = self:expr() end
-    table.insert(args, {arg = arg_name, annotation = annotation, lineno = 0, col_offset = 0, _type = "arg"})
+    local default = nil
+    if self:match(TT.OP, "=") then default = self:expr() end
+    table.insert(args, {arg = arg_name, annotation = annotation, default = default, lineno = 0, col_offset = 0, _type = "arg"})
+    if default then table.insert(defaults, default) end
     if not self:match(TT.OP, ",") then break end
   end
-  return {args = args, vararg = nil, kwonlyargs = {}, kw_defaults = {}, kwarg = nil, defaults = {}, _type = "arguments"}
+  return {args = args, vararg = nil, kwonlyargs = {}, kw_defaults = {}, kwarg = nil, defaults = defaults, _type = "arguments"}
 end
 
 function Parser:class_def()
@@ -712,33 +749,63 @@ function Parser:while_stmt()
   local test = self:expr()
   self:expect(TT.OP, ":")
   self:match(TT.NEWLINE)
-  local body = self:new_suite()
-  local orelse = {}
-  if self:match(TT.NAME, "else") then
-    self:expect(TT.OP, ":")
-    self:match(TT.NEWLINE)
-    if self:check(TT.INDENT) then orelse = self:new_suite()
-    else orelse = {self:simple_stmt()} end
+  self:match(TT.NL)
+  if self:check(TT.INDENT) then
+    local body = self:new_suite()
+    local orelse = {}
+    if self:match(TT.NAME, "else") then
+      self:expect(TT.OP, ":")
+      self:match(TT.NEWLINE)
+      self:match(TT.NL)
+      if self:check(TT.INDENT) then orelse = self:new_suite()
+      else orelse = {self:simple_stmt()} end
+    end
+    return node(NT.While, {test = test, body = body, orelse = orelse, lineno = 0, col_offset = 0})
+  else
+    local body = {self:simple_stmt()}
+    local orelse = {}
+    if self:match(TT.NAME, "else") then
+      self:expect(TT.OP, ":")
+      self:match(TT.NEWLINE)
+      self:match(TT.NL)
+      if self:check(TT.INDENT) then orelse = self:new_suite()
+      else orelse = {self:simple_stmt()} end
+    end
+    return node(NT.While, {test = test, body = body, orelse = orelse, lineno = 0, col_offset = 0})
   end
-  return node(NT.While, {test = test, body = body, orelse = orelse, lineno = 0, col_offset = 0})
 end
 
 function Parser:for_stmt()
   self:expect(TT.NAME, "for")
-  local target = self:expr()
+  local target = self:comp_target()
   self:expect(TT.NAME, "in")
   local iter = self:expr()
   self:expect(TT.OP, ":")
   self:match(TT.NEWLINE)
-  local body = self:new_suite()
-  local orelse = {}
-  if self:match(TT.NAME, "else") then
-    self:expect(TT.OP, ":")
-    self:match(TT.NEWLINE)
-    if self:check(TT.INDENT) then orelse = self:new_suite()
-    else orelse = {self:simple_stmt()} end
+  self:match(TT.NL)
+  if self:check(TT.INDENT) then
+    local body = self:new_suite()
+    local orelse = {}
+    if self:match(TT.NAME, "else") then
+      self:expect(TT.OP, ":")
+      self:match(TT.NEWLINE)
+      self:match(TT.NL)
+      if self:check(TT.INDENT) then orelse = self:new_suite()
+      else orelse = {self:simple_stmt()} end
+    end
+    return node(NT.For, {target = target, iter = iter, body = body, orelse = orelse, lineno = 0, col_offset = 0})
+  else
+    local body = {self:simple_stmt()}
+    local orelse = {}
+    if self:match(TT.NAME, "else") then
+      self:expect(TT.OP, ":")
+      self:match(TT.NEWLINE)
+      self:match(TT.NL)
+      if self:check(TT.INDENT) then orelse = self:new_suite()
+      else orelse = {self:simple_stmt()} end
+    end
+    return node(NT.For, {target = target, iter = iter, body = body, orelse = orelse, lineno = 0, col_offset = 0})
   end
-  return node(NT.For, {target = target, iter = iter, body = body, orelse = orelse, lineno = 0, col_offset = 0})
 end
 
 function Parser:with_stmt()
@@ -758,6 +825,7 @@ end
 
 function Parser:try_stmt()
   self:expect(TT.NAME, "try")
+  self:expect(TT.OP, ":")
   self:match(TT.NEWLINE)
   local body = self:new_suite()
   local handlers = {}
@@ -768,6 +836,8 @@ function Parser:try_stmt()
       typ = self:expr()
       if self:match(TT.NAME, "as") then name = self:expect(TT.NAME).value end
     end
+    self:match(TT.NEWLINE)
+    self:expect(TT.OP, ":")
     self:match(TT.NEWLINE)
     local hbody = self:new_suite()
     table.insert(handlers, {type = typ, name = name, body = hbody, lineno = 0, col_offset = 0})
@@ -838,6 +908,11 @@ end
 function Parser:import_from_stmt()
   self:expect(TT.NAME, "from")
   local module = nil
+  local level = 0
+  -- Handle relative imports: leading dots
+  while self:match(TT.OP, ".") do
+    level = level + 1
+  end
   if not self:match(TT.NAME, "import") then
     local parts = {self:expect(TT.NAME).value}
     while self:match(TT.OP, ".") do table.insert(parts, self:expect(TT.NAME).value) end
@@ -861,7 +936,6 @@ function Parser:import_from_stmt()
       table.insert(names, {name = name, asname = alias})
     until not self:match(TT.OP, ",")
   end
-  local level = 0 -- not handling relative imports yet
   self:match(TT.NEWLINE)
   return node(NT.ImportFrom, {module = module, names = names, level = level, lineno = 0, col_offset = 0})
 end
@@ -922,11 +996,13 @@ function Parser:comparison()
   while self:check2(TT.OP, "==", TT.OP, "!=")
       or self:check2(TT.OP, "<", TT.OP, "<=")
       or self:check2(TT.OP, ">", TT.OP, ">=")
-      or self:check(TT.NAME, "is") or self:check(TT.NAME, "in") do
+      or self:check(TT.NAME, "is") or self:check(TT.NAME, "in")
+      or self:check(TT.NAME, "not") do
     local op_tok = self:advance()
     local op = CMPOP_MAP[op_tok.value] or op_tok.value
     if op_tok.value == "is" and self:match(TT.NAME, "not") then op = "IsNot" end
     if op_tok.value == "in" and self:match(TT.NAME, "not") then op = "NotIn" end
+    if op_tok.value == "not" and self:match(TT.NAME, "in") then op = "NotIn" end
     table.insert(ops, op)
     table.insert(comparators, self:arith_expr())
   end
@@ -936,9 +1012,29 @@ function Parser:comparison()
   return left
 end
 
+function Parser:expr_or_starred()
+  if self:check(TT.OP, "*") then
+    self:advance()
+    local inner = self:expr()
+    return node(NT.Starred, {value = inner, lineno = 0, col_offset = 0})
+  end
+  return self:expr()
+end
+
 function Parser:arith_expr()
-  local result = self:term()
+  local result = self:shift_expr()
   while self:check2(TT.OP, "+", TT.OP, "-") do
+    local op_tok = self:advance()
+    local op = BINOP_MAP[op_tok.value]
+    local right = self:shift_expr()
+    result = node(NT.BinOp, {left = result, op = op, right = right, lineno = 0, col_offset = 0})
+  end
+  return result
+end
+
+function Parser:shift_expr()
+  local result = self:term()
+  while self:check2(TT.OP, "<<", TT.OP, ">>") do
     local op_tok = self:advance()
     local op = BINOP_MAP[op_tok.value]
     local right = self:term()
@@ -950,7 +1046,10 @@ end
 function Parser:term()
   local result = self:factor()
   while self:check2(TT.OP, "*", TT.OP, "/")
-      or self:check2(TT.OP, "%", TT.OP, "//") do
+      or self:check2(TT.OP, "%", TT.OP, "//")
+      or self:check(TT.OP, "|")
+      or self:check(TT.OP, "&")
+      or self:check(TT.OP, "^") do
     local op_tok = self:advance()
     local op = BINOP_MAP[op_tok.value]
     local right = self:factor()
@@ -969,8 +1068,180 @@ function Parser:factor()
   return self:power()
 end
 
+------------------------------------------------------------------------------
+-- Comprehension / generator-expression helpers
+-- Parses one or more 'for'/'if' clauses: for target in iter [if cond] [...]
+------------------------------------------------------------------------------
+
+-- Parse a comprehension target: a name or a parenthesized tuple of names.
+-- Stops before the 'in' keyword (which comparison() would otherwise consume).
+function Parser:comp_target()
+  local t = self:peek()
+  if t.type == TT.NAME then
+    self:advance()
+    local name_node = node(NT.Name, {id = t.value, ctx = "Store", lineno = 0, col_offset = 0})
+    -- Handle comma-separated tuple: x, y in ... or name, (a, b) in ...
+    if self:match(TT.OP, ",") then
+      local elts = {name_node}
+      repeat
+        local t2 = self:peek()
+        if t2.type == TT.OP and t2.value == "(" then
+          -- Nested tuple: name, (a, b) in ...
+          self:advance() -- consume (
+          local inner = {}
+          if not self:check(TT.OP, ")") then
+            table.insert(inner, self:expect(TT.NAME))
+            while self:match(TT.OP, ",") do
+              if self:check(TT.OP, ")") then break end
+              table.insert(inner, self:expect(TT.NAME))
+            end
+          end
+          self:expect(TT.OP, ")")
+          table.insert(elts, node(NT.Tuple, {elts = inner, lineno = 0, col_offset = 0}))
+        else
+          local nt = self:expect(TT.NAME)
+          table.insert(elts, node(NT.Name, {id = nt.value, ctx = "Store", lineno = 0, col_offset = 0}))
+        end
+        if self:check(TT.NAME, "in") then break end
+      until not self:match(TT.OP, ",")
+      return node(NT.Tuple, {elts = elts, lineno = 0, col_offset = 0})
+    end
+    return name_node
+  elseif t.type == TT.OP and t.value == "(" then
+    self:advance()
+    local elts = {}
+    if not self:check(TT.OP, ")") then
+      table.insert(elts, self:comp_target())
+      while self:match(TT.OP, ",") do
+        if self:check(TT.OP, ")") then break end
+        table.insert(elts, self:comp_target())
+      end
+    end
+    self:expect(TT.OP, ")")
+    return node(NT.Tuple, {elts = elts, lineno = 0, col_offset = 0})
+  else
+    return self:expr()
+  end
+end
+
+-- Parse comp_iter clauses starting at a 'for' token.
+-- Returns a list of {target, iter, ifs} clause tables.
+function Parser:comp_clauses()
+  local clauses = {}
+  while self:check(TT.NAME, "for") do
+    self:advance() -- consume 'for'
+    local target = self:comp_target()
+    self:expect(TT.NAME, "in")
+    -- Use the non-ternary expression chain so a trailing 'if' starts a new
+    -- clause instead of being swallowed as a conditional expression.
+    local iter = self:test_nocond()
+    local ifs = {}
+    while self:match(TT.NAME, "if") do
+      table.insert(ifs, self:test_nocond())
+    end
+    table.insert(clauses, {target = target, iter = iter, ifs = ifs})
+  end
+  return clauses
+end
+
+-- Wrap a generator-expression body: '(' elt for target in iter [if cond] ')'.
+function Parser:genexp_body(elt)
+  local clauses = self:comp_clauses()
+  self:expect(TT.OP, ")")
+  return node(NT.GeneratorExp, {elt = elt, generators = clauses, lineno = 0, col_offset = 0})
+end
+
 function Parser:power()
   local base = self:atom()
+  -- postfix trailers: attribute access, subscript, call (bind tighter than **)
+  while true do
+    local t2 = self:peek()
+    if t2.type == TT.OP and t2.value == "." then
+      self:advance()
+      local name_tok = self:expect(TT.NAME)
+      base = node(NT.Attribute, {value = base, attr = name_tok.value, lineno = name_tok.line, col_offset = name_tok.col})
+    elseif t2.type == TT.OP and t2.value == "[" then
+      self:advance()
+      if self:check(TT.OP, "]") then
+        self:advance()
+        base = node(NT.Subscript, {value = base, slice = node(NT.Constant, {value = nil}), lineno = 0, col_offset = 0})
+      else
+        -- Handle slice notation: [start:stop:step]
+        local lower = nil
+        if not self:check(TT.OP, ":") then
+          lower = self:expr()
+        end
+        if self:match(TT.OP, ":") then
+          local upper = nil
+          if not self:check(TT.OP, "]") then
+            upper = self:expr()
+          end
+          local step = nil
+          if self:match(TT.OP, ":") then
+            if not self:check(TT.OP, "]") then
+              step = self:expr()
+            end
+          end
+          self:expect(TT.OP, "]")
+          base = node(NT.Subscript, {value = base, slice = node(NT.Slice, {lower = lower, upper = upper, step = step, lineno = 0, col_offset = 0}), lineno = 0, col_offset = 0})
+        else
+          local slices = {lower}
+          while self:match(TT.OP, ",") do
+            if self:check(TT.OP, "]") then break end
+            table.insert(slices, self:expr())
+          end
+          self:expect(TT.OP, "]")
+          if #slices == 1 then
+            base = node(NT.Subscript, {value = base, slice = slices[1], lineno = 0, col_offset = 0})
+          else
+            base = node(NT.Subscript, {value = base, slice = node(NT.Tuple, {elts = slices, lineno = 0, col_offset = 0}), lineno = 0, col_offset = 0})
+          end
+        end
+      end
+    elseif t2.type == TT.OP and t2.value == "(" then
+      self:advance()
+      local args = {}
+      local keywords = {}
+      if not self:check(TT.OP, ")") then
+        local first_arg = self:expr_or_starred()
+        if self:match(TT.OP, "=") then
+          local kw_name = first_arg.id or tostring(first_arg)
+          local kw_val = self:expr()
+          table.insert(keywords, {arg = kw_name, value = kw_val})
+        else
+          table.insert(args, first_arg)
+          -- Generator expression as call argument: f(elt for target in iter [if cond])
+          if self:check(TT.NAME, "for") then
+            local clauses = self:comp_clauses()
+            self:expect(TT.OP, ")")
+            local gen = node(NT.GeneratorExp, {elt = args[1], generators = clauses, lineno = 0, col_offset = 0})
+            base = node(NT.Call, {func = base, args = {gen}, lineno = 0, col_offset = 0})
+          end
+        end
+        while self:match(TT.OP, ",") do
+          if self:check(TT.OP, ")") then break end
+          local arg_expr = self:expr_or_starred()
+          if self:match(TT.OP, "=") then
+            local kw_name = arg_expr.id or tostring(arg_expr)
+            local kw_val = self:expr()
+            table.insert(keywords, {arg = kw_name, value = kw_val})
+          else
+            table.insert(args, arg_expr)
+          end
+        end
+      end
+      if self:check(TT.OP, ")") then
+        self:expect(TT.OP, ")")
+      end
+      local call_node = node(NT.Call, {func = base, args = args, lineno = 0, col_offset = 0})
+      if #keywords > 0 then
+        call_node.keywords = keywords
+      end
+      base = call_node
+    else
+      break
+    end
+  end
   if self:match(TT.OP, "**") then
     local exp = self:factor()
     return node(NT.BinOp, {left = base, op = "Pow", right = exp, lineno = 0, col_offset = 0})
@@ -994,24 +1265,92 @@ function Parser:atom()
     return node(NT.Constant, {value = tonumber(v), lineno = tok.line, col_offset = tok.col})
   elseif t == TT.STRING then
     self:advance()
-    return node(NT.Constant, {value = v, lineno = tok.line, col_offset = tok.col})
+    local result = node(NT.Constant, {value = v, lineno = tok.line, col_offset = tok.col})
+    -- Handle implicit string concatenation: "hello" "world" or "hello" f"world"
+    while true do
+        local next_tok = self:peek()
+        if next_tok.type == TT.STRING then
+            self:advance()
+            local next_node = node(NT.Constant, {value = next_tok.value, lineno = next_tok.line, col_offset = next_tok.col})
+            result = node(NT.BinOp, {left = result, op = "concat", right = next_node, lineno = 0, col_offset = 0})
+        elseif next_tok.type == TT.NAME and (next_tok.value == "f" or next_tok.value == "F") then
+            -- Check if f/F is followed by a string (f-string)
+            self:advance() -- consume f/F
+            local str_tok = self:peek()
+            if str_tok.type == TT.STRING then
+                self:advance() -- consume string
+                local fnode = self:parse_fstring(str_tok.value, str_tok.line, str_tok.col)
+                result = node(NT.BinOp, {left = result, op = "concat", right = fnode, lineno = 0, col_offset = 0})
+            else
+                -- Not an f-string, put f back? Can't un-advance easily.
+                -- Just break and let the caller handle the f token
+                break
+            end
+        else
+            break
+        end
+    end
+    return result
   elseif t == TT.NAME then
     self:advance()
+    -- f-string: f"..." or F"..."  (f immediately followed by a string literal)
+    if (v == "f" or v == "F") and self:check(TT.STRING) then
+      local str_tok = self:advance()
+      return self:parse_fstring(str_tok.value, str_tok.line, str_tok.col)
+    end
+    -- lambda: lambda args: body  (lambda is a NAME token, not OP)
+    if v == "lambda" then
+      local args = {}
+      if not self:check2(TT.NAME, "in", TT.NAME, "if") and not self:newline_or_eof() and not self:check(TT.OP, ":") then
+        repeat
+          table.insert(args, self:expect(TT.NAME).value)
+        until not self:match(TT.OP, ",")
+      end
+      self:expect(TT.OP, ":")
+      local body = self:expr()
+      return node(NT.Lambda, {args = args, body = body, lineno = tok.line, col_offset = tok.col})
+    end
     local ctx = "Load"
     local name_node = node(NT.Name, {id = v, ctx = ctx, lineno = tok.line, col_offset = tok.col})
     -- Check for function call: name(args)
     if self:check(TT.OP, "(") then
       self:advance() -- consume (
       local args = {}
+      local keywords = {}
       if not self:check(TT.OP, ")") then
-        table.insert(args, self:expr())
+        local first_arg = self:expr()
+        if self:match(TT.OP, "=") then
+          local kw_name = first_arg.id or tostring(first_arg)
+          local kw_val = self:expr()
+          table.insert(keywords, {arg = kw_name, value = kw_val})
+        else
+          table.insert(args, first_arg)
+        end
+        if self:check(TT.NAME, "for") then
+          -- generator expression as call argument: f(elt for target in iter [if cond])
+          local clauses = self:comp_clauses()
+          self:expect(TT.OP, ")")
+          local gen = node(NT.GeneratorExp, {elt = args[1], generators = clauses, lineno = 0, col_offset = 0})
+          return node(NT.Call, {func = name_node, args = {gen}, lineno = tok.line, col_offset = tok.col})
+        end
         while self:match(TT.OP, ",") do
           if self:check(TT.OP, ")") then break end
-          table.insert(args, self:expr())
+          local arg_expr = self:expr()
+          if self:match(TT.OP, "=") then
+            local kw_name = arg_expr.id or tostring(arg_expr)
+            local kw_val = self:expr()
+            table.insert(keywords, {arg = kw_name, value = kw_val})
+          else
+            table.insert(args, arg_expr)
+          end
         end
       end
       self:expect(TT.OP, ")")
-      return node(NT.Call, {func = name_node, args = args, lineno = tok.line, col_offset = tok.col})
+      local call_node = node(NT.Call, {func = name_node, args = args, lineno = tok.line, col_offset = tok.col})
+      if #keywords > 0 then
+        call_node.keywords = keywords
+      end
+      return call_node
     end
     return name_node
   elseif t == TT.OP then
@@ -1022,12 +1361,18 @@ function Parser:atom()
         return node(NT.Tuple, {elts = {}, lineno = 0, col_offset = 0})
       end
       local expr = self:expr()
+      if self:check(TT.NAME, "for") then
+        -- generator expression: (elt for target in iter [if cond])
+        local clauses = self:comp_clauses()
+        self:expect(TT.OP, ")")
+        return node(NT.GeneratorExp, {elt = expr, generators = clauses, lineno = 0, col_offset = 0})
+      end
       if self:match(TT.OP, ",") then
         local elts = {expr}
-        while self:match(TT.OP, ",") do
+        repeat
           if self:check(TT.OP, ")") then break end
           table.insert(elts, self:expr())
-        end
+        until not self:match(TT.OP, ",")
         self:expect(TT.OP, ")")
         return node(NT.Tuple, {elts = elts, lineno = 0, col_offset = 0})
       else
@@ -1041,12 +1386,18 @@ function Parser:atom()
         return node(NT.List, {elts = {}, lineno = 0, col_offset = 0})
       end
       local first = self:expr()
+      if self:check(TT.NAME, "for") then
+        -- list comprehension: [elt for target in iter [if cond]]
+        local clauses = self:comp_clauses()
+        self:expect(TT.OP, "]")
+        return node(NT.ListComp, {elt = first, generators = clauses, lineno = 0, col_offset = 0})
+      end
       if self:match(TT.OP, ",") then
         local elts = {first}
-        while self:match(TT.OP, ",") do
+        repeat
           if self:check(TT.OP, "]") then break end
           table.insert(elts, self:expr())
-        end
+        until not self:match(TT.OP, ",")
         self:expect(TT.OP, "]")
         return node(NT.List, {elts = elts, lineno = 0, col_offset = 0})
       else
@@ -1060,9 +1411,21 @@ function Parser:atom()
         return node(NT.Dict, {keys = {}, values = {}, lineno = 0, col_offset = 0})
       end
       local key = self:expr()
+      if self:check(TT.NAME, "for") then
+        -- set comprehension: {elt for target in iter [if cond]}
+        local clauses = self:comp_clauses()
+        self:expect(TT.OP, "}")
+        return node(NT.SetComp, {elt = key, generators = clauses, lineno = 0, col_offset = 0})
+      end
       if self:match(TT.OP, ":") then
         local keys = {key}
         local values = {self:expr()}
+        if self:check(TT.NAME, "for") then
+          -- dict comprehension: {k: v for target in iter [if cond]}
+          local clauses = self:comp_clauses()
+          self:expect(TT.OP, "}")
+          return node(NT.DictComp, {key = keys[1], value = values[1], generators = clauses, lineno = 0, col_offset = 0})
+        end
         while self:match(TT.OP, ",") do
           if self:check(TT.OP, "}") then break end
           table.insert(keys, self:expr())
@@ -1081,17 +1444,6 @@ function Parser:atom()
         self:expect(TT.OP, "}")
         return node(NT.Set, {elts = elts, lineno = 0, col_offset = 0})
       end
-    elseif v == "lambda" then
-      self:advance()
-      local args = {}
-      if not self:check2(TT.NAME, "in", TT.NAME, "if") and not self:newline_or_eof() then
-        repeat
-          table.insert(args, self:expect(TT.NAME).value)
-        until not self:match(TT.OP, ",")
-      end
-      self:expect(TT.OP, ":")
-      local body = self:expr()
-      return node(NT.Lambda, {args = args, body = body, lineno = 0, col_offset = 0})
     else
       error("Unexpected operator in atom: " .. v .. " at line " .. tok.line)
     end
@@ -1100,26 +1452,164 @@ function Parser:atom()
   end
 end
 
+------------------------------------------------------------------------------
+-- f-string parsing
+-- f"literal {expr} literal" -> JoinedStr with Constant and FormattedValue children
+------------------------------------------------------------------------------
+
+-- Parse a Python expression from a standalone string (used for f-string {expr} parts).
+function Parser:parse_expr_from_string(expr_str)
+  local lexer = Lexer.new(expr_str)
+  local p = Parser.new(lexer.tokens)
+  local result = p:test_nocond()
+  p:expect(TT.EOF)
+  return result
+end
+
+-- Strip surrounding quotes from an f-string token value and return the inner content.
+function Parser:_strip_fstring_quotes(str_value)
+  local content = str_value
+  local quote = content:sub(1, 1)
+  local triple = false
+  if content:sub(1, 3) == quote .. quote .. quote then
+    triple = true
+    content = content:sub(4, #content - 3)
+  else
+    content = content:sub(2, #content - 1)
+  end
+  return content
+end
+
+-- Find the first occurrence of `special` at brace-depth 0 within `s`.
+local function _split_at_depth0(s, special)
+  local d = 0
+  for j = 1, #s do
+    local ch = s:sub(j, j)
+    if ch == "{" then
+      d = d + 1
+    elseif ch == "}" then
+      d = d - 1
+    elseif d == 0 and ch == special then
+      return j
+    end
+  end
+  return nil
+end
+
+-- Wrap a string in Lua double quotes, escaping any embedded double quotes.
+local function _lua_str(s)
+  s = s:gsub('"', '\\"')
+  return '"' .. s .. '"'
+end
+
+-- Parse an f-string token value into a JoinedStr node.
+function Parser:parse_fstring(str_value, line, col)
+  local content = self:_strip_fstring_quotes(str_value)
+  local values = {}
+  local i = 1
+  local len = #content
+
+  while i <= len do
+    local c = content:sub(i, i)
+
+    if c == "{" then
+      -- Escaped {{
+      if content:sub(i, i + 1) == "{{" then
+        table.insert(values, node(NT.Constant, {value = _lua_str("{"), lineno = line, col_offset = col}))
+        i = i + 2
+      else
+        -- Find matching closing brace, tracking nesting depth
+        i = i + 1 -- skip {
+        local expr_start = i
+        local depth = 1
+        while i <= len and depth > 0 do
+          local cc = content:sub(i, i)
+          if cc == "{" then
+            depth = depth + 1
+          elseif cc == "}" then
+            depth = depth - 1
+          end
+          if depth > 0 then
+            i = i + 1
+          end
+        end
+        local inner = content:sub(expr_start, i - 1)
+        i = i + 1 -- skip closing }
+
+        -- Split off conversion (!r, !s, !a) and format spec (:...)
+        local conversion = nil
+        local conv_pos = _split_at_depth0(inner, "!")
+        local fmt_pos = _split_at_depth0(inner, ":")
+
+        if conv_pos then
+          conversion = inner:sub(conv_pos + 1, conv_pos + 1)
+          inner = inner:sub(1, conv_pos - 1)
+        end
+        if fmt_pos then
+          inner = inner:sub(1, fmt_pos - 1)
+        end
+
+        -- Trim whitespace from expression
+        inner = inner:match("^%s*(.-)%s*$")
+
+        local expr_node
+        if inner == "" or inner == nil then
+          error("Empty expression in f-string at line " .. line)
+        else
+          expr_node = self:parse_expr_from_string(inner)
+        end
+
+        table.insert(values, node(NT.FormattedValue, {
+          value = expr_node,
+          conversion = conversion,
+          lineno = line,
+          col_offset = col
+        }))
+      end
+    elseif c == "}" then
+      -- Escaped }}
+      if content:sub(i, i + 1) == "}}" then
+        table.insert(values, node(NT.Constant, {value = _lua_str("}"), lineno = line, col_offset = col}))
+        i = i + 2
+      else
+        error("Unexpected '}' in f-string at line " .. line)
+      end
+    else
+      -- Accumulate literal text
+      local lit_start = i
+      while i <= len do
+        local cc = content:sub(i, i)
+        if cc == "{" or cc == "}" then break end
+        i = i + 1
+      end
+      local lit = content:sub(lit_start, i - 1)
+      table.insert(values, node(NT.Constant, {value = _lua_str(lit), lineno = line, col_offset = col}))
+    end
+  end
+
+  return node(NT.JoinedStr, {values = values, lineno = line, col_offset = col})
+end
+
 function Parser:test_nocond()
   return self:or_test_nocond()
 end
 
 function Parser:or_test_nocond()
-  local node = self:and_test_nocond()
+  local result = self:and_test_nocond()
   while self:match(TT.NAME, "or") do
     local right = self:and_test_nocond()
-    node = node(NT.BoolOp, {op = "Or", values = {node, right}, lineno = 0, col_offset = 0})
+    result = node(NT.BoolOp, {op = "Or", values = {result, right}, lineno = 0, col_offset = 0})
   end
-  return node
+  return result
 end
 
 function Parser:and_test_nocond()
-  local node = self:not_test_nocond()
+  local result = self:not_test_nocond()
   while self:match(TT.NAME, "and") do
     local right = self:not_test_nocond()
-    node = node(NT.BoolOp, {op = "And", values = {node, right}, lineno = 0, col_offset = 0})
+    result = node(NT.BoolOp, {op = "And", values = {result, right}, lineno = 0, col_offset = 0})
   end
-  return node
+  return result
 end
 
 function Parser:not_test_nocond()
@@ -1137,11 +1627,13 @@ function Parser:comparison_nocond()
   while self:check2(TT.OP, "==", TT.OP, "!=")
       or self:check2(TT.OP, "<", TT.OP, "<=")
       or self:check2(TT.OP, ">", TT.OP, ">=")
-      or self:check(TT.NAME, "is") or self:check(TT.NAME, "in") do
+      or self:check(TT.NAME, "is") or self:check(TT.NAME, "in")
+      or self:check(TT.NAME, "not") do
     local op_tok = self:advance()
     local op = CMPOP_MAP[op_tok.value] or op_tok.value
     if op_tok.value == "is" and self:match(TT.NAME, "not") then op = "IsNot" end
     if op_tok.value == "in" and self:match(TT.NAME, "not") then op = "NotIn" end
+    if op_tok.value == "not" and self:match(TT.NAME, "in") then op = "NotIn" end
     table.insert(ops, op)
     table.insert(comparators, self:arith_expr())
   end
@@ -1152,14 +1644,14 @@ function Parser:comparison_nocond()
 end
 
 function Parser:if_exp()
-  local cond = self:or_test_nocond()
+  local body = self:or_test_nocond()
   if self:match(TT.NAME, "if") then
-    local body = self:or_test_nocond()
+    local cond = self:or_test_nocond()
     self:expect(TT.NAME, "else")
     local orelse = self:or_test_nocond()
     return node(NT.IfExp, {test = cond, body = body, orelse = orelse, lineno = 0, col_offset = 0})
   end
-  return cond
+  return body
 end
 
 function Parser:expr()
@@ -1173,7 +1665,7 @@ function Parser:parse()
   local stmts = {}
   local stmt_count = 0
   while not self:check(TT.EOF) do
-    if self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.DEDENT) then
+    if self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.DEDENT) or self:check(TT.COMMENT) then
       self:advance()
     else
       local stmt = self:stmt()
@@ -1193,6 +1685,15 @@ end
 ------------------------------------------------------------------------------
 function parser.parse(source)
   local lexer = Lexer.new(source)
+  -- Debug: print first few tokens
+  if #lexer.tokens > 0 then
+    for i = 1, math.min(5, #lexer.tokens) do
+      local t = lexer.tokens[i]
+      print("DEBUG token " .. i .. ": " .. t.type .. " = " .. tostring(t.value) .. " (line " .. t.line .. ")")
+    end
+  else
+    print("DEBUG: no tokens!")
+  end
   local parser_inst = Parser.new(lexer.tokens)
   return parser_inst:parse()
 end

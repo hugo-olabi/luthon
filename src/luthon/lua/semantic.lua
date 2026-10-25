@@ -341,7 +341,7 @@ end
 
 function SemanticAnalyzer:visit_Import(node)
   for _, n in ipairs(node.names or {}) do
-    local alias = n.asname or n.name:split(".")[1]
+    local alias = n.asname or n.name:match("([^%.]+)")
     scope_define(self:current(), alias, "local", n)
   end
 end
