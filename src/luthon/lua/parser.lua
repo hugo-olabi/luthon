@@ -592,7 +592,23 @@ function Parser:small_stmt()
   local v = tok.value
 
   if t == TT.NAME then
-    if v == "return" then self:advance(); local v = self:test(); self:match(TT.NEWLINE); return node(NT.Return, {value = v, lineno = tok.line, col_offset = tok.col})
+    if v == "return" then
+      self:advance()
+      local val = nil
+      if not self:newline_or_eof() then
+        val = self:test()
+        if self:match(TT.OP, ",") then
+          local elts = {val}
+          repeat
+            if not self:newline_or_eof() then
+              table.insert(elts, self:test())
+            end
+          until not self:match(TT.OP, ",")
+          val = node(NT.Tuple, {elts = elts, ctx = "Load", lineno = tok.line, col_offset = tok.col})
+        end
+      end
+      self:match(TT.NEWLINE)
+      return node(NT.Return, {value = val, lineno = tok.line, col_offset = tok.col})
     elseif v == "raise" then self:advance(); local exc = nil; if not self:newline_or_eof() then exc = self:test() end; self:match(TT.NEWLINE); return node(NT.Raise, {exc = exc, lineno = tok.line, col_offset = tok.col})
     elseif v == "assert" then self:advance(); local test = self:test(); local msg = nil; if self:match(TT.OP, ",") then msg = self:test() end; self:match(TT.NEWLINE); return node(NT.Assert, {test = test, msg = msg, lineno = tok.line, col_offset = tok.col})
     elseif v == "del" then self:advance(); local targets = {self:expr()}; while self:match(TT.OP, ",") do table.insert(targets, self:expr()) end; self:match(TT.NEWLINE); return node(NT.Delete, {targets = targets, lineno = tok.line, col_offset = tok.col})
@@ -614,10 +630,15 @@ function Parser:expr_stmt()
   -- Handle tuple unpacking targets: a, b = expr
   local targets = {test}
   if self:check(TT.OP, ",") then
+    local elts = {test}
     repeat
       self:advance() -- consume comma
-      table.insert(targets, self:expect(TT.NAME))
+      if not self:check(TT.OP, "=") and not self:check(TT.NEWLINE) and not self:check(TT.EOF) then
+        local nm = self:expect(TT.NAME)
+        table.insert(elts, node(NT.Name, {id = nm.value, ctx = "Store", lineno = nm.line, col_offset = nm.col}))
+      end
     until not self:match(TT.OP, ",")
+    targets = {node(NT.Tuple, {elts = elts, ctx = "Store", lineno = test.lineno, col_offset = test.col_offset})}
   end
   if self:check(TT.OP, "=") or self:check2(TT.OP, "+=", TT.OP, "-=") or self:check2(TT.OP, "*=", TT.OP, "/=") or self:check2(TT.OP, "%=", TT.OP, "&=") or self:check2(TT.OP, "|=", TT.OP, "|=") or self:check2(TT.OP, "^=", TT.OP, "^=") or self:check2(TT.OP, "//=", TT.OP, "//=") or self:check2(TT.OP, "<<=", TT.OP, ">>=") then
     local op_tok = self:advance()
@@ -845,7 +866,7 @@ function Parser:try_stmt()
   while self:match(TT.NAME, "except") do
     local typ = nil
     local name = nil
-    if not self:newline_or_eof() then
+    if not self:check(TT.OP, ":") and not self:newline_or_eof() then
       typ = self:expr()
       if self:match(TT.NAME, "as") then name = self:expect(TT.NAME).value end
     end
@@ -875,7 +896,18 @@ end
 function Parser:return_stmt()
   self:expect(TT.NAME, "return")
   local value = nil
-  if not self:newline_or_eof() then value = self:test() end
+  if not self:newline_or_eof() then
+    value = self:test()
+    if self:match(TT.OP, ",") then
+      local elts = {value}
+      repeat
+        if not self:newline_or_eof() then
+          table.insert(elts, self:test())
+        end
+      until not self:match(TT.OP, ",")
+      value = node(NT.Tuple, {elts = elts, ctx = "Load", lineno = 0, col_offset = 0})
+    end
+  end
   self:match(TT.NEWLINE)
   return node(NT.Return, {value = value, lineno = 0, col_offset = 0})
 end
@@ -1716,16 +1748,15 @@ end
 ------------------------------------------------------------------------------
 function Parser:parse()
   local stmts = {}
-  local stmt_count = 0
   while not self:check(TT.EOF) do
     if self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.DEDENT) or self:check(TT.COMMENT) then
       self:advance()
     else
+      local prev_pos = self.pos
       local stmt = self:stmt()
       if stmt then table.insert(stmts, stmt) end
-      stmt_count = stmt_count + 1
-      if stmt_count > 20 then
-        error("Too many statements, possible infinite loop")
+      if self.pos == prev_pos then
+        error("Parser stuck at token " .. tostring(self:peek().type) .. " at line " .. tostring(self:peek().line))
       end
     end
   end

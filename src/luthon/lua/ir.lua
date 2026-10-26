@@ -14,12 +14,15 @@ local M = {}
 
 local Instr = {}
 Instr.__index = Instr
-function Instr.new(op, args, result, src_line)
+function Instr.new(op, args, result, src_line, src_col)
   local self = setmetatable({}, Instr)
   self.op = op
   self.args = args or {}
   self.result = result
   self.src_line = src_line or 0
+  self.lineno = self.src_line
+  self.src_col = src_col or 0
+  self.col_offset = self.src_col
   return self
 end
 
@@ -77,7 +80,14 @@ local BINOP_MAP = {
   ["LShiftE"] = "LShift", ["RShiftE"] = "RShift",
 }
 
-local BUILTIN_MODULES = {}
+local BUILTIN_MODULES = {
+  ["math"] = true, ["os"] = true, ["sys"] = true, ["json"] = true,
+  ["random"] = true, ["re"] = true, ["string"] = true, ["hashlib"] = true,
+  ["base64"] = true, ["struct"] = true, ["io"] = true, ["collections"] = true,
+  ["itertools"] = true, ["functools"] = true, ["pathlib"] = true,
+  ["datetime"] = true, ["typing"] = true, ["site"] = true,
+  ["tempfile"] = true, ["subprocess"] = true, ["ast"] = true, ["bit"] = true,
+}
 
 local UNARY_OP_MAP = {
   ["USub"] = "neg", ["UAdd"] = "pos", ["Not"] = "not", ["Invert"] = "inv",
@@ -129,8 +139,10 @@ function IRLowerer:_new_label(prefix)
   return prefix .. self._label_counter
 end
 
-function IRLowerer:_emit(op, args, result, src_line)
-  local ins = Instr.new(op, args or {}, result, src_line or 0)
+function IRLowerer:_emit(op, args, result, src_line, src_col)
+  local line = src_line or (self._cur_node and self._cur_node.lineno) or 0
+  local col = src_col or (self._cur_node and self._cur_node.col_offset) or 0
+  local ins = Instr.new(op, args or {}, result, line, col)
   table.insert(self._cur_block.instrs, ins)
   return ins
 end
@@ -173,6 +185,15 @@ end
 ------------------------------------------------------------------------------
 
 function IRLowerer:lower_stmt(node)
+  local prev_node = self._cur_node
+  if node and node.lineno and node.lineno > 0 then
+    self._cur_node = node
+  end
+  self:_lower_stmt_impl(node)
+  self._cur_node = prev_node
+end
+
+function IRLowerer:_lower_stmt_impl(node)
   local t = node._type
   if t == "Expr" then
     self:lower_expr(node.value)
@@ -354,28 +375,19 @@ function IRLowerer:lower_stmt(node)
     end
   elseif t == "Import" then
     for _, alias in ipairs(node.names or {}) do
-      local name = alias.asname or alias.name
-      self:_emit("LOAD", {name}, self:_new_tmp())
+      local name = alias.asname or alias.name:match("([^%.]+)")
+      self:_emit("IMPORT", {name, alias.name})
     end
   elseif t == "ImportFrom" then
-    if node.module then
-      local mod_tmp = self:_new_tmp()
-      self:_emit("LOAD", {node.module}, mod_tmp)
-      for _, alias in ipairs(node.names or {}) do
-        local name = alias.asname or alias.name
-        local attr_tmp = self:_new_tmp()
-        self:_emit("GET_ATTR", {mod_tmp, alias.name}, attr_tmp)
-        self:_emit("STORE", {name, attr_tmp})
-      end
-    else
-      for _, alias in ipairs(node.names or {}) do
-        local name = alias.asname or alias.name
-        self:_emit("LOAD", {name}, self:_new_tmp())
-      end
+    local mod = node.module or ""
+    for _, alias in ipairs(node.names or {}) do
+      local name = alias.asname or alias.name
+      self:_emit("IMPORT_FROM", {name, mod, alias.name})
     end
   elseif t == "Try" then
     -- try/except/finally
-    local try_block = self:_new_block("try")
+    local try_label = self:_new_label("try")
+    local try_block = self:_new_block(try_label)
     self._cur_block = try_block
     -- emit TRY_BEGIN marker
     self:_emit("TRY_BEGIN", {}, self:_new_tmp())
@@ -396,7 +408,7 @@ function IRLowerer:lower_stmt(node)
       self._cur_block = self:_new_block(handler_lbl)
       -- bind exception variable
       if h.name then
-        self:_emit("CELL_GET", {"__exc__"}, self:_new_tmp()) -- placeholder
+        self:_emit("STORE", {h.name, "_exc"})
       end
       for _, s in ipairs(h.body or {}) do
         self:lower_stmt(s)
@@ -407,8 +419,9 @@ function IRLowerer:lower_stmt(node)
     self:_emit("END_ALL_CATCH", {}, self:_new_tmp())
     -- else clause (not supported yet)
     if node.orelse and #node.orelse > 0 then
-      -- fall through to except, emit error if no except matched
-      self:_emit("END_TRY", {}, self:_new_tmp())
+      for _, s in ipairs(node.orelse or {}) do
+        self:lower_stmt(s)
+      end
     end
     -- finally block
     if node.finalbody and #node.finalbody > 0 then
@@ -416,7 +429,6 @@ function IRLowerer:lower_stmt(node)
       for _, s in ipairs(node.finalbody or {}) do
         self:lower_stmt(s)
       end
-      self:_emit("END_TRY", {}, self:_new_tmp())
     end
     self._cur_block = self:_new_block(end_label)
   elseif t == "Pass" then
@@ -581,7 +593,8 @@ function IRLowerer:lower_stmt(node)
     end
   elseif t == "With" then
     -- with statement: enter context, run body, exit context
-    for _, item in ipairs(node.items or {}) do
+    local aliases = {}
+    for i, item in ipairs(node.items or {}) do
       local ctx_tmp = self:lower_expr(item.context_expr)
       local alias
       if item.optional_vars then
@@ -589,8 +602,9 @@ function IRLowerer:lower_stmt(node)
       else
         alias = self:_new_tmp()
       end
+      table.insert(aliases, alias)
       self:_emit("STORE", {alias, ctx_tmp})
-      -- __enter__
+      -- Call __enter__(alias) if method exists
       local enter_tmp = self:_new_tmp()
       self:_emit("GET_ATTR", {alias, "__enter__"}, enter_tmp)
       local enter_lbl = self:_new_label("with_enter")
@@ -598,7 +612,7 @@ function IRLowerer:lower_stmt(node)
       self:_emit("BRANCH", {enter_tmp, enter_lbl, end_enter_lbl})
       self._cur_block = self:_new_block(enter_lbl)
       self:_emit("DO", {})
-      self:_emit("CALL", {alias, "__enter__"}, self:_new_tmp())
+      self:_emit("CALL", {enter_tmp, alias}, self:_new_tmp())
       self:_emit("END", {})
       self._cur_block = self:_new_block(end_enter_lbl)
     end
@@ -607,27 +621,18 @@ function IRLowerer:lower_stmt(node)
       self:lower_stmt(s)
     end
     -- __exit__ for each context manager (reverse order)
-    for i = #(node.items or {}), 1, -1 do
-      local item = node.items[i]
-      local alias
-      if item.optional_vars then
-        alias = self:lower_expr(item.optional_vars)
-      else
-        -- Need to retrieve the alias temp... this is tricky without tracking
-        -- For now, skip __exit__ if no optional_vars (simplification)
-      end
-      if alias then
-        local exit_tmp = self:_new_tmp()
-        self:_emit("GET_ATTR", {alias, "__exit__"}, exit_tmp)
-        local exit_lbl = self:_new_label("with_exit")
-        local end_exit_lbl = self:_new_label("with_exit_end")
-        self:_emit("BRANCH", {exit_tmp, exit_lbl, end_exit_lbl})
-        self._cur_block = self:_new_block(exit_lbl)
-        self:_emit("DO", {})
-        self:_emit("CALL", {alias, "__exit__", nil, nil, nil}, self:_new_tmp())
-        self:_emit("END", {})
-        self._cur_block = self:_new_block(end_exit_lbl)
-      end
+    for i = #aliases, 1, -1 do
+      local alias = aliases[i]
+      local exit_tmp = self:_new_tmp()
+      self:_emit("GET_ATTR", {alias, "__exit__"}, exit_tmp)
+      local exit_lbl = self:_new_label("with_exit")
+      local end_exit_lbl = self:_new_label("with_exit_end")
+      self:_emit("BRANCH", {exit_tmp, exit_lbl, end_exit_lbl})
+      self._cur_block = self:_new_block(exit_lbl)
+      self:_emit("DO", {})
+      self:_emit("CALL", {exit_tmp, alias}, self:_new_tmp())
+      self:_emit("END", {})
+      self._cur_block = self:_new_block(end_exit_lbl)
     end
   else
     -- fallback: record unsupported
@@ -640,6 +645,17 @@ end
 ------------------------------------------------------------------------------
 
 function IRLowerer:lower_expr(node)
+  if node == nil then return nil end
+  local prev_node = self._cur_node
+  if node and node.lineno and node.lineno > 0 then
+    self._cur_node = node
+  end
+  local res = self:_lower_expr_impl(node)
+  self._cur_node = prev_node
+  return res
+end
+
+function IRLowerer:_lower_expr_impl(node)
   if node == nil then return nil end
   local t = node._type
 
@@ -661,40 +677,15 @@ function IRLowerer:lower_expr(node)
     return res
   elseif t == "Subscript" then
     local v = self:lower_expr(node.value)
-    local sl = self:lower_expr(node.slice)
     if node.slice._type == "Slice" then
-      -- Python s[lower:upper] -> Lua string.sub(v, lower+1, upper)
-      -- 0-based -> 1-based, upper is exclusive in Python, inclusive in Lua
-      local lower_tmp = nil
-      local upper_tmp = nil
-      if node.slice.lower then
-        lower_tmp = self:lower_expr(node.slice.lower)
-        local loff = self:_new_tmp()
-        self:_emit("CONST", {1}, loff)
-        lower_tmp = self:_new_tmp()
-        self:_emit("BINOP", {"add", lower_tmp, loff}, lower_tmp)
-      end
-      if node.slice.upper then
-        upper_tmp = self:lower_expr(node.slice.upper)
-      end
-      if lower_tmp and upper_tmp then
-        local res = self:_new_tmp()
-        self:_emit("CALL", {"string.sub", v, lower_tmp, upper_tmp}, res)
-        return res
-      elseif lower_tmp then
-        local res = self:_new_tmp()
-        self:_emit("CALL", {"string.sub", v, lower_tmp}, res)
-        return res
-      elseif upper_tmp then
-        local res = self:_new_tmp()
-        self:_emit("CALL", {"string.sub", v, 1, upper_tmp}, res)
-        return res
-      else
-        local res = self:_new_tmp()
-        self:_emit("CALL", {"string.sub", v, 1}, res)
-        return res
-      end
+      local lower_tmp = node.slice.lower and self:lower_expr(node.slice.lower) or "nil"
+      local upper_tmp = node.slice.upper and self:lower_expr(node.slice.upper) or "nil"
+      local step_tmp = node.slice.step and self:lower_expr(node.slice.step) or "nil"
+      local res = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_slice", v, lower_tmp, upper_tmp, step_tmp}, res)
+      return res
     else
+      local sl = self:lower_expr(node.slice)
       local res = self:_new_tmp()
       self:_emit("SUBSCR", {v, sl}, res)
       return res
@@ -966,7 +957,11 @@ function IRLowerer:lower_expr(node)
     return res
   elseif t == "Lambda" then
     local args = {}
-    for _, a in ipairs(node.args.args or {}) do table.insert(args, a.arg) end
+    if node.args and node.args.args then
+      for _, a in ipairs(node.args.args) do table.insert(args, a.arg or a) end
+    elseif type(node.args) == "table" then
+      for _, a in ipairs(node.args) do table.insert(args, type(a) == "table" and (a.arg or a.id) or tostring(a)) end
+    end
     -- Create a nested function for the lambda body
     local lambda_name = "_lambda_" .. self._tmp
     local fn = Function.new(lambda_name, args)
@@ -1150,6 +1145,13 @@ function M.lower(source)
 end
 
 function M.lower_ast(tree)
+  local lowerer = IRLowerer.new()
+  return lowerer:lower_module(tree)
+end
+
+function M.lower_source(source)
+  local parser = require("src/luthon/lua/parser")
+  local tree = parser.parse(source)
   local lowerer = IRLowerer.new()
   return lowerer:lower_module(tree)
 end

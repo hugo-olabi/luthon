@@ -27,6 +27,7 @@ local _CMP_MAP = {
   ["Eq"] = "==", ["Neq"] = "~=",
   ["Is"] = "==", ["IsNot"] = "~=",
   ["is"] = "==", ["isnot"] = "~=",
+  ["in"] = "_luthon_in", ["notin"] = "_luthon_not_in",
   ["In"] = "_luthon_in", ["NotIn"] = "_luthon_not_in",
 }
 
@@ -79,22 +80,40 @@ local function _emit(ins)
   elseif o == "BINOP" then
     local l = args[2] or "nil"
     local r = args[3] or "nil"
-    local op_name = (args[1] or ""):lower()
+    local raw_op = args[1] or ""
+    local op_name = raw_op:lower()
     if op_name == "floordiv" then
       return ins.result .. " = math.floor(" .. l .. " / " .. r .. ")"
+    elseif op_name == "band" then
+      return ins.result .. " = bit.band(" .. l .. ", " .. r .. ")"
+    elseif op_name == "bor" then
+      return ins.result .. " = bit.bor(" .. l .. ", " .. r .. ")"
+    elseif op_name == "bxor" then
+      return ins.result .. " = bit.bxor(" .. l .. ", " .. r .. ")"
+    elseif op_name == "<<" or op_name == "lshift" then
+      return ins.result .. " = bit.lshift(" .. l .. ", " .. r .. ")"
+    elseif op_name == ">>" or op_name == "rshift" then
+      return ins.result .. " = bit.rshift(" .. l .. ", " .. r .. ")"
     end
-    local mapped = _lua_op(args[1])
+    local mapped = _lua_op(raw_op)
     return ins.result .. " = " .. l .. " " .. mapped .. " " .. r
   elseif o == "UNOP" then
-    if args[1] == "neg" then
+    local op = (args[1] or ""):lower()
+    if op == "neg" or op == "usub" or op == "-" then
       return ins.result .. " = -" .. args[2]
+    elseif op == "pos" or op == "uadd" or op == "+" then
+      return ins.result .. " = +" .. args[2]
+    elseif op == "not" then
+      return ins.result .. " = not " .. args[2]
+    elseif op == "inv" or op == "invert" or op == "~" then
+      return ins.result .. " = bit.bnot(" .. args[2] .. ")"
     end
-    return ins.result .. " = " .. args[1]
+    return ins.result .. " = " .. (args[2] or args[1])
   elseif o == "RETURN" then
     if args[1] then
-      return "return " .. args[1]
+      return "do return " .. args[1] .. " end"
     end
-    return "return"
+    return "do return end"
   elseif o == "JUMP" then
     return "goto " .. args[1]
   elseif o == "BRANCH" then
@@ -118,13 +137,13 @@ local function _emit(ins)
     end
     return ins.result .. " = " .. args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
   elseif o == "TRY_BEGIN" then
-    return "local ok, err = pcall(function()"
+    return "do\nlocal ok, err = pcall(function()"
   elseif o == "END_TRY" then
-    return "end)\nif not ok then\n    local _exc = err\n    local _exc_matched = false"
+    return "end)\nif not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
   elseif o == "END_CATCH" then
     return "    _exc_matched = true"
   elseif o == "END_ALL_CATCH" then
-    return "    if not _exc_matched then error(tostring(_exc)) end\nend"
+    return "    if not _exc_matched then error(tostring(_exc)) end\nend\nend"
   elseif o == "DO" then
     return "do"
   elseif o == "END" then
@@ -153,12 +172,20 @@ local function _emit(ins)
       end
     end
     return table.concat(lines, "\n")
+  elseif o == "IMPORT" then
+    return args[1] .. " = _luthon_import(\"" .. args[2] .. "\")"
+  elseif o == "IMPORT_FROM" then
+    return args[1] .. " = _luthon_import_from(\"" .. args[2] .. "\", \"" .. args[3] .. "\")"
+  elseif o == "MAKE_CLASS" then
+    return ins.result .. " = " .. args[1]
   elseif o == "MAKE_SET" then
     return ins.result .. " = {}"
   elseif o == "MAKE_TABLE" then
     return ins.result .. " = {}"
+  elseif o == "SUBSCR" then
+    return ins.result .. " = __luthon_get(" .. args[1] .. ", " .. args[2] .. ")"
   elseif o == "STORE_SUBSCR" then
-    return args[1] .. "[" .. args[2] .. "] = " .. args[3]
+    return "__luthon_set(" .. args[1] .. ", " .. args[2] .. ", " .. args[3] .. ")"
   elseif o == "SET_ADD" then
     return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
   elseif o == "DICT_SET" then
@@ -180,7 +207,7 @@ end
 -- Module codegen
 ------------------------------------------------------------------------------
 
-function M.generate(module, skip_prelude)
+function M.generate(module, skip_prelude, sourcemap)
   local out = {}
   if not skip_prelude then
     table.insert(out, M.prelude())
@@ -209,13 +236,20 @@ function M.generate(module, skip_prelude)
     end
   end
 
-  -- Hoist class tables for dotted method names
+  -- Hoist class tables
   local classes = {}
   for _, fn in ipairs(module.functions or {}) do
     local dot = fn.name:find("%.")
     if dot then
       local cls_name = fn.name:sub(1, dot - 1)
       classes[cls_name] = true
+    end
+    for _, b in ipairs(fn.blocks or {}) do
+      for _, ins in ipairs(b.instrs or {}) do
+        if ins.op == "MAKE_CLASS" and ins.args[1] then
+          classes[ins.args[1]] = true
+        end
+      end
     end
   end
   for c in pairs(classes) do
@@ -242,7 +276,11 @@ function M.generate(module, skip_prelude)
       "str","int","float","abs","min","max","sum","sorted","reversed","enumerate",
       "zip","map","filter","any","all","bool","datetime","collections","itertools",
       "functools","pathlib","string","base64","io","struct","hashlib","typing",
-      "site","tempfile","open","dataclasses","subprocess"
+      "site","tempfile","open","dataclasses","subprocess","ast","bit",
+      "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
+      "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+      "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
+      "True", "False", "None"
     }
     local locs = {}
     for _, l in ipairs(fn.locals or {}) do
@@ -263,16 +301,25 @@ function M.generate(module, skip_prelude)
       if not found then table.insert(tmps, t) end
     end
 
-    if #locs > 0 then
+    if #locs + #tmps <= 150 then
+      local allvars = {}
+      for _, l in ipairs(locs) do table.insert(allvars, l) end
+      for _, t in ipairs(tmps) do table.insert(allvars, t) end
+      if #allvars > 0 then
+        table.insert(out, "  local " .. table.concat(allvars, ", "))
+      end
+    elseif #locs > 0 then
       table.insert(out, "  local " .. table.concat(locs, ", "))
-    elseif #tmps > 0 and #locs + #tmps <= 150 then
-      table.insert(out, "  local " .. table.concat(tmps, ", "))
     end
 
     -- Emit blocks
     for _, b in ipairs(fn.blocks or {}) do
       table.insert(out, "  ::" .. b.label .. "::")
       for _, ins in ipairs(b.instrs or {}) do
+        if sourcemap and ins.lineno and ins.lineno > 0 then
+          local src_file = sourcemap.file or (sourcemap.sources and sourcemap.sources[1] or "")
+          sourcemap:add(#out + 1, 2, ins.lineno, ins.col_offset or 0, src_file)
+        end
         table.insert(out, "  " .. _emit(ins))
       end
     end
@@ -281,7 +328,9 @@ function M.generate(module, skip_prelude)
 
   -- Set up class metatables for __call (constructor emulation)
   for c in pairs(classes) do
-    table.insert(out, "setmetatable(" .. c .. ", {__call = function(cls, ...) local self = {}; for k,v in pairs(cls) do self[k]=v end; cls.__init__(self, ...); return self end})")
+    table.insert(out, c .. ".__index = " .. c)
+    table.insert(out, c .. ".__instance_mt = {__index = " .. c .. "}")
+    table.insert(out, "setmetatable(" .. c .. ", {__call = function(cls, ...) local self = setmetatable({}, " .. c .. ".__instance_mt); cls.__init__(self, ...); return self end})")
   end
 
   -- Runtime helpers for exceptions, asserts and context managers.

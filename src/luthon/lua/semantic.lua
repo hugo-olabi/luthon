@@ -563,4 +563,8 @@ function M.future_features(source)
   return result
 end
 
+M.SemanticAnalyzer = SemanticAnalyzer
+M.Scope = Scope
+M.Symbol = Symbol
+
 return M
