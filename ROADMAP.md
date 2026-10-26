@@ -25,7 +25,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 13 — High-Performance JIT Optimization & NYI Elimination | ✅ Done | 3/3 |
 | Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ✅ Done | 3/3 |
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ✅ Done | 4/4 |
-| Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ⏳ Pending | 0/3 |
+| Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ✅ Done | 3/3 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -195,9 +195,9 @@ Extend Python language feature coverage in both transpilation pipelines.
 
 Achieve true self-hosting verification with a multi-stage compilation cycle.
 
-- [ ] Stage 1: Transpile all `src/luthon/*.py` files using CPython pipeline into standalone Lua modules
-- [ ] Stage 2: Execute transpiled Stage 1 compiler under LuaJIT to recompile `src/luthon/*.py` into Stage 2
-- [ ] Stage 3: Assert fixpoint equality between Stage 1 and Stage 2 outputs with an automated CI test suite
+- [x] Stage 1: Transpile all `src/luthon/*.py` files using CPython pipeline into standalone Lua modules
+- [x] Stage 2: Execute transpiled Stage 1 compiler under LuaJIT to recompile `src/luthon/*.py` into Stage 2
+- [x] Stage 3: Assert fixpoint equality between Stage 1 and Stage 2 outputs with an automated CI test suite
 
 ## How to update
 
