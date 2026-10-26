@@ -611,6 +611,38 @@ class IRLowerer:
             els = [self.lower_expr(e) for e in node.elts]
             self._emit("MAKE_TUPLE", els, result=t)
             return t
+        if isinstance(node, ast.Set):
+            t = self._new_tmp()
+            self._emit("MAKE_SET", [], result=t)
+            for e in node.elts:
+                val = self.lower_expr(e)
+                self._emit("SET_ADD", [t, val])
+            return t
+        if isinstance(node, ast.SetComp):
+            res = self._new_tmp()
+            self._emit("MAKE_SET", [], result=res)
+            gen = node.generators[0]
+            iter_tmp = self._new_tmp()
+            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
+            loop_lbl = self._new_label("scomp")
+            body_lbl = self._new_label("sbody")
+            end_lbl = self._new_label("send")
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(loop_lbl)
+            nxt = self._new_tmp()
+            self._emit("NEXT", [iter_tmp], result=nxt)
+            self._emit("BRANCH_NONE", [nxt, end_lbl])
+            if isinstance(gen.target, ast.Name):
+                self._emit("STORE", [gen.target.id, nxt])
+            if gen.ifs:
+                cond = self.lower_expr(gen.ifs[0])
+                self._emit("BRANCH", [cond, body_lbl, loop_lbl])
+                self._cur_block = self._new_block(body_lbl)
+            val = self.lower_expr(node.elt)
+            self._emit("SET_ADD", [res, val])
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(end_lbl)
+            return res
         if isinstance(node, ast.ListComp):
             # basic: build list from first generator
             res = self._new_tmp()
@@ -715,14 +747,19 @@ class IRLowerer:
         return {
             ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div",
             ast.FloorDiv: "floordiv", ast.Mod: "mod", ast.Pow: "pow",
+            ast.BitAnd: "band", ast.BitOr: "bor", ast.BitXor: "bxor",
+            ast.LShift: "lshift", ast.RShift: "rshift",
         }.get(type(op), type(op).__name__)
 
     def _unop(self, op):
-        return {ast.USub: "neg", ast.UAdd: "pos", ast.Not: "not"}.get(type(op), type(op).__name__)
+        return {ast.USub: "neg", ast.UAdd: "pos", ast.Not: "not", ast.Invert: "inv"}.get(type(op), type(op).__name__)
 
     def _cmpop(self, op):
-        return {ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le",
-                ast.Gt: "gt", ast.GtE: "ge", ast.Is: "eq", ast.IsNot: "ne"}.get(type(op), type(op).__name__)
+        return {
+            ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le",
+            ast.Gt: "gt", ast.GtE: "ge", ast.Is: "eq", ast.IsNot: "ne",
+            ast.In: "in", ast.NotIn: "notin",
+        }.get(type(op), type(op).__name__)
 
     def verify(self, module):
         errors = []

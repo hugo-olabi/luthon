@@ -315,9 +315,13 @@ function Lexer:tokenize()
     elseif c:match("[0-9]") then
       local num = self:read_number()
       table.insert(self.tokens, {type = TT.NUMBER, value = num, line = self.line, col = self.col})
-    -- Bytes literal prefix: b"..." or B"..." (treated as string in Lua)
-    elseif (c == "b" or c == "B") and (self:peek(1) == '"' or self:peek(1) == "'") then
-      self:advance() -- skip b/B prefix
+    -- String literal prefixes: b, B, r, R, u, U, rb, br, etc.
+    elseif ((c == "b" or c == "B" or c == "r" or c == "R" or c == "u" or c == "U") and (self:peek(1) == '"' or self:peek(1) == "'")) then
+      self:advance()
+      local str = self:read_string()
+      table.insert(self.tokens, {type = TT.STRING, value = str, line = self.line, col = self.col})
+    elseif ((c == "r" or c == "R" or c == "b" or c == "B") and (self:peek(1) == "b" or self:peek(1) == "B" or self:peek(1) == "r" or self:peek(1) == "R") and (self:peek(2) == '"' or self:peek(2) == "'")) then
+      self:advance(2)
       local str = self:read_string()
       table.insert(self.tokens, {type = TT.STRING, value = str, line = self.line, col = self.col})
     elseif c:match("[%w_]") then
@@ -631,24 +635,29 @@ function Parser:expr_stmt()
   local targets = {test}
   if self:check(TT.OP, ",") then
     local elts = {test}
-    repeat
-      self:advance() -- consume comma
-      if not self:check(TT.OP, "=") and not self:check(TT.NEWLINE) and not self:check(TT.EOF) then
-        local nm = self:expect(TT.NAME)
-        table.insert(elts, node(NT.Name, {id = nm.value, ctx = "Store", lineno = nm.line, col_offset = nm.col}))
-      end
-    until not self:match(TT.OP, ",")
+    while self:match(TT.OP, ",") do
+      if self:check(TT.OP, "=") or self:check(TT.NEWLINE) or self:check(TT.EOF) then break end
+      table.insert(elts, self:expr())
+    end
     targets = {node(NT.Tuple, {elts = elts, ctx = "Store", lineno = test.lineno, col_offset = test.col_offset})}
   end
   if self:check(TT.OP, "=") or self:check2(TT.OP, "+=", TT.OP, "-=") or self:check2(TT.OP, "*=", TT.OP, "/=") or self:check2(TT.OP, "%=", TT.OP, "&=") or self:check2(TT.OP, "|=", TT.OP, "|=") or self:check2(TT.OP, "^=", TT.OP, "^=") or self:check2(TT.OP, "//=", TT.OP, "//=") or self:check2(TT.OP, "<<=", TT.OP, ">>=") then
     local op_tok = self:advance()
     local op = BINOP_MAP[op_tok.value] or "Assign"
-    local value = self:expr()
+    local val = self:expr()
+    if self:check(TT.OP, ",") then
+      local val_elts = {val}
+      while self:match(TT.OP, ",") do
+        if self:check(TT.NEWLINE) or self:check(TT.EOF) then break end
+        table.insert(val_elts, self:expr())
+      end
+      val = node(NT.Tuple, {elts = val_elts, ctx = "Load", lineno = val.lineno or 0, col_offset = val.col_offset or 0})
+    end
     self:match(TT.NEWLINE)
     if op == "Assign" then
-      return node(NT.Assign, {targets = targets, value = value, lineno = op_tok.line, col_offset = op_tok.col})
+      return node(NT.Assign, {targets = targets, value = val, lineno = op_tok.line, col_offset = op_tok.col})
     else
-      return node(NT.AugAssign, {target = test, op = op, value = value, lineno = op_tok.line, col_offset = op_tok.col})
+      return node(NT.AugAssign, {target = test, op = op, value = val, lineno = op_tok.line, col_offset = op_tok.col})
     end
   end
   -- Annotated assignment: target: type [= value]

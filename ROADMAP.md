@@ -21,7 +21,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 9 — Advanced Architecture & JIT Specialization | ✅ Done | 7/7 |
 | Phase 10 — C Extensions, Native FFI & Hybrid Python Bridge | ✅ Done | 6/6 |
 | Phase 11 — Luthon Package Manager (luthon-pip) | ✅ Done | 6/6 |
-| Phase 12 — Pipeline Parity & Full Source Self-Compilation | ⏳ Pending | 0/6 |
+| Phase 12 — Pipeline Parity & Full Source Self-Compilation | ✅ Done | 6/6 |
 | Phase 13 — High-Performance JIT Optimization & NYI Elimination | ⏳ Pending | 0/3 |
 | Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ⏳ Pending | 0/3 |
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ⏳ Pending | 0/4 |
@@ -159,12 +159,12 @@ Enable direct installation, dependency resolution, pre-compilation (AOT to Lua),
 
 Address discrepancies between the Python IR pipeline and Lua bootstrap pipeline so that 100% of Luthon's source files compile and run under both pipelines.
 
-- [ ] Fix comparison operator lowering (`in` and `not in`) in Python `codegen.py` to call `_luthon_in` and `_luthon_not_in`
-- [ ] Add runtime `_luthon_in` and `_luthon_not_in` helpers to Python `stdlib.py` matching `bootstrap.lua`
-- [ ] Fix bitwise operator normalization in Python `codegen.py` (`bitand`, `bitor`, `bitxor`, `lshift`, `rshift`)
-- [ ] Fix Lua statement ordering in `try/except` landing pads when handlers end with `return`
-- [ ] Support raw string literals (`r"..."`, `R"..."`) and multi-prefix strings in pure-Lua lexer (`parser.lua`)
-- [ ] Support multi-target unpacking assignments and RHS comma-separated tuples in pure-Lua parser (`parser.lua`)
+- [x] Fix comparison operator lowering (`in` and `not in`) in Python `codegen.py` to call `_luthon_in` and `_luthon_not_in`
+- [x] Add runtime `_luthon_in` and `_luthon_not_in` helpers to Python `stdlib.py` matching `bootstrap.lua`
+- [x] Fix bitwise operator normalization in Python `codegen.py` (`bitand`, `bitor`, `bitxor`, `lshift`, `rshift`)
+- [x] Fix Lua statement ordering in `try/except` landing pads when handlers end with `return`
+- [x] Support raw string literals (`r"..."`, `R"..."`) and multi-prefix strings in pure-Lua lexer (`parser.lua`)
+- [x] Support multi-target unpacking assignments and RHS comma-separated tuples in pure-Lua parser (`parser.lua`)
 
 ## Phase 13 — High-Performance JIT Optimization & NYI Elimination
 

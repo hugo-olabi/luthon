@@ -1324,15 +1324,47 @@ debug.setmetatable({}, _slice_mt)
 
 function _luthon_in(a, b)
   if type(b) == "table" then
+    if b[a] ~= nil then return true end
     for _, v in ipairs(b) do
       if v == a then return true end
     end
+    return false
+  elseif type(b) == "string" then
+    if type(a) == "string" then
+      return string.find(b, a, 1, true) ~= nil
+    end
+    return false
   end
   return false
 end
 
 function _luthon_not_in(a, b)
   return not _luthon_in(a, b)
+end
+
+local _set_methods = {
+  add = function(self, x) self[x] = true end,
+  remove = function(self, x) self[x] = nil end,
+  discard = function(self, x) self[x] = nil end,
+  clear = function(self) for k in pairs(self) do self[k] = nil end end,
+  pop = function(self)
+    for k in pairs(self) do
+      self[k] = nil
+      return k
+    end
+    error("KeyError: 'pop from an empty set'")
+  end
+}
+local _set_mt = {__index = _set_methods}
+
+function set(t)
+  local s = setmetatable({}, _set_mt)
+  if t then
+    if type(t) == "table" then
+      for _, v in ipairs(t) do s[v] = true end
+    end
+  end
+  return s
 end
 
 -- Override error to handle exception tables

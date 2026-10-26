@@ -21,13 +21,13 @@ def _emit(ins):
         l = ins.args[1] if ins.args[1] is not None else "nil"
         r = ins.args[2] if ins.args[2] is not None else "nil"
         raw_op = (ins.args[0] or "").lower()
-        if raw_op == "floordiv":
+        if raw_op in ("floordiv", "//"):
             return ins.result + " = math.floor(" + l + " / " + r + ")"
-        elif raw_op == "band":
+        elif raw_op in ("band", "bitand", "&"):
             return ins.result + " = bit.band(" + l + ", " + r + ")"
-        elif raw_op == "bor":
+        elif raw_op in ("bor", "bitor", "|"):
             return ins.result + " = bit.bor(" + l + ", " + r + ")"
-        elif raw_op == "bxor":
+        elif raw_op in ("bxor", "bitxor", "^"):
             return ins.result + " = bit.bxor(" + l + ", " + r + ")"
         elif raw_op in ("<<", "lshift"):
             return ins.result + " = bit.lshift(" + l + ", " + r + ")"
@@ -37,9 +37,11 @@ def _emit(ins):
     if o == "UNOP":
         if ins.args[0] == "neg":
             return ins.result + " = -" + ins.args[1]
+        elif ins.args[0] in ("inv", "invert"):
+            return ins.result + " = bit.bnot(" + ins.args[1] + ")"
         return ins.result + " = " + ins.args[1]
     if o == "RETURN":
-        return "return " + (ins.args[0] if ins.args and ins.args[0] else "")
+        return "do return " + (ins.args[0] if ins.args and ins.args[0] else "") + " end"
     if o == "JUMP":
         return "goto " + ins.args[0]
     if o == "BRANCH":
@@ -47,7 +49,13 @@ def _emit(ins):
     if o == "BRANCH_NONE":
         return "if " + ins.args[0] + " == nil then goto " + ins.args[1] + " end"
     if o == "CMP":
-        return ins.result + " = (" + ins.args[1] + " " + ins.args[0].replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=") + " " + ins.args[2] + ")"
+        cmp_op = (ins.args[0] or "")
+        if cmp_op in ("in", "In"):
+            return ins.result + " = _luthon_in(" + ins.args[1] + ", " + ins.args[2] + ")"
+        elif cmp_op in ("notin", "NotIn", "not in"):
+            return ins.result + " = _luthon_not_in(" + ins.args[1] + ", " + ins.args[2] + ")"
+        mapped_op = cmp_op.replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=")
+        return ins.result + " = (" + ins.args[1] + " " + mapped_op + " " + ins.args[2] + ")"
     if o == "CALL":
         args = ", ".join(str(a) for a in ins.args[1:])
         return ins.result + " = " + str(ins.args[0]) + "(" + args + ")"
