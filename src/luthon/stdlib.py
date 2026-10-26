@@ -1,6 +1,142 @@
 STDLIB_LUA = r"""
 -- Luthon stdlib
+-- FFI and C-runtime bindings
+local ffi = require("ffi")
+pcall(function()
+  ffi.cdef[[
+    double sqrt(double x);
+    double sin(double x);
+    double cos(double x);
+    double exp(double x);
+    void *memcpy(void *dest, const void *src, size_t n);
+  ]]
+end)
+
+local _ARRAY_TYPE_MAP = {
+  ["b"] = "int8_t",
+  ["B"] = "uint8_t",
+  ["h"] = "int16_t",
+  ["H"] = "uint16_t",
+  ["i"] = "int32_t",
+  ["I"] = "uint32_t",
+  ["l"] = "int64_t",
+  ["L"] = "uint64_t",
+  ["f"] = "float",
+  ["d"] = "double",
+}
+
+local _ARRAY_ITEMSIZE_MAP = {
+  ["b"] = 1, ["B"] = 1, ["h"] = 2, ["H"] = 2,
+  ["i"] = 4, ["I"] = 4, ["l"] = 8, ["L"] = 8,
+  ["f"] = 4, ["d"] = 8,
+}
+
+local _Array_methods = {}
+
+function _Array_methods:append(val)
+  local len = rawget(self, "_len")
+  local cap = rawget(self, "_cap")
+  if len >= cap then
+    local new_cap = math.max(4, cap * 2)
+    local ctype = _ARRAY_TYPE_MAP[self.typecode] .. "[?]"
+    local new_buf = ffi.new(ctype, new_cap)
+    if len > 0 then
+      ffi.copy(new_buf, rawget(self, "_buf"), len * self.itemsize)
+    end
+    rawset(self, "_buf", new_buf)
+    rawset(self, "_cap", new_cap)
+  end
+  rawget(self, "_buf")[len] = val
+  rawset(self, "_len", len + 1)
+end
+
+function _Array_methods:tolist()
+  local len = rawget(self, "_len")
+  local buf = rawget(self, "_buf")
+  local r = {}
+  for i = 0, len - 1 do
+    r[i + 1] = tonumber(buf[i])
+  end
+  return r
+end
+
+function _Array_methods:slice(start, stop)
+  local len = rawget(self, "_len")
+  start = start or 0
+  stop = stop or len
+  if start < 0 then start = len + start end
+  if stop < 0 then stop = len + stop end
+  start = math.max(0, math.min(len, start))
+  stop = math.max(0, math.min(len, stop))
+  local slice_len = math.max(0, stop - start)
+
+  local sub = setmetatable({}, _Array_mt)
+  rawset(sub, "typecode", self.typecode)
+  rawset(sub, "itemsize", self.itemsize)
+  rawset(sub, "_len", slice_len)
+  rawset(sub, "_cap", slice_len)
+  local buf = ffi.new(_ARRAY_TYPE_MAP[self.typecode] .. "[?]", math.max(1, slice_len))
+  if slice_len > 0 then
+    ffi.copy(buf, rawget(self, "_buf") + start, slice_len * self.itemsize)
+  end
+  rawset(sub, "_buf", buf)
+  return sub
+end
+
+_Array_mt = {
+  __index = function(self, k)
+    if type(k) == "number" then
+      local len = rawget(self, "_len")
+      if k < 0 then k = len + k end
+      if k < 0 or k >= len then error("IndexError: array index out of range") end
+      return rawget(self, "_buf")[k]
+    end
+    return _Array_methods[k]
+  end,
+  __newindex = function(self, k, v)
+    if type(k) == "number" then
+      local len = rawget(self, "_len")
+      if k < 0 then k = len + k end
+      if k < 0 or k >= len then error("IndexError: array assignment index out of range") end
+      rawget(self, "_buf")[k] = v
+    else
+      rawset(self, k, v)
+    end
+  end,
+  __len = function(self) return rawget(self, "_len") end,
+}
+
+function array(typecode, initializer)
+  local ctype = _ARRAY_TYPE_MAP[typecode]
+  if not ctype then error("ValueError: bad typecode (must be b, B, h, H, i, I, l, L, f, d)") end
+  local itemsize = _ARRAY_ITEMSIZE_MAP[typecode]
+
+  local arr = setmetatable({}, _Array_mt)
+  rawset(arr, "typecode", typecode)
+  rawset(arr, "itemsize", itemsize)
+
+  local init_len = 0
+  if type(initializer) == "table" then
+    init_len = #initializer
+  end
+  local cap = math.max(4, init_len)
+  rawset(arr, "_len", init_len)
+  rawset(arr, "_cap", cap)
+  local buf = ffi.new(ctype .. "[?]", cap)
+
+  if init_len > 0 then
+    for i = 1, init_len do
+      buf[i - 1] = initializer[i]
+    end
+  end
+  rawset(arr, "_buf", buf)
+  return arr
+end
+
 function __luthon_get(t, i)
+  if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
+    return t[i]
+  end
   if type(t) == "string" then
     if type(i) == "number" then
       if i < 0 then i = #t + i + 1 else i = i + 1 end
@@ -16,6 +152,10 @@ function __luthon_get(t, i)
 end
 
 function __luthon_set(t, i, v)
+  if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
+    t[i] = v
+    return
+  end
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
     t[i] = v
@@ -84,7 +224,10 @@ function range(a, b, step)
   else for i = a, b + 1, step do r[#r+1] = i end end
   return r
 end
-function len(t) return #t end
+function len(t)
+  if type(t) == "table" and rawget(t, "_len") ~= nil then return rawget(t, "_len") end
+  return #t
+end
 function list(t) if type(t) == "function" then local r={}; for v in t do r[#r+1]=v end; return r end; local r={}; if t then for _,v in ipairs(t) do r[#r+1]=v end end; return r end
 function iter(t) local i=0; return function() i=i+1; if i<=#t then return t[i] end; return nil end end
 function unpack_list(t)

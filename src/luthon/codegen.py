@@ -166,7 +166,7 @@ def generate(module, sourcemap=None):
             out.append("local function " + fn.name + "(" + ", ".join(fn.params) + ")")
         if getattr(fn, "upvalues", None):
             out.append("  -- upvalues: " + ", ".join(fn.upvalues))
-        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast"}
+        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","ffi","bit","set","frozenset"}
         _classes = {fn.name.split(chr(46),1)[0] for fn in module.functions if chr(46) in fn.name}
         locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes]
         tmps = [t for t in getattr(fn, "tmps", []) if t not in locs]

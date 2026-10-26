@@ -86,7 +86,7 @@ local BUILTIN_MODULES = {
   ["base64"] = true, ["struct"] = true, ["io"] = true, ["collections"] = true,
   ["itertools"] = true, ["functools"] = true, ["pathlib"] = true,
   ["datetime"] = true, ["typing"] = true, ["site"] = true,
-  ["tempfile"] = true, ["subprocess"] = true, ["ast"] = true, ["bit"] = true,
+  ["tempfile"] = true, ["subprocess"] = true, ["ast"] = true, ["bit"] = true, ["ffi"] = true,
 }
 
 local UNARY_OP_MAP = {

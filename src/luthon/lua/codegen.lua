@@ -280,7 +280,7 @@ function M.generate(module, skip_prelude, sourcemap)
       "str","int","float","abs","min","max","sum","sorted","reversed","enumerate",
       "zip","map","filter","any","all","bool","datetime","collections","itertools",
       "functools","pathlib","string","base64","io","struct","hashlib","typing",
-      "site","tempfile","open","dataclasses","subprocess","ast","bit",
+      "site","tempfile","open","dataclasses","subprocess","ast","bit","array","ffi",
       "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
       "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
       "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",

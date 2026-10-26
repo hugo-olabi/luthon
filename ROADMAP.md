@@ -23,7 +23,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 11 — Luthon Package Manager (luthon-pip) | ✅ Done | 6/6 |
 | Phase 12 — Pipeline Parity & Full Source Self-Compilation | ✅ Done | 6/6 |
 | Phase 13 — High-Performance JIT Optimization & NYI Elimination | ✅ Done | 3/3 |
-| Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ⏳ Pending | 0/3 |
+| Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ✅ Done | 3/3 |
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ⏳ Pending | 0/4 |
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ⏳ Pending | 0/3 |
 
@@ -178,9 +178,9 @@ Eliminate LuaJIT NYI bytecode aborts to ensure tight loops run entirely within t
 
 Leverage LuaJIT FFI for high-performance numeric and algorithmic execution.
 
-- [ ] Unboxed numeric arrays: specialized contiguous memory buffers (`ffi.new("double[?]")`) for homogeneous numeric Python lists
-- [ ] Native C-runtime mathematical bindings: direct `ffi.C` bindings for intensive math operations (`sqrt`, `sin`, `cos`, `exp`)
-- [ ] Fast slicing and memory copies for native buffers via `ffi.copy` and pointer arithmetic
+- [x] Unboxed numeric arrays: specialized contiguous memory buffers (`ffi.new("double[?]")`) for homogeneous numeric Python lists
+- [x] Native C-runtime mathematical bindings: direct `ffi.C` bindings for intensive math operations (`sqrt`, `sin`, `cos`, `exp`)
+- [x] Fast slicing and memory copies for native buffers via `ffi.copy` and pointer arithmetic
 
 ## Phase 15 — Python Language Parity (Generators & Dynamic Args)
 
