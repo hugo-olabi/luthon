@@ -26,6 +26,11 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ✅ Done | 3/3 |
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ✅ Done | 4/4 |
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ✅ Done | 3/3 |
+| Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ⏳ Pending | 0/4 |
+| Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ⏳ Pending | 0/4 |
+| Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ⏳ Pending | 0/4 |
+| Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ⏳ Pending | 0/4 |
+| Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ⏳ Pending | 0/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -198,6 +203,51 @@ Achieve true self-hosting verification with a multi-stage compilation cycle.
 - [x] Stage 1: Transpile all `src/luthon/*.py` files using CPython pipeline into standalone Lua modules
 - [x] Stage 2: Execute transpiled Stage 1 compiler under LuaJIT to recompile `src/luthon/*.py` into Stage 2
 - [x] Stage 3: Assert fixpoint equality between Stage 1 and Stage 2 outputs with an automated CI test suite
+
+## Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization
+
+Incorporate research findings from Codon, Numba, and PyPy into Luthon's intermediate representation.
+
+- [ ] High-Level IR (CIR): position a typed intermediate representation between the AST and Lua lowerer that normalizes primitive operations into typed magic method invocations (`int.__add__[int, int]`)
+- [ ] Constraint-Based Type Inference (CPA): implement monotonic type-set propagation across SSA phi nodes and control-flow merges
+- [ ] Call-Site Monomorphization: specialize polymorphic function definitions for concrete scalar argument types (`int`, `float`, `bool`) to generate unboxed, branchless Lua routines
+- [ ] Idiomatic Pattern Fusion: early optimizer passes to recognize and fuse high-level dictionary and sequence idioms (`d[k] = d.get(k, 0) + 1`, chained range iteration) before lowering
+
+## Phase 18 — Allocation Sinking, Object Virtualization & Vtables
+
+Eliminate runtime heap pressure and object dispatch overhead inspired by PyPy OptVirtualize, mypyc, and LuaJIT ASO.
+
+- [ ] Class Immutability & Early Binding: enforce immutable class scopes to route method invocations through direct, fixed-offset vtables instead of runtime metatable searches
+- [ ] Object Virtualization: track short-lived cell boxes, small tuples, and intermediate records so they remain in CPU register states without triggering heap allocations
+- [ ] Allocation Sinking Optimization (ASO/SSO): shape emitted Lua local records to guarantee LuaJIT's native allocation sinking optimization elides allocations along fast loop traces
+- [ ] Fixed-Layout Struct Representations: compile class instances into fixed `ffi.cdef` C struct representations with direct base-plus-offset memory addressing
+
+## Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator
+
+Eliminate trace compiler aborts to keep inner loops 100% on fast machine code traces.
+
+- [ ] Static NYI Checker & Audit Linter: static pass across lowered IR to guarantee no NYI bytecodes or operations (such as table initializers in inner loops) are emitted
+- [ ] Pass-by-Reference Aggregate Enforcement: ensure all C structs and FFI aggregates are passed and returned by pointer/reference rather than by value to avoid interpreter fallback
+- [ ] CData Memory Anchoring: establish a Lua-side anchor registry for raw pointer targets to eliminate use-after-free bugs with unmanaged C memory
+- [ ] Trace Stitching Elimination: replace non-JIT compilable builtin calls along hot paths with JIT-friendly primitives to avoid trace stitching overhead
+
+## Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers
+
+Provide modern, moving-GC-compatible C extension interoperability based on HPy research findings.
+
+- [ ] HPy Universal ABI Trampoline: implement a LuaJIT FFI loader for the HPy Universal ABI, replacing raw `PyObject*` pointers with opaque handles and ownership semantics
+- [ ] Zero-Copy NumPy C-API Wrapping: support `PyArray_SimpleNewFromData` semantics over LuaJIT FFI contiguous memory buffers without serialization
+- [ ] Refcount Elimination in Extensions: enable C extensions compiled against `hpy.h` to run at native speed without emulating CPython's reference counting or address stability
+- [ ] Universal Wheel Loader for HPy: integrate HPy wheel resolution into `luthon-pip` for drop-in package installation
+
+## Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks
+
+Target ultra-low latency, game scripting, quantitative finance, and embedded systems based on Snabb and LuaVTS patterns.
+
+- [ ] Zero-GC Preallocated Memory Freelists: implement memory freelist pools for financial models and game loops to eliminate garbage collection jitter entirely during steady-state processing
+- [ ] Host-to-Script Fast Edge: provide ultra-low latency (~10ns) C host invocation bindings for embedding Luthon in game engines and simulation runtimes
+- [ ] PyPerformance & CLBG Automated Benchmark Suite: integrate real-world benchmark suites (nbody, spectral-norm, binary-trees, json-parsing) measuring speedups vs CPython and PyPy
+- [ ] Embedded & Edge Profile: generate minimal standalone LuaJIT bundles (<500 KB) for memory-constrained and edge IoT devices
 
 ## How to update
 
