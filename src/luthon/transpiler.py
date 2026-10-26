@@ -613,14 +613,20 @@ def transpile(source: str) -> str:
     return Transpiler().transpile(source)
 
 
-def transpile_ir(source: str) -> str:
+def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, filename: str = ""):
     """Transpile via the IR pipeline (semantic -> IR -> Lua codegen)."""
     from .semantic import analyze
     from .ir import IRLowerer
-    from .codegen import generate
+    from .codegen import generate, generate_with_sourcemap
     from .stdlib import STDLIB_LUA
     scope = analyze(source)
     tree = __import__("ast").parse(source)
     ir = IRLowerer()
     module = ir.lower_module(tree, scope)
+    if optimize:
+        from .optimizer import optimize as opt_pass
+        opt_pass(module)
+    if sourcemap:
+        lua, sm = generate_with_sourcemap(module, filename=filename)
+        return STDLIB_LUA + chr(10) + lua + chr(10) + "main()", sm
     return STDLIB_LUA + chr(10) + generate(module) + chr(10) + "main()"

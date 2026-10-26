@@ -16,6 +16,7 @@ class Instr:
     args: list = field(default_factory=list)
     result: Optional[str] = None
     src_line: int = 0
+    src_col: int = 0
 
 
 @dataclass
@@ -51,6 +52,7 @@ class IRLowerer:
         self.module = Module(name="<module>")
         self._cur_fn: Optional[Function] = None
         self._cur_block: Optional[Block] = None
+        self._cur_node: Optional[ast.AST] = None
         self._label_counter = 0
         self._break_stack = []
 
@@ -65,8 +67,11 @@ class IRLowerer:
         self._label_counter += 1
         return f"{prefix}{self._label_counter}"
 
-    def _emit(self, op, args=None, result=None, src_line=0):
-        ins = Instr(op=op, args=list(args or []), result=result, src_line=src_line)
+    def _emit(self, op, args=None, result=None, src_line=0, src_col=0):
+        if src_line == 0 and hasattr(self, "_cur_node") and self._cur_node is not None:
+            src_line = getattr(self._cur_node, "lineno", 0)
+            src_col = getattr(self._cur_node, "col_offset", 0)
+        ins = Instr(op=op, args=list(args or []), result=result, src_line=src_line, src_col=src_col)
         self._cur_block.instrs.append(ins)
         return ins
 
@@ -91,6 +96,14 @@ class IRLowerer:
         return self.module
 
     def lower_stmt(self, node):
+        prev_node = self._cur_node
+        self._cur_node = node
+        try:
+            self._lower_stmt_impl(node)
+        finally:
+            self._cur_node = prev_node
+
+    def _lower_stmt_impl(self, node):
         if isinstance(node, ast.Expr):
             self.lower_expr(node.value)
         elif isinstance(node, ast.Assign):
@@ -181,6 +194,14 @@ class IRLowerer:
             self._emit("BRANCH_NONE", [nxt, end_lbl])
             if isinstance(node.target, ast.Name):
                 self._emit("STORE", [node.target.id, nxt])
+            elif isinstance(node.target, (ast.Tuple, ast.List)):
+                for i, t in enumerate(node.target.elts):
+                    if isinstance(t, ast.Name):
+                        idx_tmp = self._new_tmp()
+                        self._emit("CONST", [i], result=idx_tmp)
+                        elem_tmp = self._new_tmp()
+                        self._emit("SUBSCR", [nxt, idx_tmp], result=elem_tmp)
+                        self._emit("STORE", [t.id, elem_tmp])
             self._emit("JUMP", [body_lbl])
             self._cur_block = self._new_block(body_lbl)
             for s in node.body:
@@ -206,6 +227,25 @@ class IRLowerer:
                 cell = self._new_tmp()
                 self._emit("MAKE_CELL", [cv], result=cell)
                 self._emit("STORE", [cv, cell])
+
+            # Unpack default parameter values
+            args_list = node.args.args
+            defaults = node.args.defaults
+            if defaults:
+                offset = len(args_list) - len(defaults)
+                for i, default in enumerate(defaults):
+                    param_name = args_list[offset + i].arg
+                    def_tmp = self.lower_expr(default)
+                    is_nil_lbl = self._new_label("def_set")
+                    skip_lbl = self._new_label("def_skip")
+                    chk_tmp = self._new_tmp()
+                    self._emit("CMP", ["eq", param_name, "nil"], result=chk_tmp)
+                    self._emit("BRANCH", [chk_tmp, is_nil_lbl, skip_lbl])
+                    self._cur_block = self._new_block(is_nil_lbl)
+                    self._emit("STORE", [param_name, def_tmp])
+                    self._emit("JUMP", [skip_lbl])
+                    self._cur_block = self._new_block(skip_lbl)
+
             for s in node.body:
                 self.lower_stmt(s)
             if not node.body or not isinstance(node.body[-1], ast.Return):
@@ -222,21 +262,43 @@ class IRLowerer:
                 result_tmp = self._new_tmp()
                 self._emit("CALL", [dec_tmp, fn_tmp], result=result_tmp)
                 self._emit("STORE", [fn.name, result_tmp])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                self._emit("IMPORT", [name, alias.name])
         elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                mod_tmp = self._new_tmp()
-                self._emit("LOAD", [node.module], result=mod_tmp)
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    attr_tmp = self._new_tmp()
-                    self._emit("GET_ATTR", [mod_tmp, alias.name], result=attr_tmp)
-                    self._emit("STORE", [name, attr_tmp])
-            else:
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    self._emit("LOAD", [name], result=self._new_tmp())
+            mod = node.module or ""
+            for alias in node.names:
+                name = alias.asname or alias.name
+                self._emit("IMPORT_FROM", [name, mod, alias.name])
         elif isinstance(node, ast.Pass):
             pass
+        elif isinstance(node, ast.Try):
+            try_label = self._new_label("try")
+            try_block = self._new_block(try_label)
+            self._cur_block = try_block
+            self._emit("TRY_BEGIN", [], result=self._new_tmp())
+            for s in node.body:
+                self.lower_stmt(s)
+            self._emit("END_TRY", [], result=self._new_tmp())
+            finally_label = self._new_label("finally")
+            end_label = self._new_label("end_try")
+            for h in node.handlers:
+                handler_lbl = self._new_label("except")
+                self._cur_block = self._new_block(handler_lbl)
+                if h.name:
+                    self._emit("STORE", [h.name, "_exc"])
+                for s in h.body:
+                    self.lower_stmt(s)
+                self._emit("END_CATCH", [], result=self._new_tmp())
+            self._emit("END_ALL_CATCH", [], result=self._new_tmp())
+            for s in node.orelse:
+                self.lower_stmt(s)
+            if node.finalbody:
+                self._cur_block = self._new_block(finally_label)
+                for s in node.finalbody:
+                    self.lower_stmt(s)
+            self._cur_block = self._new_block(end_label)
         elif isinstance(node, ast.ClassDef):
             # Check for @dataclass decorator (handles @dataclass and @dataclass())
             is_dataclass = False
@@ -358,6 +420,24 @@ class IRLowerer:
                 self._cur_block = prev_block
 
             self._emit("STORE", [node.name, cls])
+        elif isinstance(node, ast.Raise):
+            if node.exc:
+                exc_tmp = self.lower_expr(node.exc)
+                self._emit("CALL", ["error", exc_tmp], result=self._new_tmp())
+            else:
+                self._emit("CALL", ["error", '"RuntimeError"'], result=self._new_tmp())
+        elif isinstance(node, ast.Assert):
+            cond_tmp = self.lower_expr(node.test)
+            pass_lbl = self._new_label("assert_ok")
+            fail_lbl = self._new_label("assert_fail")
+            self._emit("BRANCH", [cond_tmp, pass_lbl, fail_lbl])
+            self._cur_block = self._new_block(fail_lbl)
+            msg_tmp = self.lower_expr(node.msg) if node.msg else None
+            if msg_tmp:
+                self._emit("CALL", ["error", msg_tmp], result=self._new_tmp())
+            else:
+                self._emit("CALL", ["error", '"AssertionError"'], result=self._new_tmp())
+            self._cur_block = self._new_block(pass_lbl)
         elif isinstance(node, ast.Break):
             if self._break_stack:
                 self._emit("JUMP", [self._break_stack[-1]])
@@ -393,6 +473,17 @@ class IRLowerer:
     def lower_expr(self, node):
         if node is None:
             return None
+        prev_node = self._cur_node
+        if hasattr(node, "lineno"):
+            self._cur_node = node
+        try:
+            return self._lower_expr_impl(node)
+        finally:
+            self._cur_node = prev_node
+
+    def _lower_expr_impl(self, node):
+        if node is None:
+            return None
         if isinstance(node, ast.Constant):
             t = self._new_tmp()
             v = node.value
@@ -416,11 +507,11 @@ class IRLowerer:
                 lower_tmp = None
                 upper_tmp = None
                 if node.slice.lower is not None:
-                    lower_tmp = self.lower_expr(node.slice.lower)
+                    l_val = self.lower_expr(node.slice.lower)
                     loff = self._new_tmp()
                     self._emit("CONST", [1], result=loff)
                     lower_tmp = self._new_tmp()
-                    self._emit("BINOP", ["add", lower_tmp, loff], result=lower_tmp)
+                    self._emit("BINOP", ["add", l_val, loff], result=lower_tmp)
                 if node.slice.upper is not None:
                     upper_tmp = self.lower_expr(node.slice.upper)
                     # upper is exclusive in Python, inclusive in Lua: no offset needed
@@ -575,6 +666,46 @@ class IRLowerer:
             t = self._new_tmp()
             self._emit("MAKE_FUNCTION", [fn.name], result=t)
             return t
+        if isinstance(node, ast.JoinedStr):
+            # f-string: concatenate all parts
+            values = node.values
+            if not values:
+                t = self._new_tmp()
+                self._emit("CONST", ['""'], result=t)
+                return t
+            first = values[0]
+            if isinstance(first, ast.FormattedValue):
+                val_tmp = self.lower_expr(first.value)
+                res = self._new_tmp()
+                str_fn = self._new_tmp()
+                self._emit("LOAD", ["str"], result=str_fn)
+                self._emit("CALL", [str_fn, val_tmp], result=res)
+            else:
+                res = self.lower_expr(first)
+
+            for part in values[1:]:
+                if isinstance(part, ast.FormattedValue):
+                    val_tmp = self.lower_expr(part.value)
+                    part_str = self._new_tmp()
+                    str_fn = self._new_tmp()
+                    self._emit("LOAD", ["str"], result=str_fn)
+                    self._emit("CALL", [str_fn, val_tmp], result=part_str)
+                    new_res = self._new_tmp()
+                    self._emit("BINOP", ["concat", res, part_str], result=new_res)
+                    res = new_res
+                else:
+                    part_tmp = self.lower_expr(part)
+                    new_res = self._new_tmp()
+                    self._emit("BINOP", ["concat", res, part_tmp], result=new_res)
+                    res = new_res
+            return res
+        if isinstance(node, ast.FormattedValue):
+            val_tmp = self.lower_expr(node.value)
+            res = self._new_tmp()
+            str_fn = self._new_tmp()
+            self._emit("LOAD", ["str"], result=str_fn)
+            self._emit("CALL", [str_fn, val_tmp], result=res)
+            return res
         # fallback
         t = self._new_tmp()
         self._emit("EXPR", [ast.dump(node)], result=t)

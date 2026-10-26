@@ -1,5 +1,5 @@
 def _op(op):
-    return {"add": "+", "sub": "-", "mul": "*", "div": "/", "mod": "%", "pow": "^"}.get(op, op)
+    return {"add": "+", "sub": "-", "mul": "*", "div": "/", "mod": "%", "pow": "^", "concat": ".."}.get(op, op)
 
 
 def _emit(ins):
@@ -20,6 +20,19 @@ def _emit(ins):
     if o == "BINOP":
         l = ins.args[1] if ins.args[1] is not None else "nil"
         r = ins.args[2] if ins.args[2] is not None else "nil"
+        raw_op = (ins.args[0] or "").lower()
+        if raw_op == "floordiv":
+            return ins.result + " = math.floor(" + l + " / " + r + ")"
+        elif raw_op == "band":
+            return ins.result + " = bit.band(" + l + ", " + r + ")"
+        elif raw_op == "bor":
+            return ins.result + " = bit.bor(" + l + ", " + r + ")"
+        elif raw_op == "bxor":
+            return ins.result + " = bit.bxor(" + l + ", " + r + ")"
+        elif raw_op in ("<<", "lshift"):
+            return ins.result + " = bit.lshift(" + l + ", " + r + ")"
+        elif raw_op in (">>", "rshift"):
+            return ins.result + " = bit.rshift(" + l + ", " + r + ")"
         return ins.result + " = " + l + " " + _op(ins.args[0]) + " " + r
     if o == "UNOP":
         if ins.args[0] == "neg":
@@ -42,6 +55,14 @@ def _emit(ins):
         return "do"
     if o == "END":
         return "end"
+    if o == "TRY_BEGIN":
+        return "do\nlocal ok, err = pcall(function()"
+    if o == "END_TRY":
+        return "end)\nif not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
+    if o == "END_CATCH":
+        return "    _exc_matched = true"
+    if o == "END_ALL_CATCH":
+        return "    if not _exc_matched then error(tostring(_exc)) end\nend\nend"
     if o == "CELL_GET":
         return ins.result + " = " + ins.args[0] + ".value"
     if o == "CELL_SET":
@@ -71,8 +92,20 @@ def _emit(ins):
             else:
                 pairs.append("[" + str(kv[1]) + "] = " + str(kv[0]))
         return ins.result + " = {" + ", ".join(pairs) + "}"
+    if o == "MAKE_TUPLE":
+        if ins.args:
+            return ins.result + " = {" + ", ".join(str(a) for a in ins.args) + "}"
+        return ins.result + " = {}"
+    if o == "MAKE_SET":
+        return ins.result + " = {}"
+    if o == "SET_ADD":
+        return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
+    if o == "DICT_SET":
+        return ins.args[0] + "[" + ins.args[1] + "] = " + ins.args[2]
+    if o == "SELECT":
+        return ins.result + " = (" + ins.args[0] + " and " + ins.args[1] + " or " + ins.args[2] + ")"
     if o == "SUBSCR":
-        return ins.result + " = " + ins.args[0] + "[(function() local _i = " + ins.args[1] + "; if type(_i) == \"number\" then _i = _i + 1 end; return _i end)()]"
+        return ins.result + " = __luthon_get(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "GET_ATTR":
         return ins.result + " = " + ins.args[0] + "." + ins.args[1]
     if o == "SET_ATTR":
@@ -80,17 +113,21 @@ def _emit(ins):
     if o == "MAKE_CLASS":
         return ins.result + " = " + ins.args[0]
     if o == "STORE_SUBSCR":
-        return ins.args[0] + "[(function() local _i = " + ins.args[1] + "; if type(_i) == \"number\" then _i = _i + 1 end; return _i end)()] = " + ins.args[2]
+        return "__luthon_set(" + ins.args[0] + ", " + ins.args[1] + ", " + ins.args[2] + ")"
     if o == "LIST_REPEAT":
         return ins.result + " = list_repeat(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "LIST_APPEND":
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
     if o == "NEXT":
         return ins.result + " = " + ins.args[0] + "()"
+    if o == "IMPORT":
+        return ins.args[0] + " = _luthon_import(\"" + ins.args[1] + "\")"
+    if o == "IMPORT_FROM":
+        return ins.args[0] + " = _luthon_import_from(\"" + ins.args[1] + "\", \"" + ins.args[2] + "\")"
     return "-- " + o
 
 
-def generate(module):
+def generate(module, sourcemap=None):
     # propagate upvalue names into enclosing locals for Lua capture
     by_name = {f.name: f for f in module.functions}
     for fn in module.functions:
@@ -132,20 +169,36 @@ def generate(module):
         for b in fn.blocks:
             out.append("  ::" + b.label + "::")
             for ins in b.instrs:
+                gen_line = len(out) + 1
+                if sourcemap is not None and getattr(ins, "src_line", 0) > 0:
+                    src_file = sourcemap.file or (sourcemap.sources[0] if sourcemap.sources else "")
+                    sourcemap.add(
+                        gen_line=gen_line,
+                        gen_col=2,
+                        src_line=ins.src_line,
+                        src_col=getattr(ins, "src_col", 0),
+                        src_file=src_file,
+                    )
                 out.append("  " + _emit(ins))
         out.append("end")
     for c in sorted({fn.name.split(chr(46),1)[0] for fn in module.functions if chr(46) in fn.name}):
         has_repr = any(f.name == c + ".__repr__" for f in module.functions)
         has_eq = any(f.name == c + ".__eq__" for f in module.functions)
-        init_part = "local self = {}; for k,v in pairs(cls) do self[k]=v end; cls.__init__(self, ...)"
-        mt_part = ""
-        if has_repr or has_eq:
-            mt_part = "; if not cls.__instance_mt then cls.__instance_mt = {}; "
-            if has_repr:
-                mt_part = mt_part + "cls.__instance_mt.__tostring = function(inst) return cls.__repr__(inst) end; "
-            if has_eq:
-                mt_part = mt_part + "cls.__instance_mt.__eq = function(a, b) return cls.__eq__(a, b) end; "
-            mt_part = mt_part + "end; setmetatable(self, cls.__instance_mt)"
-        call_body = init_part + mt_part + "; return self end"
-        out.append("setmetatable(" + c + ", {__call = function(cls, ...) " + call_body + "})")
+        out.append(c + ".__index = " + c)
+        mt_setup = c + ".__instance_mt = {__index = " + c
+        if has_repr:
+            mt_setup += ", __tostring = function(inst) return " + c + ".__repr__(inst) end"
+        if has_eq:
+            mt_setup += ", __eq = function(a, b) return " + c + ".__eq__(a, b) end"
+        mt_setup += "}"
+        out.append(mt_setup)
+        call_body = "local self = setmetatable({}, " + c + ".__instance_mt); " + c + ".__init__(self, ...); return self"
+        out.append("setmetatable(" + c + ", {__call = function(cls, ...) " + call_body + " end})")
     return "\n".join(out) + "\n"
+
+
+def generate_with_sourcemap(module, filename=""):
+    from .sourcemap import SourceMap
+    sm = SourceMap(file=filename, sources=[filename] if filename else [])
+    code = generate(module, sourcemap=sm)
+    return code, sm

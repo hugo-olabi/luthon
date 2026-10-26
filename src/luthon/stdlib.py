@@ -1,5 +1,29 @@
 STDLIB_LUA = r"""
 -- Luthon stdlib
+function __luthon_get(t, i)
+  if type(t) == "string" then
+    if type(i) == "number" then
+      if i < 0 then i = #t + i + 1 else i = i + 1 end
+      return string.sub(t, i, i)
+    end
+    return string.sub(t, 1, 0)
+  end
+  if type(i) == "number" then
+    if i < 0 then i = #t + i + 1 else i = i + 1 end
+    return t[i]
+  end
+  return t[i]
+end
+
+function __luthon_set(t, i, v)
+  if type(i) == "number" then
+    if i < 0 then i = #t + i + 1 else i = i + 1 end
+    t[i] = v
+  else
+    t[i] = v
+  end
+end
+
 function range(a, b, step)
   if b == nil then a, b = 0, a; step = 1 end
   if step == nil then step = 1 end
@@ -141,10 +165,10 @@ os.difftime = os.difftime or os.difftime
 os.execute = os.execute or function(cmd) return os.execute(cmd) end
 
 -- sys
-sys.argv = sys.argv or {}
+sys.argv = (arg and type(arg) == "table") and arg or sys.argv or {}
 sys.path = sys.path or {}
 sys.version = sys.version or "3.14"
-sys.platform = "android"
+sys.platform = "linux"
 sys.exit = os.exit
 sys.stdout = io.stdout
 sys.stderr = io.stderr
@@ -364,7 +388,7 @@ datetime.timedelta = function(days, seconds, microseconds, milliseconds, minutes
   return {days = days or 0, seconds = seconds or 0}
 end
 
--- string constants
+-- string constants and methods
 string.ascii_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 string.ascii_lowercase = "abcdefghijklmnopqrstuvwxyz"
 string.ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -373,6 +397,27 @@ string.hexdigits = "0123456789abcdefABCDEF"
 string.octdigits = "01234567"
 string.punctuation = string.char(33,35,36,37,38,39,40,41,42,43,44,45,46,47,58,59,60,61,62,63,64,91,92,93,94,95,96,123,124,125,126)
 string.whitespace = " \t\n\r\f\v"
+string.strip = function(self) return string.match(self, "^%s*(.-)%s*$") end
+string.lstrip = function(self) return string.match(self, "^%s*(.-)$") end
+string.rstrip = function(self) return string.match(self, "^(.-)%s*$") end
+string.split = function(self, sep)
+  sep = sep or "%s"
+  local r = {}
+  for part in string.gmatch(self, "([^" .. sep .. "]+)") do r[#r + 1] = part end
+  return r
+end
+string.replace = function(self, a, b) return (string.gsub(self, a, b)) end
+string.startswith = function(self, p) return string.sub(self, 1, #p) == p end
+string.endswith = function(self, p) return string.sub(self, -#p) == p end
+string.find_py = function(self, p)
+  local pos = string.find(self, p, 1, true)
+  return pos and (pos - 1) or -1
+end
+string.join = function(self, t)
+  local r = {}
+  for i, v in ipairs(t or {}) do r[#r + 1] = tostring(v) end
+  return table.concat(r, self)
+end
 
 -- base64
 base64 = {}
@@ -450,34 +495,106 @@ struct.unpack = function(fmt, s)
   return 0
 end
 
--- hashlib (minimal, not cryptographically secure)
+-- hashlib (with libcrypto FFI when available, fallback otherwise)
 hashlib = {}
-hashlib.md5 = function(data)
-  -- simplified MD5: not cryptographically correct, returns fixed-length hex
-  local h = 0
-  for i = 1, #data do
-    h = (h * 31 + data:byte(i)) % 4294967296
+do
+  local libcrypto = nil
+  pcall(function()
+    local ffi = require("ffi")
+    ffi.cdef[[
+      typedef void EVP_MD_CTX;
+      typedef void EVP_MD;
+      EVP_MD_CTX *EVP_MD_CTX_new(void);
+      void EVP_MD_CTX_free(EVP_MD_CTX *ctx);
+      const EVP_MD *EVP_md5(void);
+      const EVP_MD *EVP_sha1(void);
+      const EVP_MD *EVP_sha256(void);
+      const EVP_MD *EVP_sha512(void);
+      int EVP_DigestInit_ex(EVP_MD_CTX *ctx, const EVP_MD *type, void *impl);
+      int EVP_DigestUpdate(EVP_MD_CTX *ctx, const void *d, size_t cnt);
+      int EVP_DigestFinal_ex(EVP_MD_CTX *ctx, unsigned char *md, unsigned int *s);
+    ]]
+    for _, soname in ipairs({"libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so", "crypto"}) do
+      local ok, lib = pcall(function() return ffi.load(soname) end)
+      if ok and lib then
+        libcrypto = lib
+        break
+      end
+    end
+  end)
+
+  local function evp_digest(data, get_evp_fn, out_len)
+    if libcrypto then
+      local ffi = require("ffi")
+      local ctx = libcrypto.EVP_MD_CTX_new()
+      libcrypto.EVP_DigestInit_ex(ctx, get_evp_fn(), nil)
+      libcrypto.EVP_DigestUpdate(ctx, data, #data)
+      local out = ffi.new("unsigned char[?]", out_len)
+      local len = ffi.new("unsigned int[1]")
+      libcrypto.EVP_DigestFinal_ex(ctx, out, len)
+      libcrypto.EVP_MD_CTX_free(ctx)
+      local hex = {}
+      for i = 0, len[0] - 1 do
+        table.insert(hex, string.format("%02x", out[i]))
+      end
+      return table.concat(hex)
+    end
+    return nil
   end
-  return string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296)
-end
-hashlib.sha1 = function(data)
-  -- simplified SHA1: not cryptographically correct, returns fixed-length hex
-  local h = 0
-  for i = 1, #data do
-    h = (h * 37 + data:byte(i)) % 4294967296
+
+  local function make_hash_obj(data, hex_str)
+    local obj = {
+      _data = data,
+      _hex = hex_str,
+      hexdigest = function(self) return self._hex end,
+      digest = function(self)
+        local bytes = {}
+        for i = 1, #self._hex, 2 do
+          table.insert(bytes, string.char(tonumber(self._hex:sub(i, i+1), 16)))
+        end
+        return table.concat(bytes)
+      end
+    }
+    setmetatable(obj, {__tostring = function(self) return self._hex end})
+    return obj
   end
-  return string.format("%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
-end
-hashlib.sha256 = function(data)
-  -- simplified SHA256: not cryptographically correct, returns fixed-length hex
-  local h = 0
-  for i = 1, #data do
-    h = (h * 41 + data:byte(i)) % 4294967296
+
+  hashlib.md5 = function(data)
+    data = tostring(data or "")
+    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_md5, 16)
+    if real_hex then return make_hash_obj(data, real_hex) end
+    local h = 0
+    for i = 1, #data do h = (h * 31 + data:byte(i)) % 4294967296 end
+    local hex = string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296)
+    return make_hash_obj(data, hex)
   end
-  return string.format("%08x%08x%08x%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296, h * 1103515245 % 4294967296, h * 12345 % 4294967296, h * 99991 % 4294967296)
-end
-hashlib.sha512 = function(data)
-  return hashlib.sha256(data) .. hashlib.sha256(data .. "salt")
+
+  hashlib.sha1 = function(data)
+    data = tostring(data or "")
+    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_sha1, 20)
+    if real_hex then return make_hash_obj(data, real_hex) end
+    local h = 0
+    for i = 1, #data do h = (h * 37 + data:byte(i)) % 4294967296 end
+    local hex = string.format("%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
+    return make_hash_obj(data, hex)
+  end
+
+  hashlib.sha256 = function(data)
+    data = tostring(data or "")
+    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_sha256, 32)
+    if real_hex then return make_hash_obj(data, real_hex) end
+    local h = 0
+    for i = 1, #data do h = (h * 41 + data:byte(i)) % 4294967296 end
+    local hex = string.format("%08x%08x%08x%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296, h * 1103515245 % 4294967296, h * 12345 % 4294967296, h * 99991 % 4294967296)
+    return make_hash_obj(data, hex)
+  end
+
+  hashlib.sha512 = function(data)
+    data = tostring(data or "")
+    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_sha512, 64)
+    if real_hex then return make_hash_obj(data, real_hex) end
+    return make_hash_obj(data, hashlib.sha256(data):hexdigest() .. hashlib.sha256(data .. "salt"):hexdigest())
+  end
 end
 
 -- pathlib
@@ -952,6 +1069,47 @@ end
 ast.increment_lineno = function(node, n)
   n = n or 1
   return node
+end
+
+-- Runtime import helper functions
+local _luthon_modules_mod = nil
+local function _get_modules_mod()
+  if not _luthon_modules_mod then
+    local ok, m = pcall(require, "src/luthon/lua/modules")
+    if ok then _luthon_modules_mod = m end
+    if not ok then
+      local ok2, m2 = pcall(require, "luthon.lua.modules")
+      if ok2 then _luthon_modules_mod = m2 end
+    end
+  end
+  return _luthon_modules_mod
+end
+
+function _luthon_import(mod_name)
+  if mod_name == "__future__" then return {} end
+  if _G[mod_name] then return _G[mod_name] end
+  local ok, m = pcall(require, mod_name)
+  if ok and m then return m end
+  local mm = _get_modules_mod()
+  if mm then
+    local ok2, m2 = pcall(mm.load, mod_name)
+    if ok2 and m2 then return m2 end
+  end
+  return _G[mod_name] or {}
+end
+
+function _luthon_import_from(mod_name, item_name)
+  if mod_name == "__future__" then return item_name end
+  local m = _luthon_import(mod_name)
+  if type(m) == "table" and m[item_name] ~= nil then
+    return m[item_name]
+  end
+  if _G[item_name] ~= nil then
+    return _G[item_name]
+  end
+  local sub = _luthon_import(mod_name .. "." .. item_name)
+  if sub ~= nil and sub ~= _G[mod_name] then return sub end
+  return (type(m) == "table" and m[item_name]) or _G[item_name]
 end
 """
 

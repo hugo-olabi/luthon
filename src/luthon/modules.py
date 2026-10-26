@@ -23,6 +23,10 @@ class ModuleLoader:
         for pth in os.environ.get("PYTHONPATH", "").split(os.pathsep):
             if pth:
                 paths.append(pth)
+        from .pip import get_default_site_packages
+        luthon_site = str(get_default_site_packages())
+        if luthon_site not in paths:
+            paths.append(luthon_site)
         self.search_paths = paths
         self.cache: Dict[str, object] = {}
         self._deps: Dict[str, tuple] = {}
