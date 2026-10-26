@@ -208,9 +208,13 @@ end
 ------------------------------------------------------------------------------
 
 function M.generate(module, skip_prelude, sourcemap)
-  local out = {}
+  local out = {
+    "local _bit_band, _bit_bor, _bit_bxor, _bit_lshift, _bit_rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift",
+    "local _math_floor, _math_abs, _math_min, _math_max = math.floor, math.abs, math.min, math.max",
+    "local _table_insert, _table_concat, _string_sub = table.insert, table.concat, string.sub",
+  }
   if not skip_prelude then
-    table.insert(out, M.prelude())
+    table.insert(out, 1, M.prelude())
   end
 
   -- Collect function names for upvalue propagation

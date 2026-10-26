@@ -22,7 +22,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 10 — C Extensions, Native FFI & Hybrid Python Bridge | ✅ Done | 6/6 |
 | Phase 11 — Luthon Package Manager (luthon-pip) | ✅ Done | 6/6 |
 | Phase 12 — Pipeline Parity & Full Source Self-Compilation | ✅ Done | 6/6 |
-| Phase 13 — High-Performance JIT Optimization & NYI Elimination | ⏳ Pending | 0/3 |
+| Phase 13 — High-Performance JIT Optimization & NYI Elimination | ✅ Done | 3/3 |
 | Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ⏳ Pending | 0/3 |
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ⏳ Pending | 0/4 |
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ⏳ Pending | 0/3 |
@@ -170,9 +170,9 @@ Address discrepancies between the Python IR pipeline and Lua bootstrap pipeline 
 
 Eliminate LuaJIT NYI bytecode aborts to ensure tight loops run entirely within the JIT trace compiler.
 
-- [ ] Trace-friendly sequence iterations: replace `pairs()` with `ipairs()` or indexed numeric loops in runtime helpers
-- [ ] File-level local aliasing: emit local aliases for standard library primitives (`local _bit_band = bit.band`, `local _math_floor = math.floor`)
-- [ ] Register allocation & temporary reuse: implement live-range temporary variable pooling in `optimizer.py` to prevent LuaJIT 200-local limit spillover
+- [x] Trace-friendly sequence iterations: replace `pairs()` with `ipairs()` or indexed numeric loops in runtime helpers
+- [x] File-level local aliasing: emit local aliases for standard library primitives (`local _bit_band = bit.band`, `local _math_floor = math.floor`)
+- [x] Register allocation & temporary reuse: implement live-range temporary variable pooling in `optimizer.py` to prevent LuaJIT 200-local limit spillover
 
 ## Phase 14 — Numeric Acceleration & Unboxed FFI Memory
 

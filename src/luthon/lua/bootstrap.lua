@@ -48,22 +48,15 @@ function bool(x) return x ~= nil and x ~= false end
 function round(x, n) n=n or 0; local f=10^n; return math.floor(x*f+0.5)/f end
 function min(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]<m then m=a[i] end end; return m end
 function max(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]>m then m=a[i] end end; return m end
-function sum(t) local s=0; for _,v in ipairs(t) do s=s+v end; return s end
-function sorted(t) local r={}; for i,v in ipairs(t) do r[i]=v end; table.sort(r); return r end
+function sum(t) local s=0; local n=#t; for i=1,n do s=s+t[i] end; return s end
+function sorted(t) local r={}; local n=#t; for i=1,n do r[i]=t[i] end; table.sort(r); return r end
 function reversed(t) local r={}; for i=#t,1,-1 do r[#r+1]=t[i] end; return r end
-function enumerate(t) local r={}; for i,v in ipairs(t) do r[#r+1]={i-1,v} end; return r end
+function enumerate(t) local r={}; local n=#t; for i=1,n do r[#r+1]={i-1,t[i]} end; return r end
 function zip(a,b) local r={}; for i=1,math.min(#a,#b) do r[#r+1]={a[i],b[i]} end; return r end
-function map(f,t) local r={}; for i,v in ipairs(t) do r[#r+1]=f(v) end; return r end
-function filter(f,t) local r={}; for _,v in ipairs(t) do if f(v) then r[#r+1]=v end end; return r end
-function any(t) for _,v in ipairs(t) do if v then return true end end; return false end
-function all(t) for _,v in ipairs(t) do if not v then return false end end; return true end
-
--- Missing builtins
-function set(t)
-  local s = {}
-  if t then for _, v in ipairs(t) do s[v] = true end end
-  return s
-end
+function map(f,t) local r={}; local n=#t; for i=1,n do r[#r+1]=f(t[i]) end; return r end
+function filter(f,t) local r={}; local n=#t; for i=1,n do local v=t[i]; if f(v) then r[#r+1]=v end end; return r end
+function any(t) local n=#t; for i=1,n do if t[i] then return true end end; return false end
+function all(t) local n=#t; for i=1,n do if not t[i] then return false end end; return true end
 
 function frozenset(t)
   local s = {}
@@ -1325,8 +1318,9 @@ debug.setmetatable({}, _slice_mt)
 function _luthon_in(a, b)
   if type(b) == "table" then
     if b[a] ~= nil then return true end
-    for _, v in ipairs(b) do
-      if v == a then return true end
+    local n = #b
+    for i = 1, n do
+      if b[i] == a then return true end
     end
     return false
   elseif type(b) == "string" then

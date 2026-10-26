@@ -145,7 +145,11 @@ def generate(module, sourcemap=None):
             for uv in getattr(child, "upvalues", []):
                 if uv not in fn.locals:
                     fn.locals.append(uv)
-    out = []
+    out = [
+        "local _bit_band, _bit_bor, _bit_bxor, _bit_lshift, _bit_rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift",
+        "local _math_floor, _math_abs, _math_min, _math_max = math.floor, math.abs, math.min, math.max",
+        "local _table_insert, _table_concat, _string_sub = table.insert, table.concat, string.sub",
+    ]
     _fnames = {f.name for f in module.functions}
     # hoist class tables for dotted method names
     classes = set()
