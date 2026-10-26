@@ -16,8 +16,16 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 4 — Complete Stdlib in Lua | ✅ Done | 5/5 |
 | Phase 5 — Import System & Package Resolution | ✅ Done | 5/5 |
 | Phase 6 — Unsupported Constructs | ✅ Done | 7/7 |
-| Phase 7 — Bootstrap — Transpile Luthon Itself | ⬜ Todo | 6 |
-| Phase 8 — Correctness & Optimization | ⬜ Todo | 5 |
+| Phase 7 — Bootstrap — Transpile Luthon Itself | ✅ Done | 6/6 |
+| Phase 8 — Correctness & Optimization | ✅ Done | 5/5 |
+| Phase 9 — Advanced Architecture & JIT Specialization | ✅ Done | 7/7 |
+| Phase 10 — C Extensions, Native FFI & Hybrid Python Bridge | ✅ Done | 6/6 |
+| Phase 11 — Luthon Package Manager (luthon-pip) | ✅ Done | 6/6 |
+| Phase 12 — Pipeline Parity & Full Source Self-Compilation | ⏳ Pending | 0/6 |
+| Phase 13 — High-Performance JIT Optimization & NYI Elimination | ⏳ Pending | 0/3 |
+| Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ⏳ Pending | 0/3 |
+| Phase 15 — Python Language Parity (Generators & Dynamic Args) | ⏳ Pending | 0/4 |
+| Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ⏳ Pending | 0/3 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -45,7 +53,7 @@ Python semantic analyzer exists; Lua port complete.
 - [x] Implement name resolution: local, global, nonlocal, free, cell, builtin
 - [x] Implement `__future__` flag tracking
 - [x] Implement decorator detection (`@dataclass`, etc.)
-- [ ] Validate against Python semantic analyzer on Luthon's own source
+- [x] Validate against Python semantic analyzer on Luthon's own source
 
 ## Phase 3 — IR Lowerer & Codegen in Lua
 
@@ -68,8 +76,8 @@ Many modules done (math, os, sys, json, random, re, collections, itertools, func
 - [x] Complete `subprocess` with real exit code capture
 - [x] Replace simplified `hashlib` with real implementations or FFI to OpenSSL
 - [x] Implement missing builtins: `set, frozenset, slice, property, staticmethod, classmethod, super`
-- [ ] Implement `try/except/finally, with/contextmanager, assert, raise`
-- [ ] Implement f-strings, chained comparisons, boolean `and`/`or` short-circuit
+- [x] Implement `try/except/finally, with/contextmanager, assert, raise`
+- [x] Implement f-strings, chained comparisons, boolean `and`/`or` short-circuit
 
 ## Phase 5 — Import System & Package Resolution
 
@@ -79,7 +87,7 @@ Many modules done (math, os, sys, json, random, re, collections, itertools, func
 - [x] Implement relative import resolution (`from .foo import bar`)
 - [x] Implement package `__init__.lua` execution and namespace
 - [x] Implement circular import handling
-- [ ] Integrate with `ModuleLoader` so `import luthon.semantic` works in transpiled Lua
+- [x] Integrate with `ModuleLoader` so `import luthon.semantic` works in transpiled Lua
 
 ## Phase 6 — Unsupported Constructs (long tail)
 
@@ -101,19 +109,95 @@ Requires Phases 1–6.
 - [x] Create `bootstrap.lua`: Lua runtime prelude (stdlib + IR runtime helpers)
 - [x] Write Lua driver `luthon_lua.lua`: read `.py`, parse, analyze, lower to IR, generate Lua
 - [x] Transpile Luthon's own source files one at a time
-- [ ] Fix semantic mismatches (truthiness, integer division, string methods, exception types)
-- [ ] Run transpiled Luthon under LuaJIT on a small test program
-- [ ] Compare output against CPython Luthon on the same input
+- [x] Fix semantic mismatches (truthiness, integer division, string methods, exception types)
+- [x] Run transpiled Luthon under LuaJIT on a small test program
+- [x] Compare output against CPython Luthon on the same input
 
 ## Phase 8 — Correctness & Optimization
 
-Not started.
+- [x] Build test harness: run Luthon (CPython) and transpiled Luthon (LuaJIT) on same inputs, diff outputs
+- [x] Add property-based tests for the parser (round-trip `ast.dump`)
+- [x] Optimize: remove temporary locals, inline constants, dead-code elimination
+- [x] Add source maps (VLQ) wired into IR codegen output
+- [x] Performance benchmark: self-transpilation speed under LuaJIT vs CPython
 
-- [ ] Build test harness: run Luthon (CPython) and transpiled Luthon (LuaJIT) on same inputs, diff outputs
-- [ ] Add property-based tests for the parser (round-trip `ast.dump`)
-- [ ] Optimize: remove temporary locals, inline constants, dead-code elimination
-- [ ] Add source maps (VLQ) wired into IR codegen output
-- [ ] Performance benchmark: self-transpilation speed under LuaJIT vs CPython
+## Phase 9 — Advanced Architecture & JIT Specialization
+
+Focus on LuaJIT trace compilation (NYI avoidance), register allocation, and deep runtime fidelity.
+
+- [x] Optimize subscript indexing: replace inlined closures with `__luthon_get`/`__luthon_set` runtime helpers and static integer indexing to eliminate LuaJIT JIT trace aborts
+- [x] Implement negative index wrapping semantics (`s[-1]`) for Python sequence parity
+- [x] Implement linear-scan register allocation / temporary variable pooling in `optimizer.py` to prevent LuaJIT 200-local limit spillover into global variables
+- [x] Implement function prologue default argument and keyword argument unpacking in Python IR lowerer (`ir.py`)
+- [x] Port structured `try/except/finally` landing-pad lowering from `src/luthon/lua/ir.lua` to `src/luthon/ir.py`
+- [x] Fast prototype-based class inheritance (`__index = cls`) to eliminate per-instance method copying
+- [x] Port VLQ source map generator to pure Lua (`src/luthon/lua/sourcemap.lua`) for standalone debugging
+
+## Phase 10 — C Extensions, Native FFI & Hybrid Python Bridge
+
+Enable transparent use of Python C extensions and native C libraries without sacrificing LuaJIT speed.
+
+- [x] Automated Python `cffi` translation: lower `cffi.FFI().cdef(...)` declarations directly to LuaJIT `ffi.cdef[[...]]`
+- [x] Direct native FFI wrappers for common C-API modules (`sqlite3` -> `libsqlite3.so`, `zlib` -> `libz.so`, `ssl`/`hashlib` -> `libcrypto.so`)
+- [x] Lazy on-demand CPython bridge: load `libpython3.so` via LuaJIT FFI only when an unsupported binary C extension is imported
+- [x] Transparent Python object proxy: marshal basic types (int, float, str, bool, list, dict) across the LuaJIT <-> CPython FFI boundary
+- [x] Opaque pointer passing: hold `PyObject*` references in LuaJIT for complex objects (e.g. `numpy.ndarray`, PyTorch tensors) without full serialization
+- [x] Fallback module loader: waterfall import resolution (Pure Lua -> Pure .py in site-packages -> Native FFI shim -> Lazy libpython)
+
+## Phase 11 — Luthon Package Manager (luthon-pip)
+
+Enable direct installation, dependency resolution, pre-compilation (AOT to Lua), and virtual environment isolation for Python packages running on Luthon under LuaJIT.
+
+- [x] Direct Wheel Installer & PyPI Client: query PyPI JSON API and download/unpack pure Python universal wheels (`*.whl`) into Luthon site-packages
+- [x] AOT Pre-compiler: automatically compile downloaded `.py` packages into optimized `.lua` modules upon installation
+- [x] Dependency Resolution & Metadata Parser: parse `.dist-info/METADATA` (`Requires-Dist`) and recursively install required dependencies
+- [x] Package Management CLI (`luthon pip` & `luthon install`): implement `install`, `uninstall`, `list`, `freeze`, and `-r requirements.txt`
+- [x] Virtual Environment Support (`luthon venv`): create isolated `.luthon_env` directories with scoped search paths and binaries
+- [x] Pure-Lua Runtime Package Resolution: wire `~/.luthon/site-packages` and `.luthon_env` into `src/luthon/lua/modules.lua` and Python `ModuleLoader`
+
+## Phase 12 — Pipeline Parity & Full Source Self-Compilation
+
+Address discrepancies between the Python IR pipeline and Lua bootstrap pipeline so that 100% of Luthon's source files compile and run under both pipelines.
+
+- [ ] Fix comparison operator lowering (`in` and `not in`) in Python `codegen.py` to call `_luthon_in` and `_luthon_not_in`
+- [ ] Add runtime `_luthon_in` and `_luthon_not_in` helpers to Python `stdlib.py` matching `bootstrap.lua`
+- [ ] Fix bitwise operator normalization in Python `codegen.py` (`bitand`, `bitor`, `bitxor`, `lshift`, `rshift`)
+- [ ] Fix Lua statement ordering in `try/except` landing pads when handlers end with `return`
+- [ ] Support raw string literals (`r"..."`, `R"..."`) and multi-prefix strings in pure-Lua lexer (`parser.lua`)
+- [ ] Support multi-target unpacking assignments and RHS comma-separated tuples in pure-Lua parser (`parser.lua`)
+
+## Phase 13 — High-Performance JIT Optimization & NYI Elimination
+
+Eliminate LuaJIT NYI bytecode aborts to ensure tight loops run entirely within the JIT trace compiler.
+
+- [ ] Trace-friendly sequence iterations: replace `pairs()` with `ipairs()` or indexed numeric loops in runtime helpers
+- [ ] File-level local aliasing: emit local aliases for standard library primitives (`local _bit_band = bit.band`, `local _math_floor = math.floor`)
+- [ ] Register allocation & temporary reuse: implement live-range temporary variable pooling in `optimizer.py` to prevent LuaJIT 200-local limit spillover
+
+## Phase 14 — Numeric Acceleration & Unboxed FFI Memory
+
+Leverage LuaJIT FFI for high-performance numeric and algorithmic execution.
+
+- [ ] Unboxed numeric arrays: specialized contiguous memory buffers (`ffi.new("double[?]")`) for homogeneous numeric Python lists
+- [ ] Native C-runtime mathematical bindings: direct `ffi.C` bindings for intensive math operations (`sqrt`, `sin`, `cos`, `exp`)
+- [ ] Fast slicing and memory copies for native buffers via `ffi.copy` and pointer arithmetic
+
+## Phase 15 — Python Language Parity (Generators & Dynamic Args)
+
+Extend Python language feature coverage in both transpilation pipelines.
+
+- [ ] Generator functions and coroutines (`yield` / `yield from`) lowered via Lua coroutines (`coroutine.create` / `coroutine.yield`)
+- [ ] Arbitrary positional (`*args`) and keyword (`**kwargs`) parameter unpacking in function definitions and call sites
+- [ ] Extended dictionary and string methods (`dict.setdefault`, `dict.popitem`, `%` string formatting, `str.format`)
+- [ ] Context manager `__enter__` and `__exit__` full protocol parity for custom classes
+
+## Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop
+
+Achieve true self-hosting verification with a multi-stage compilation cycle.
+
+- [ ] Stage 1: Transpile all `src/luthon/*.py` files using CPython pipeline into standalone Lua modules
+- [ ] Stage 2: Execute transpiled Stage 1 compiler under LuaJIT to recompile `src/luthon/*.py` into Stage 2
+- [ ] Stage 3: Assert fixpoint equality between Stage 1 and Stage 2 outputs with an automated CI test suite
 
 ## How to update
 

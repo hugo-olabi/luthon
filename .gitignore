@@ -4,6 +4,7 @@ __pycache__/
 bench/
 test_file.txt
 *.lua
+!src/luthon/lua/*.lua
 .pytest_cache/
 .idea/
 .vscode/
