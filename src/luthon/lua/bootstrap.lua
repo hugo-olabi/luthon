@@ -177,8 +177,176 @@ function len(t)
   if type(t) == "table" and rawget(t, "_len") ~= nil then return rawget(t, "_len") end
   return #t
 end
-function list(t) if type(t) == "function" then local r={}; for v in t do r[#r+1]=v end; return r end; local r={}; if t then for _,v in ipairs(t) do r[#r+1]=v end end; return r end
-function iter(t) local i=0; return function() i=i+1; if i<=#t then return t[i] end; return nil end end
+local _list_methods = {
+  append = function(self, x) table.insert(self, x) end,
+  extend = function(self, other) local n = #other; for i=1,n do table.insert(self, other[i]) end end,
+  pop = function(self, idx)
+    idx = idx or (#self - 1)
+    if idx < 0 then idx = #self + idx end
+    return table.remove(self, idx + 1)
+  end,
+  insert = function(self, idx, x) table.insert(self, idx + 1, x) end,
+  remove = function(self, x)
+    local n = #self
+    for i=1,n do
+      if self[i] == x then table.remove(self, i) return end
+    end
+    error("ValueError: list.remove(x): x not in list")
+  end,
+  clear = function(self) for i=#self,1,-1 do self[i] = nil end end,
+}
+_list_mt = {__index = _list_methods}
+
+function make_list(...)
+  local r = {...}
+  return setmetatable(r, _list_mt)
+end
+
+function list(t)
+  if type(t) == "function" then
+    local r = setmetatable({}, _list_mt)
+    for v in t do r[#r+1] = v end
+    return r
+  end
+  local r = setmetatable({}, _list_mt)
+  if t then
+    local n = #t
+    for i=1,n do r[#r+1] = t[i] end
+  end
+  return r
+end
+local _dict_methods = {
+  get = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
+    return default
+  end,
+  setdefault = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
+    rawset(self, k, default)
+    return default
+  end,
+  pop = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then
+      rawset(self, k, nil)
+      return v
+    end
+    if default ~= nil then return default end
+    error("KeyError: " .. tostring(k))
+  end,
+  popitem = function(self)
+    for k, v in pairs(self) do
+      rawset(self, k, nil)
+      return {k, v}
+    end
+    error("KeyError: popitem(): dictionary is empty")
+  end,
+  keys = function(self)
+    local r = {}
+    for k in pairs(self) do table.insert(r, k) end
+    return r
+  end,
+  values = function(self)
+    local r = {}
+    for _, v in pairs(self) do table.insert(r, v) end
+    return r
+  end,
+  items = function(self)
+    local r = {}
+    for k, v in pairs(self) do table.insert(r, {k, v}) end
+    return r
+  end,
+}
+local _dict_mt = {__index = _dict_methods}
+
+function dict(t)
+  local d = setmetatable({}, _dict_mt)
+  if t then
+    if type(t) == "table" then
+      for _, kv in ipairs(t) do
+        if type(kv) == "table" and kv[1] ~= nil then
+          d[kv[1]] = kv[2]
+        end
+      end
+    end
+  end
+  return d
+end
+
+local _lua_raw_str_find = string.find
+local _orig_string_format = string.format
+local _str_methods = {
+  startswith = function(s, prefix)
+    return string.sub(s, 1, #prefix) == prefix
+  end,
+  endswith = function(s, suffix)
+    return suffix == "" or string.sub(s, -#suffix) == suffix
+  end,
+  split = function(s, sep)
+    sep = sep or "%s+"
+    local r = {}
+    local pos = 1
+    local len = #s
+    if sep == "%s+" then
+      for w in string.gmatch(s, "%S+") do table.insert(r, w) end
+      return r
+    end
+    while pos <= len do
+      local s_start, s_end = _lua_raw_str_find(s, sep, pos, true)
+      if not s_start then
+        table.insert(r, string.sub(s, pos))
+        break
+      end
+      table.insert(r, string.sub(s, pos, s_start - 1))
+      pos = s_end + 1
+    end
+    return r
+  end,
+  format = function(s, ...)
+    local args = {...}
+    if _lua_raw_str_find(s, "{}", 1, true) then
+      local idx = 1
+      return (string.gsub(s, "{}", function()
+        local val = tostring(args[idx] or "")
+        idx = idx + 1
+        return val
+      end))
+    end
+    return _orig_string_format(s, ...)
+  end
+}
+for k, v in pairs(_str_methods) do
+  string[k] = v
+end
+
+function make_generator(fn, ...)
+  local args = {...}
+  local co = coroutine.create(function() return fn(unpack(args)) end)
+  local gen = {}
+  gen.__next__ = function()
+    local ok, val = coroutine.resume(co)
+    if not ok then error(val) end
+    if coroutine.status(co) == "dead" and val == nil then return nil end
+    return val
+  end
+  setmetatable(gen, {
+    __call = function() return gen.__next__() end
+  })
+  return gen
+end
+
+function iter(t)
+  if type(t) == "table" and t.__next__ then return t end
+  if type(t) == "function" then return t end
+  local i = 0
+  return function()
+    i = i + 1
+    if i <= #t then return t[i] end
+    return nil
+  end
+end
 function unpack_list(t)
   return t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10]
 end
@@ -1355,8 +1523,9 @@ end
 string.replace = function(self, a, b) return (string.gsub(self, a, b)) end
 string.startswith = function(self, p) return string.sub(self, 1, #p) == p end
 string.endswith = function(self, p) return string.sub(self, -#p) == p end
+local _lua_string_find = string.find
 string.find = function(self, p)
-  local pos = string.find(self, p, 1, true)
+  local pos = _lua_string_find(self, p, 1, true)
   return pos and (pos - 1) or -1
 end
 string.join = function(self, t)

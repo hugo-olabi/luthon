@@ -88,8 +88,8 @@ def _emit(ins):
                     args.append(s)
                 else:
                     args.append('"' + s + '"')
-            return ins.result + " = {" + ", ".join(args) + "}"
-        return ins.result + " = {}"
+            return ins.result + " = setmetatable({" + ", ".join(args) + "}, _list_mt)"
+        return ins.result + " = setmetatable({}, _list_mt)"
     if o == "MAKE_TABLE":
         return ins.result + " = {}"
     if o == "MAKE_DICT":
@@ -99,7 +99,7 @@ def _emit(ins):
                 pairs.append("[" + str(kv[0]) + "] = " + str(kv[1]))
             else:
                 pairs.append("[" + str(kv[1]) + "] = " + str(kv[0]))
-        return ins.result + " = {" + ", ".join(pairs) + "}"
+        return ins.result + " = setmetatable({" + ", ".join(pairs) + "}, _dict_mt)"
     if o == "MAKE_TUPLE":
         if ins.args:
             return ins.result + " = {" + ", ".join(str(a) for a in ins.args) + "}"
@@ -153,11 +153,22 @@ def generate(module, sourcemap=None):
     _fnames = {f.name for f in module.functions}
     # hoist class tables for dotted method names
     classes = set()
+    all_upvalues = set()
     for fn in module.functions:
         if "." in fn.name:
             classes.add(fn.name.split(".", 1)[0])
+        for uv in getattr(fn, "upvalues", []) or []:
+            all_upvalues.add(uv)
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
+    # Hoist module-level locals that are captured as upvalues
+    hoisted_set = set()
+    main_fn = next((f for f in module.functions if f.name == "main"), None)
+    if main_fn and all_upvalues:
+        hoisted = [uv for uv in sorted(all_upvalues) if uv in main_fn.locals]
+        if hoisted:
+            out.append("local " + ", ".join(hoisted))
+            hoisted_set = set(hoisted)
     for fn in module.functions:
         if "." in fn.name:
             prefix, meth = fn.name.split(".", 1)
@@ -166,9 +177,10 @@ def generate(module, sourcemap=None):
             out.append("local function " + fn.name + "(" + ", ".join(fn.params) + ")")
         if getattr(fn, "upvalues", None):
             out.append("  -- upvalues: " + ", ".join(fn.upvalues))
-        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","ffi","bit","set","frozenset"}
+        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","ffi","bit","set","frozenset","table","dict"}
         _classes = {fn.name.split(chr(46),1)[0] for fn in module.functions if chr(46) in fn.name}
-        locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes]
+        uv_set = set(getattr(fn, "upvalues", []) or [])
+        locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set]
         tmps = [t for t in getattr(fn, "tmps", []) if t not in locs]
         # Declare tmps as locals only when the count is small enough to avoid LuaJIT's 200-local limit.
         # Recursive functions (fib, binarytrees) need local tmps; large non-recursive main() can use globals.

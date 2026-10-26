@@ -158,13 +158,13 @@ local function _emit(ins)
     return ins.result .. " = " .. args[1]
   elseif o == "MAKE_LIST" then
     if #args > 0 then
-      return ins.result .. " = {" .. table.concat(args, ", ") .. "}"
+      return ins.result .. " = setmetatable({" .. table.concat(args, ", ") .. "}, _list_mt)"
     end
-    return ins.result .. " = {}"
+    return ins.result .. " = setmetatable({}, _list_mt)"
   elseif o == "MAKE_TUPLE" then
     return ins.result .. " = {" .. table.concat(args, ", ") .. "}"
   elseif o == "MAKE_DICT" then
-    local lines = {ins.result .. " = {}"}
+    local lines = {ins.result .. " = setmetatable({}, _dict_mt)"}
     for _, it in ipairs(args) do
       local k, v = it[1], it[2]
       if k then
@@ -294,7 +294,9 @@ function M.generate(module, skip_prelude, sourcemap)
       for _, f in ipairs(fnames) do if f == l then is_fn = true break end end
       local is_class = false
       for c in pairs(classes) do if c == l then is_class = true break end end
-      if not is_builtin and not is_fn and not is_class then
+      local is_uv = false
+      for _, uv in ipairs(fn.upvalues or {}) do if uv == l then is_uv = true break end end
+      if not is_builtin and not is_fn and not is_class and not is_uv then
         table.insert(locs, l)
       end
     end

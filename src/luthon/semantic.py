@@ -51,11 +51,16 @@ class SemanticAnalyzer(ast.NodeVisitor):
     def _pop(self):
         self._stack.pop()
 
-    def analyze(self, source):
-        tree = ast.parse(source)
+    def analyze_tree(self, tree):
         self.visit(tree)
         self._resolve_up(self.root)
         return self.root
+
+    def analyze(self, source):
+        if isinstance(source, ast.AST):
+            return self.analyze_tree(source)
+        tree = ast.parse(source)
+        return self.analyze_tree(tree)
 
     def visit_Module(self, node):
         for s in node.body:

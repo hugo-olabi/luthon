@@ -35,6 +35,7 @@ class Function:
     freevars: List[str] = field(default_factory=list)
     cellvars: List[str] = field(default_factory=list)
     upvalues: List[str] = field(default_factory=list)
+    nonlocals: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -105,7 +106,26 @@ class IRLowerer:
 
     def _lower_stmt_impl(self, node):
         if isinstance(node, ast.Expr):
-            self.lower_expr(node.value)
+            if isinstance(node.value, ast.YieldFrom):
+                it_tmp = self.lower_expr(node.value.value)
+                iter_fn = self._new_tmp()
+                self._emit("LOAD", ["iter"], result=iter_fn)
+                nxt_iter = self._new_tmp()
+                self._emit("CALL", [iter_fn, it_tmp], result=nxt_iter)
+                loop_lbl = self._new_label("yfrom_loop")
+                body_lbl = self._new_label("yfrom_body")
+                end_lbl = self._new_label("yfrom_end")
+                self._emit("JUMP", [loop_lbl])
+                self._cur_block = self._new_block(loop_lbl)
+                val = self._new_tmp()
+                self._emit("NEXT", [nxt_iter], result=val)
+                self._emit("BRANCH_NONE", [val, end_lbl])
+                self._cur_block = self._new_block(body_lbl)
+                self._emit("CALL", ["coroutine.yield", val], result=self._new_tmp())
+                self._emit("JUMP", [loop_lbl])
+                self._cur_block = self._new_block(end_lbl)
+            else:
+                self.lower_expr(node.value)
         elif isinstance(node, ast.Assign):
             if isinstance(node.targets[0], ast.Tuple):
                 # Tuple unpacking: f, name = expr
@@ -210,12 +230,12 @@ class IRLowerer:
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.FunctionDef):
             fn = Function(name=node.name, params=[a.arg for a in node.args.args])
-            # upvalues from semantic scope if available
-            sc = getattr(node, "_scope", None)
-            if sc is not None:
-                fn.freevars = sorted(getattr(sc, "freevars", set()))
-                fn.cellvars = sorted(getattr(sc, "cellvars", set()))
-                fn.upvalues = list(fn.freevars)
+            # Find nonlocal declarations in function body
+            fn_nonlocals = set()
+            for stmt in node.body:
+                if isinstance(stmt, ast.Nonlocal):
+                    fn_nonlocals.update(stmt.names)
+            fn.nonlocals = sorted(fn_nonlocals)
             prev_fn = self._cur_fn
             prev_block = self._cur_block
             self._cur_fn = fn
@@ -250,10 +270,39 @@ class IRLowerer:
                 self.lower_stmt(s)
             if not node.body or not isinstance(node.body[-1], ast.Return):
                 self._emit("RETURN", [])
-            self.module.functions.append(fn)
-            # Switch back to enclosing block before applying decorators
-            self._cur_fn = prev_fn
-            self._cur_block = prev_block
+            is_gen = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node))
+            if is_gen:
+                # Wrap generator function body inside an implementation function
+                impl_name = fn.name + "_impl"
+                fn.name = impl_name
+                self.module.functions.append(fn)
+
+                # Now create the wrapper function that calls make_generator(impl_name, ...)
+                wrapper_fn = Function(name=node.name, params=[a.arg for a in node.args.args])
+                sc = getattr(node, "_scope", None)
+                if sc is not None:
+                    wrapper_fn.freevars = sorted(getattr(sc, "freevars", set()))
+                    wrapper_fn.cellvars = sorted(getattr(sc, "cellvars", set()))
+                    wrapper_fn.upvalues = list(wrapper_fn.freevars)
+                wrapper_block = Block(label="entry")
+                wrapper_fn.blocks.append(wrapper_block)
+                self._cur_fn = wrapper_fn
+                self._cur_block = wrapper_block
+
+                # Call make_generator(impl_name, arg1, arg2, ...)
+                gen_res = self._new_tmp()
+                call_args = ["make_generator", impl_name] + [a.arg for a in node.args.args]
+                self._emit("CALL", call_args, result=gen_res)
+                self._emit("RETURN", [gen_res])
+                self.module.functions.append(wrapper_fn)
+
+                self._cur_fn = prev_fn
+                self._cur_block = prev_block
+            else:
+                self.module.functions.append(fn)
+                # Switch back to enclosing block before applying decorators
+                self._cur_fn = prev_fn
+                self._cur_block = prev_block
             # Apply decorators (innermost first)
             for dec in reversed(node.decorator_list):
                 dec_tmp = self.lower_expr(dec)
@@ -352,6 +401,11 @@ class IRLowerer:
                     if stmt.name == "__eq__":
                         has_eq = True
                     fn = Function(name=node.name + "." + stmt.name, params=[a.arg for a in stmt.args.args])
+                    sc = getattr(stmt, "_scope", None)
+                    if sc is not None:
+                        fn.freevars = sorted(getattr(sc, "freevars", set()))
+                        fn.cellvars = sorted(getattr(sc, "cellvars", set()))
+                        fn.upvalues = list(fn.freevars)
                     prev_fn = self._cur_fn
                     prev_block = self._cur_block
                     self._cur_fn = fn
@@ -420,6 +474,42 @@ class IRLowerer:
                 self._cur_block = prev_block
 
             self._emit("STORE", [node.name, cls])
+        elif isinstance(node, ast.With):
+            # with statement: enter context, run body, exit context
+            aliases = []
+            for i, item in enumerate(node.items):
+                ctx_tmp = self.lower_expr(item.context_expr)
+                mgr_tmp = self._new_tmp()
+                self._emit("LOAD", [ctx_tmp], result=mgr_tmp)
+                aliases.append(mgr_tmp)
+                enter_tmp = self._new_tmp()
+                self._emit("GET_ATTR", [mgr_tmp, "__enter__"], result=enter_tmp)
+                enter_lbl = self._new_label("with_enter")
+                end_enter_lbl = self._new_label("with_enter_end")
+                self._emit("BRANCH", [enter_tmp, enter_lbl, end_enter_lbl])
+                self._cur_block = self._new_block(enter_lbl)
+                self._emit("DO", [])
+                enter_ret = self._new_tmp()
+                self._emit("CALL", [enter_tmp, mgr_tmp], result=enter_ret)
+                if item.optional_vars and isinstance(item.optional_vars, ast.Name):
+                    self._emit("STORE", [item.optional_vars.id, enter_ret])
+                self._emit("END", [])
+                self._cur_block = self._new_block(end_enter_lbl)
+            # body
+            for s in node.body:
+                self.lower_stmt(s)
+            # __exit__ for each context manager (in reverse order)
+            for mgr_tmp in reversed(aliases):
+                exit_tmp = self._new_tmp()
+                self._emit("GET_ATTR", [mgr_tmp, "__exit__"], result=exit_tmp)
+                exit_lbl = self._new_label("with_exit")
+                end_exit_lbl = self._new_label("with_exit_end")
+                self._emit("BRANCH", [exit_tmp, exit_lbl, end_exit_lbl])
+                self._cur_block = self._new_block(exit_lbl)
+                self._emit("DO", [])
+                self._emit("CALL", [exit_tmp, mgr_tmp], result=self._new_tmp())
+                self._emit("END", [])
+                self._cur_block = self._new_block(end_exit_lbl)
         elif isinstance(node, ast.Raise):
             if node.exc:
                 exc_tmp = self.lower_expr(node.exc)
@@ -441,6 +531,28 @@ class IRLowerer:
         elif isinstance(node, ast.Break):
             if self._break_stack:
                 self._emit("JUMP", [self._break_stack[-1]])
+        elif isinstance(node, ast.Yield):
+            val_tmp = self.lower_expr(node.value) if node.value else None
+            args = [val_tmp] if val_tmp else []
+            self._emit("CALL", ["coroutine.yield"] + args, result=self._new_tmp())
+        elif isinstance(node, ast.YieldFrom):
+            it_tmp = self.lower_expr(node.value)
+            iter_fn = self._new_tmp()
+            self._emit("LOAD", ["iter"], result=iter_fn)
+            nxt_iter = self._new_tmp()
+            self._emit("CALL", [iter_fn, it_tmp], result=nxt_iter)
+            loop_lbl = self._new_label("yfrom_loop")
+            body_lbl = self._new_label("yfrom_body")
+            end_lbl = self._new_label("yfrom_end")
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(loop_lbl)
+            val = self._new_tmp()
+            self._emit("NEXT", [nxt_iter], result=val)
+            self._emit("BRANCH_NONE", [val, end_lbl])
+            self._cur_block = self._new_block(body_lbl)
+            self._emit("CALL", ["coroutine.yield", val], result=self._new_tmp())
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(end_lbl)
         else:
             # fallback: record unsupported
             self._emit("NOP", [type(node).__name__])
@@ -579,7 +691,7 @@ class IRLowerer:
                 root = node.func.value
                 while isinstance(root, ast.Attribute):
                     root = root.value
-                if isinstance(root, ast.Name) and root.id in ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit"):
+                if isinstance(root, ast.Name) and root.id in ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table"):
                     fn = self.lower_expr(node.func)
                     args = [self.lower_expr(a) for a in node.args]
                     kw_table = self._lower_call_keywords(node)
@@ -738,6 +850,12 @@ class IRLowerer:
             self._emit("LOAD", ["str"], result=str_fn)
             self._emit("CALL", [str_fn, val_tmp], result=res)
             return res
+        if isinstance(node, ast.Yield):
+            val_tmp = self.lower_expr(node.value) if node.value else None
+            args = [val_tmp] if val_tmp else []
+            t = self._new_tmp()
+            self._emit("CALL", ["coroutine.yield"] + args, result=t)
+            return t
         # fallback
         t = self._new_tmp()
         self._emit("EXPR", [ast.dump(node)], result=t)

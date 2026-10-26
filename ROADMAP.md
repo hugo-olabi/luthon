@@ -24,7 +24,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 12 — Pipeline Parity & Full Source Self-Compilation | ✅ Done | 6/6 |
 | Phase 13 — High-Performance JIT Optimization & NYI Elimination | ✅ Done | 3/3 |
 | Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ✅ Done | 3/3 |
-| Phase 15 — Python Language Parity (Generators & Dynamic Args) | ⏳ Pending | 0/4 |
+| Phase 15 — Python Language Parity (Generators & Dynamic Args) | ✅ Done | 4/4 |
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ⏳ Pending | 0/3 |
 
 ## Phase 0 — Baseline & Audit
@@ -186,10 +186,10 @@ Leverage LuaJIT FFI for high-performance numeric and algorithmic execution.
 
 Extend Python language feature coverage in both transpilation pipelines.
 
-- [ ] Generator functions and coroutines (`yield` / `yield from`) lowered via Lua coroutines (`coroutine.create` / `coroutine.yield`)
-- [ ] Arbitrary positional (`*args`) and keyword (`**kwargs`) parameter unpacking in function definitions and call sites
-- [ ] Extended dictionary and string methods (`dict.setdefault`, `dict.popitem`, `%` string formatting, `str.format`)
-- [ ] Context manager `__enter__` and `__exit__` full protocol parity for custom classes
+- [x] Generator functions and coroutines (`yield` / `yield from`) lowered via Lua coroutines (`coroutine.create` / `coroutine.yield`)
+- [x] Arbitrary positional (`*args`) and keyword (`**kwargs`) parameter unpacking in function definitions and call sites
+- [x] Extended dictionary and string methods (`dict.setdefault`, `dict.popitem`, `%` string formatting, `str.format`)
+- [x] Context manager `__enter__` and `__exit__` full protocol parity for custom classes
 
 ## Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop
 
