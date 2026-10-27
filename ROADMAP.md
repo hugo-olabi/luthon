@@ -29,7 +29,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ✅ Done | 4/4 |
 | Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ✅ Done | 4/4 |
 | Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ✅ Done | 4/4 |
-| Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ⏳ Pending | 0/4 |
+| Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ✅ Done | 4/4 |
 | Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ⏳ Pending | 0/4 |
 
 ## Phase 0 — Baseline & Audit
@@ -235,10 +235,10 @@ Eliminate trace compiler aborts to keep inner loops 100% on fast machine code tr
 
 Provide modern, moving-GC-compatible C extension interoperability based on HPy research findings.
 
-- [ ] HPy Universal ABI Trampoline: implement a LuaJIT FFI loader for the HPy Universal ABI, replacing raw `PyObject*` pointers with opaque handles and ownership semantics
-- [ ] Zero-Copy NumPy C-API Wrapping: support `PyArray_SimpleNewFromData` semantics over LuaJIT FFI contiguous memory buffers without serialization
-- [ ] Refcount Elimination in Extensions: enable C extensions compiled against `hpy.h` to run at native speed without emulating CPython's reference counting or address stability
-- [ ] Universal Wheel Loader for HPy: integrate HPy wheel resolution into `luthon-pip` for drop-in package installation
+- [x] HPy Universal ABI Trampoline: implement a LuaJIT FFI loader for the HPy Universal ABI, replacing raw `PyObject*` pointers with opaque handles and ownership semantics
+- [x] Zero-Copy NumPy C-API Wrapping: support `PyArray_SimpleNewFromData` semantics over LuaJIT FFI contiguous memory buffers without serialization
+- [x] Refcount Elimination in Extensions: enable C extensions compiled against `hpy.h` to run at native speed without emulating CPython's reference counting or address stability
+- [x] Universal Wheel Loader for HPy: integrate HPy wheel resolution into `luthon-pip` for drop-in package installation
 
 ## Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks
 

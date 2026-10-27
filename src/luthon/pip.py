@@ -48,14 +48,19 @@ class PipInstaller:
             raise RuntimeError(f"Failed to fetch metadata for '{package_name}' from PyPI: {e}")
 
     def find_best_wheel(self, info: dict) -> Tuple[str, str]:
-        """Selects the best wheel (preferring pure-Python universal wheels)."""
+        """Selects the best wheel (preferring pure-Python universal or HPy universal wheels)."""
         urls = info.get("urls", [])
-        # 1. Pure Python universal wheel: py3-none-any.whl or py2.py3-none-any.whl
+        # 1. HPy Universal ABI wheel: *-hpy_*.whl or *-hpy.whl
+        for item in urls:
+            fn = item.get("filename", "")
+            if ("-hpy" in fn.lower() or "hpy_universal" in fn.lower()) and fn.endswith(".whl"):
+                return item["url"], fn
+        # 2. Pure Python universal wheel: py3-none-any.whl or py2.py3-none-any.whl
         for item in urls:
             fn = item.get("filename", "")
             if fn.endswith("-py3-none-any.whl") or fn.endswith("-py2.py3-none-any.whl"):
                 return item["url"], fn
-        # 2. Any .whl
+        # 3. Any .whl
         for item in urls:
             fn = item.get("filename", "")
             if fn.endswith(".whl"):
