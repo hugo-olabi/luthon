@@ -9,28 +9,31 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 
 | Phase | Status | Steps |
 |-------|--------|-------|
-| Phase 0 — Baseline & Audit | ✅ Done | 4/4 |
-| Phase 1 — Python Parser in Lua | ✅ Done | 5/5 |
-| Phase 2 — Semantic Analyzer in Lua | ✅ Done | 6/6 |
-| Phase 3 — IR Lowerer & Codegen in Lua | ✅ Done | 7/7 |
-| Phase 4 — Complete Stdlib in Lua | ✅ Done | 5/5 |
-| Phase 5 — Import System & Package Resolution | ✅ Done | 5/5 |
-| Phase 6 — Unsupported Constructs | ✅ Done | 7/7 |
-| Phase 7 — Bootstrap — Transpile Luthon Itself | ✅ Done | 6/6 |
-| Phase 8 — Correctness & Optimization | ✅ Done | 5/5 |
-| Phase 9 — Advanced Architecture & JIT Specialization | ✅ Done | 7/7 |
-| Phase 10 — C Extensions, Native FFI & Hybrid Python Bridge | ✅ Done | 6/6 |
-| Phase 11 — Luthon Package Manager (luthon-pip) | ✅ Done | 6/6 |
-| Phase 12 — Pipeline Parity & Full Source Self-Compilation | ✅ Done | 6/6 |
-| Phase 13 — High-Performance JIT Optimization & NYI Elimination | ✅ Done | 3/3 |
-| Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ✅ Done | 3/3 |
-| Phase 15 — Python Language Parity (Generators & Dynamic Args) | ✅ Done | 4/4 |
-| Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ✅ Done | 3/3 |
-| Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ✅ Done | 4/4 |
-| Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ✅ Done | 4/4 |
-| Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ✅ Done | 4/4 |
-| Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ✅ Done | 4/4 |
-| Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ✅ Done | 4/4 |
+| Phase 0 — Baseline & Audit | [Done] | 4/4 |
+| Phase 1 — Python Parser in Lua | [Done] | 5/5 |
+| Phase 2 — Semantic Analyzer in Lua | [Done] | 6/6 |
+| Phase 3 — IR Lowerer & Codegen in Lua | [Done] | 7/7 |
+| Phase 4 — Complete Stdlib in Lua | [Done] | 5/5 |
+| Phase 5 — Import System & Package Resolution | [Done] | 5/5 |
+| Phase 6 — Unsupported Constructs | [Done] | 7/7 |
+| Phase 7 — Bootstrap — Transpile Luthon Itself | [Done] | 6/6 |
+| Phase 8 — Correctness & Optimization | [Done] | 5/5 |
+| Phase 9 — Advanced Architecture & JIT Specialization | [Done] | 7/7 |
+| Phase 10 — C Extensions, Native FFI & Hybrid Python Bridge | [Done] | 6/6 |
+| Phase 11 — Luthon Package Manager (luthon-pip) | [Done] | 6/6 |
+| Phase 12 — Pipeline Parity & Full Source Self-Compilation | [Done] | 6/6 |
+| Phase 13 — High-Performance JIT Optimization & NYI Elimination | [Done] | 3/3 |
+| Phase 14 — Numeric Acceleration & Unboxed FFI Memory | [Done] | 3/3 |
+| Phase 15 — Python Language Parity (Generators & Dynamic Args) | [Done] | 4/4 |
+| Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | [Done] | 3/3 |
+| Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | [Done] | 4/4 |
+| Phase 18 — Allocation Sinking, Object Virtualization & Vtables | [Done] | 4/4 |
+| Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | [Done] | 4/4 |
+| Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | [Done] | 4/4 |
+| Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | [Done] | 4/4 |
+| Phase 22 — PyPerformance Full Benchmarking Suite & Profiler | Pending | 0/4 |
+| Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | Pending | 0/4 |
+| Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | Pending | 0/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -248,6 +251,33 @@ Target ultra-low latency, game scripting, quantitative finance, and embedded sys
 - [x] Host-to-Script Fast Edge: provide ultra-low latency (~10ns) C host invocation bindings for embedding Luthon in game engines and simulation runtimes
 - [x] PyPerformance & CLBG Automated Benchmark Suite: integrate real-world benchmark suites (nbody, spectral-norm, binary-trees, json-parsing) measuring speedups vs CPython and PyPy
 - [x] Embedded & Edge Profile: generate minimal standalone LuaJIT bundles (<500 KB) for memory-constrained and edge IoT devices
+
+## Phase 22 — PyPerformance Full Benchmarking Suite & Profiler
+
+Implement comprehensive benchmarking across realistic Python workloads measuring speedup against CPython and PyPy.
+
+- [ ] PyPerformance Micro & Macro Workloads: transpile and benchmark standard workloads (richards, fannkuch, spectral_norm, json_loads, float, deltablue)
+- [ ] JIT Trace Profiler & Diagnostics: emit JIT profiler command-line hooks (`luthon --profile` / `luthon --dump-traces`) using LuaJIT's `jit.p` and `jit.dump`
+- [ ] Automated Performance Regression Tests: add CI benchmark assertions ensuring transpiled algorithms do not regress in execution time
+- [ ] Speedup Dashboard: generate structured JSON and Markdown comparison reports of Luthon vs CPython 3.13 and PyPy
+
+## Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle)
+
+Enable single-binary compilation packaging Luthon Python scripts into standalone native executables.
+
+- [ ] Amalgamation Builder: combine runtime prelude, user modules, and LuaJIT bytecode into a single self-contained `.c` or object file
+- [ ] Embedded C Driver: provide a minimal C runner (`main.c`) initializing the LuaJIT VM and invoking the entry point without requiring Python or Lua installed
+- [ ] Single-Binary CLI (`luthon build --standalone`): CLI command compiling Python source into a standalone ELF / Mach-O executable
+- [ ] Binary Footprint Optimization: strip unused stdlib modules to produce executables under 1 MB for edge / IoT distribution
+
+## Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration
+
+Leverage SIMD CPU vectorization and native BLAS libraries for matrix operations.
+
+- [ ] BLAS FFI Bindings: provide direct FFI bindings to system `libopenblas.so` or `libblas.so` for `dgemm`, `dgemv`, and dot products
+- [ ] Vectorized Array Operations: element-wise arithmetic (+, -, *, /) on `array('d')` using 128/256-bit SIMD intrinsics or unrolled FFI loops
+- [ ] Multi-Dimensional Strided Slicing: support 2D and 3D tensor indexing with stride arrays without memory copying
+- [ ] Matrix Multiplication Operator (`@` / `__matmul__`): lower Python `@` operator on 2D arrays directly to `cblas_dgemm`
 
 ## How to update
 
