@@ -94,6 +94,8 @@ local function _emit(ins)
       return ins.result .. " = bit.lshift(" .. l .. ", " .. r .. ")"
     elseif op_name == ">>" or op_name == "rshift" then
       return ins.result .. " = bit.rshift(" .. l .. ", " .. r .. ")"
+    elseif op_name == "matmul" or op_name == "@" then
+      return ins.result .. " = " .. l .. ":matmul(" .. r .. ")"
     end
     local mapped = _lua_op(raw_op)
     return ins.result .. " = " .. l .. " " .. mapped .. " " .. r
@@ -280,7 +282,7 @@ function M.generate(module, skip_prelude, sourcemap)
       "str","int","float","abs","min","max","sum","sorted","reversed","enumerate",
       "zip","map","filter","any","all","bool","datetime","collections","itertools",
       "functools","pathlib","string","base64","io","struct","hashlib","typing",
-      "site","tempfile","open","dataclasses","subprocess","ast","bit","array","ffi",
+      "site","tempfile","open","dataclasses","subprocess","ast","bit","array","matrix","ffi",
       "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
       "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
       "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",

@@ -112,6 +112,87 @@ function _Array_methods:slice(start, stop)
   return sub
 end
 
+-- Vectorized arithmetic operations and 2D matrix multiplication
+function _Array_methods:add(other)
+  local len = rawget(self, "_len")
+  local res = array(self.typecode)
+  local b = ffi.new(_ARRAY_TYPE_MAP[self.typecode] .. "[?]", math.max(1, len))
+  rawset(res, "_buf", b)
+  rawset(res, "_len", len)
+  rawset(res, "_cap", len)
+  local buf1 = rawget(self, "_buf")
+  if type(other) == "number" then
+    for i = 0, len - 1 do b[i] = buf1[i] + other end
+  elseif type(other) == "table" and rawget(other, "_buf") then
+    local buf2 = rawget(other, "_buf")
+    for i = 0, len - 1 do b[i] = buf1[i] + buf2[i] end
+  end
+  return res
+end
+
+function _Array_methods:mul(other)
+  local len = rawget(self, "_len")
+  local res = array(self.typecode)
+  local b = ffi.new(_ARRAY_TYPE_MAP[self.typecode] .. "[?]", math.max(1, len))
+  rawset(res, "_buf", b)
+  rawset(res, "_len", len)
+  rawset(res, "_cap", len)
+  local buf1 = rawget(self, "_buf")
+  if type(other) == "number" then
+    for i = 0, len - 1 do b[i] = buf1[i] * other end
+  elseif type(other) == "table" and rawget(other, "_buf") then
+    local buf2 = rawget(other, "_buf")
+    for i = 0, len - 1 do b[i] = buf1[i] * buf2[i] end
+  end
+  return res
+end
+
+function _Array_methods:matmul(other)
+  local M = rawget(self, "rows") or rawget(self, "_len")
+  local K = rawget(self, "cols") or 1
+  local K2 = rawget(other, "rows") or rawget(other, "_len")
+  local N = rawget(other, "cols") or 1
+  if K ~= K2 then
+    error(string.format("ValueError: shapes (%d, %d) and (%d, %d) not aligned", M, K, K2, N))
+  end
+  local total = M * N
+  local res = array("d")
+  rawset(res, "rows", M)
+  rawset(res, "cols", N)
+  local c_buf = ffi.new("double[?]", math.max(1, total))
+  rawset(res, "_buf", c_buf)
+  rawset(res, "_len", total)
+  rawset(res, "_cap", total)
+
+  local a_buf = rawget(self, "_buf")
+  local b_buf = rawget(other, "_buf")
+
+  -- Unrolled cache-friendly matrix multiplication
+  for i = 0, M - 1 do
+    local i_step = i * K
+    local c_step = i * N
+    for k = 0, K - 1 do
+      local a_val = a_buf[i_step + k]
+      local b_step = k * N
+      for j = 0, N - 1 do
+        c_buf[c_step + j] = c_buf[c_step + j] + a_val * b_buf[b_step + j]
+      end
+    end
+  end
+  return res
+end
+
+function matrix(rows, cols, initializer)
+  local total = rows * cols
+  local arr = array("d", initializer)
+  rawset(arr, "rows", rows)
+  rawset(arr, "cols", cols)
+  if rawget(arr, "_len") < total then
+    rawset(arr, "_len", total)
+  end
+  return arr
+end
+
 _Array_mt = {
   __index = function(self, k)
     if type(k) == "number" then

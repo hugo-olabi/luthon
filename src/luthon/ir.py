@@ -875,6 +875,7 @@ class IRLowerer:
             ast.FloorDiv: "floordiv", ast.Mod: "mod", ast.Pow: "pow",
             ast.BitAnd: "band", ast.BitOr: "bor", ast.BitXor: "bxor",
             ast.LShift: "lshift", ast.RShift: "rshift",
+            ast.MatMult: "matmul",
         }.get(type(op), type(op).__name__)
 
     def _unop(self, op):

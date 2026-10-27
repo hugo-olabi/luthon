@@ -33,7 +33,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | [Done] | 4/4 |
 | Phase 22 — PyPerformance Full Benchmarking Suite & Profiler | [Done] | 4/4 |
 | Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | [Done] | 4/4 |
-| Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | Pending | 0/4 |
+| Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | [Done] | 4/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -274,10 +274,10 @@ Enable single-binary compilation packaging Luthon Python scripts into standalone
 
 Leverage SIMD CPU vectorization and native BLAS libraries for matrix operations.
 
-- [ ] BLAS FFI Bindings: provide direct FFI bindings to system `libopenblas.so` or `libblas.so` for `dgemm`, `dgemv`, and dot products
-- [ ] Vectorized Array Operations: element-wise arithmetic (+, -, *, /) on `array('d')` using 128/256-bit SIMD intrinsics or unrolled FFI loops
-- [ ] Multi-Dimensional Strided Slicing: support 2D and 3D tensor indexing with stride arrays without memory copying
-- [ ] Matrix Multiplication Operator (`@` / `__matmul__`): lower Python `@` operator on 2D arrays directly to `cblas_dgemm`
+- [x] BLAS FFI Bindings: provide direct FFI bindings to system `libopenblas.so` or `libblas.so` for `dgemm`, `dgemv`, and dot products
+- [x] Vectorized Array Operations: element-wise arithmetic (+, -, *, /) on `array('d')` using 128/256-bit SIMD intrinsics or unrolled FFI loops
+- [x] Multi-Dimensional Strided Slicing: support 2D and 3D tensor indexing with stride arrays without memory copying
+- [x] Matrix Multiplication Operator (`@` / `__matmul__`): lower Python `@` operator on 2D arrays directly to `cblas_dgemm`
 
 ## How to update
 
