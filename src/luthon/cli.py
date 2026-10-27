@@ -61,6 +61,8 @@ def run_file(
     optimize: bool = False,
     no_cache: bool = False,
     cache_dir: str | None = None,
+    profile: bool = False,
+    dump_traces: bool = False,
 ) -> int:
     """Compiles a Python file and executes it immediately under LuaJIT."""
     with tempfile.NamedTemporaryFile(suffix=".lua", delete=False) as tmp:
@@ -76,7 +78,12 @@ def run_file(
             output_path=tmp_lua_path,
         )
 
-        cmd = ["luajit", str(tmp_lua_path)]
+        cmd = ["luajit"]
+        if profile:
+            cmd.extend(["-jp"])
+        if dump_traces:
+            cmd.extend(["-jdump"])
+        cmd.append(str(tmp_lua_path))
         if script_args:
             cmd.extend(script_args)
 
@@ -143,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--ir", action="store_true", default=True, help="Use IR pipeline (default: True)")
     r.add_argument("--no-ir", dest="ir", action="store_false", help="Use direct AST visitor pipeline")
     r.add_argument("--optimize", "-O", action="store_true", help="Run IR optimizations")
+    r.add_argument("--profile", action="store_true", help="Run with LuaJIT JIT profiler enabled (-jp)")
+    r.add_argument("--dump-traces", action="store_true", help="Dump JIT trace bytecode and IR (-jdump)")
     r.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     r.add_argument("--cache-dir", default=None, help="Cache directory")
 
@@ -171,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
             optimize=args.optimize,
             no_cache=args.no_cache,
             cache_dir=args.cache_dir,
+            profile=args.profile,
+            dump_traces=args.dump_traces,
         )
 
     if args.command == "venv":

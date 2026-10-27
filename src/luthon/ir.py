@@ -170,22 +170,16 @@ class IRLowerer:
             self._emit("BRANCH", [cond, then_lbl, else_lbl])
             # then
             self._cur_block = self._new_block(then_lbl)
-            self._emit("DO", [])
             for s in node.body:
                 self.lower_stmt(s)
             if not node.body or not isinstance(node.body[-1], ast.Return):
                 self._emit("JUMP", [end_lbl])
-            self._emit("END", [])
             # else
             self._cur_block = self._new_block(else_lbl)
-            self._emit("DO", [])
             for s in node.orelse:
                 self.lower_stmt(s)
             if not node.orelse or not isinstance(node.orelse[-1], ast.Return):
                 self._emit("JUMP", [end_lbl])
-            self._emit("END", [])
-            if self._break_stack:
-                self._break_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.While):
             cond_lbl = self._new_label("whilecond")
@@ -200,6 +194,8 @@ class IRLowerer:
             for s in node.body:
                 self.lower_stmt(s)
             self._emit("JUMP", [cond_lbl])
+            if self._break_stack:
+                self._break_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.For):
             iter_tmp = self._new_tmp()
@@ -207,6 +203,7 @@ class IRLowerer:
             cond_lbl = self._new_label("forcond")
             body_lbl = self._new_label("forbody")
             end_lbl = self._new_label("forend")
+            self._break_stack.append(end_lbl)
             self._emit("JUMP", [cond_lbl])
             self._cur_block = self._new_block(cond_lbl)
             nxt = self._new_tmp()
@@ -227,6 +224,8 @@ class IRLowerer:
             for s in node.body:
                 self.lower_stmt(s)
             self._emit("JUMP", [cond_lbl])
+            if self._break_stack:
+                self._break_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.FunctionDef):
             fn = Function(name=node.name, params=[a.arg for a in node.args.args])

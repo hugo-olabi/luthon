@@ -31,7 +31,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | [Done] | 4/4 |
 | Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | [Done] | 4/4 |
 | Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | [Done] | 4/4 |
-| Phase 22 — PyPerformance Full Benchmarking Suite & Profiler | Pending | 0/4 |
+| Phase 22 — PyPerformance Full Benchmarking Suite & Profiler | [Done] | 4/4 |
 | Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | Pending | 0/4 |
 | Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | Pending | 0/4 |
 
@@ -256,10 +256,10 @@ Target ultra-low latency, game scripting, quantitative finance, and embedded sys
 
 Implement comprehensive benchmarking across realistic Python workloads measuring speedup against CPython and PyPy.
 
-- [ ] PyPerformance Micro & Macro Workloads: transpile and benchmark standard workloads (richards, fannkuch, spectral_norm, json_loads, float, deltablue)
-- [ ] JIT Trace Profiler & Diagnostics: emit JIT profiler command-line hooks (`luthon --profile` / `luthon --dump-traces`) using LuaJIT's `jit.p` and `jit.dump`
-- [ ] Automated Performance Regression Tests: add CI benchmark assertions ensuring transpiled algorithms do not regress in execution time
-- [ ] Speedup Dashboard: generate structured JSON and Markdown comparison reports of Luthon vs CPython 3.13 and PyPy
+- [x] PyPerformance Micro & Macro Workloads: transpile and benchmark standard workloads (richards, fannkuch, spectral_norm, json_loads, float, deltablue)
+- [x] JIT Trace Profiler & Diagnostics: emit JIT profiler command-line hooks (`luthon --profile` / `luthon --dump-traces`) using LuaJIT's `jit.p` and `jit.dump`
+- [x] Automated Performance Regression Tests: add CI benchmark assertions ensuring transpiled algorithms do not regress in execution time
+- [x] Speedup Dashboard: generate structured JSON and Markdown comparison reports of Luthon vs CPython 3.13 and PyPy
 
 ## Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle)
 
