@@ -28,7 +28,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ✅ Done | 3/3 |
 | Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ✅ Done | 4/4 |
 | Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ✅ Done | 4/4 |
-| Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ⏳ Pending | 0/4 |
+| Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ✅ Done | 4/4 |
 | Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ⏳ Pending | 0/4 |
 | Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ⏳ Pending | 0/4 |
 
@@ -226,10 +226,10 @@ Eliminate runtime heap pressure and object dispatch overhead inspired by PyPy Op
 
 Eliminate trace compiler aborts to keep inner loops 100% on fast machine code traces.
 
-- [ ] Static NYI Checker & Audit Linter: static pass across lowered IR to guarantee no NYI bytecodes or operations (such as table initializers in inner loops) are emitted
-- [ ] Pass-by-Reference Aggregate Enforcement: ensure all C structs and FFI aggregates are passed and returned by pointer/reference rather than by value to avoid interpreter fallback
-- [ ] CData Memory Anchoring: establish a Lua-side anchor registry for raw pointer targets to eliminate use-after-free bugs with unmanaged C memory
-- [ ] Trace Stitching Elimination: replace non-JIT compilable builtin calls along hot paths with JIT-friendly primitives to avoid trace stitching overhead
+- [x] Static NYI Checker & Audit Linter: static pass across lowered IR to guarantee no NYI bytecodes or operations (such as table initializers in inner loops) are emitted
+- [x] Pass-by-Reference Aggregate Enforcement: ensure all C structs and FFI aggregates are passed and returned by pointer/reference rather than by value to avoid interpreter fallback
+- [x] CData Memory Anchoring: establish a Lua-side anchor registry for raw pointer targets to eliminate use-after-free bugs with unmanaged C memory
+- [x] Trace Stitching Elimination: replace non-JIT compilable builtin calls along hot paths with JIT-friendly primitives to avoid trace stitching overhead
 
 ## Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers
 

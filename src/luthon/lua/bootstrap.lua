@@ -1,5 +1,34 @@
 -- Complete runtime prelude
 
+-- CData Memory Anchor Registry (Phase 19)
+local _CDATA_ANCHORS = {}
+local _CDATA_REF_COUNTS = {}
+
+function _luthon_anchor(cdata_ptr, owner_obj)
+  if cdata_ptr == nil then return end
+  local key = tostring(cdata_ptr)
+  _CDATA_ANCHORS[key] = owner_obj
+  _CDATA_REF_COUNTS[key] = (_CDATA_REF_COUNTS[key] or 0) + 1
+  return cdata_ptr
+end
+
+function _luthon_release_anchor(cdata_ptr)
+  if cdata_ptr == nil then return end
+  local key = tostring(cdata_ptr)
+  local count = (_CDATA_REF_COUNTS[key] or 1) - 1
+  if count <= 0 then
+    _CDATA_ANCHORS[key] = nil
+    _CDATA_REF_COUNTS[key] = nil
+  else
+    _CDATA_REF_COUNTS[key] = count
+  end
+end
+
+function _luthon_is_anchored(cdata_ptr)
+  if cdata_ptr == nil then return false end
+  return _CDATA_ANCHORS[tostring(cdata_ptr)] ~= nil
+end
+
 -- FFI and C-runtime bindings
 local ffi = require("ffi")
 pcall(function()

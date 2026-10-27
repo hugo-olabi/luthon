@@ -374,6 +374,12 @@ def optimize(module: Module) -> Module:
         optimize_cir(module)
     except Exception:
         pass
+    try:
+        from .nyi import eliminate_loop_invariant_allocations
+        for fn in module.functions:
+            eliminate_loop_invariant_allocations(fn)
+    except Exception:
+        pass
     for fn in module.functions:
         optimize_function(fn)
     return module
