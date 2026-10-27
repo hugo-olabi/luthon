@@ -27,7 +27,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ✅ Done | 4/4 |
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ✅ Done | 3/3 |
 | Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ✅ Done | 4/4 |
-| Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ⏳ Pending | 0/4 |
+| Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ✅ Done | 4/4 |
 | Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ⏳ Pending | 0/4 |
 | Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ⏳ Pending | 0/4 |
 | Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ⏳ Pending | 0/4 |
@@ -217,10 +217,10 @@ Incorporate research findings from Codon, Numba, and PyPy into Luthon's intermed
 
 Eliminate runtime heap pressure and object dispatch overhead inspired by PyPy OptVirtualize, mypyc, and LuaJIT ASO.
 
-- [ ] Class Immutability & Early Binding: enforce immutable class scopes to route method invocations through direct, fixed-offset vtables instead of runtime metatable searches
-- [ ] Object Virtualization: track short-lived cell boxes, small tuples, and intermediate records so they remain in CPU register states without triggering heap allocations
-- [ ] Allocation Sinking Optimization (ASO/SSO): shape emitted Lua local records to guarantee LuaJIT's native allocation sinking optimization elides allocations along fast loop traces
-- [ ] Fixed-Layout Struct Representations: compile class instances into fixed `ffi.cdef` C struct representations with direct base-plus-offset memory addressing
+- [x] Class Immutability & Early Binding: enforce immutable class scopes to route method invocations through direct, fixed-offset vtables instead of runtime metatable searches
+- [x] Object Virtualization: track short-lived cell boxes, small tuples, and intermediate records so they remain in CPU register states without triggering heap allocations
+- [x] Allocation Sinking Optimization (ASO/SSO): shape emitted Lua local records to guarantee LuaJIT's native allocation sinking optimization elides allocations along fast loop traces
+- [x] Fixed-Layout Struct Representations: compile class instances into fixed `ffi.cdef` C struct representations with direct base-plus-offset memory addressing
 
 ## Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator
 

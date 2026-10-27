@@ -6,8 +6,7 @@ basic blocks of instructions. Conditionals/loops become branch + label blocks.
 
 from dataclasses import dataclass, field
 import ast
-from typing import List, Optional
-import ast
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -45,6 +44,7 @@ class Module:
     globals: List[str] = field(default_factory=list)
     instrs: List[Instr] = field(default_factory=list)
     blocks: List[Block] = field(default_factory=list)
+    native_structs: List[Tuple[str, str, List[str]]] = field(default_factory=list)
 
 
 class IRLowerer:
@@ -349,18 +349,18 @@ class IRLowerer:
                     self.lower_stmt(s)
             self._cur_block = self._new_block(end_label)
         elif isinstance(node, ast.ClassDef):
-            # Check for @dataclass decorator (handles @dataclass and @dataclass())
+            # Check for @dataclass or @struct / @native_struct decorator
             is_dataclass = False
+            is_native_struct = False
             for dec in node.decorator_list:
-                if isinstance(dec, ast.Name) and dec.id == "dataclass":
+                dec_id = dec.id if isinstance(dec, ast.Name) else (dec.attr if isinstance(dec, ast.Attribute) else None)
+                if isinstance(dec, ast.Call):
+                    dec_id = dec.func.id if isinstance(dec.func, ast.Name) else (dec.func.attr if isinstance(dec.func, ast.Attribute) else None)
+                if dec_id == "dataclass":
                     is_dataclass = True
-                elif isinstance(dec, ast.Attribute) and dec.attr == "dataclass":
+                elif dec_id in ("struct", "native_struct", "cstruct"):
+                    is_native_struct = True
                     is_dataclass = True
-                elif isinstance(dec, ast.Call):
-                    if isinstance(dec.func, ast.Name) and dec.func.id == "dataclass":
-                        is_dataclass = True
-                    elif isinstance(dec.func, ast.Attribute) and dec.func.attr == "dataclass":
-                        is_dataclass = True
 
             # Collect fields from annotated assignments
             fields = []  # list of dicts: {"name": str, "default_tmp": tmp or None, "has_default": bool}
@@ -472,6 +472,15 @@ class IRLowerer:
                 self.module.functions.append(fn)
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
+
+            if is_native_struct and fields:
+                # Mark module with native C-struct definition
+                c_fields = []
+                for f in fields:
+                    # Map field to C type (default to double for numeric attributes)
+                    c_fields.append(f"double {f['name']};")
+                struct_cdef = f"typedef struct {{ {' '.join(c_fields)} }} {node.name}_t;"
+                self.module.native_structs.append((node.name, struct_cdef, [f["name"] for f in fields]))
 
             self._emit("STORE", [node.name, cls])
         elif isinstance(node, ast.With):

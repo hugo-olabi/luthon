@@ -167,11 +167,12 @@ def generate(module, sourcemap=None):
             all_upvalues.add(uv)
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
+    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","ffi","bit","set","frozenset","table","dict"}
     # Hoist module-level locals that are captured as upvalues
     hoisted_set = set()
     main_fn = next((f for f in module.functions if f.name == "main"), None)
     if main_fn and all_upvalues:
-        hoisted = [uv for uv in sorted(all_upvalues) if uv in main_fn.locals]
+        hoisted = [uv for uv in sorted(all_upvalues) if uv in main_fn.locals and uv not in builtins]
         if hoisted:
             out.append("local " + ", ".join(hoisted))
             hoisted_set = set(hoisted)
@@ -211,7 +212,20 @@ def generate(module, sourcemap=None):
                     )
                 out.append("  " + _emit(ins))
         out.append("end")
+    # Fixed-layout C-struct compilation (Phase 18)
+    struct_classes = set()
+    for s_name, s_cdef, s_fields in getattr(module, "native_structs", []):
+        struct_classes.add(s_name)
+        out.append(f"ffi.cdef[[\n{s_cdef}\n]]")
+        out.append(f"local {s_name}_mt = {{ __index = {s_name} }}")
+        out.append(f"pcall(function() ffi.metatype('{s_name}_t', {s_name}_mt) end)")
+        init_args = ", ".join(s_fields)
+        init_assigns = " ".join([f"inst.{f} = {f} or 0;" for f in s_fields])
+        out.append(f"setmetatable({s_name}, {{__call = function(cls, {init_args}) local inst = ffi.new('{s_name}_t'); {init_assigns} return inst end}})")
+
     for c in sorted({fn.name.split(chr(46),1)[0] for fn in module.functions if chr(46) in fn.name}):
+        if c in struct_classes:
+            continue
         has_repr = any(f.name == c + ".__repr__" for f in module.functions)
         has_eq = any(f.name == c + ".__eq__" for f in module.functions)
         out.append(c + ".__index = " + c)
@@ -222,7 +236,7 @@ def generate(module, sourcemap=None):
             mt_setup += ", __eq = function(a, b) return " + c + ".__eq__(a, b) end"
         mt_setup += "}"
         out.append(mt_setup)
-        call_body = "local self = setmetatable({}, " + c + ".__instance_mt); " + c + ".__init__(self, ...); return self"
+        call_body = "local self = setmetatable({}, " + c + ".__instance_mt); if " + c + ".__init__ then " + c + ".__init__(self, ...) end; return self"
         out.append("setmetatable(" + c + ", {__call = function(cls, ...) " + call_body + " end})")
     return "\n".join(out) + "\n"
 
