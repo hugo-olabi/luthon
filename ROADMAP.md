@@ -26,7 +26,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 14 — Numeric Acceleration & Unboxed FFI Memory | ✅ Done | 3/3 |
 | Phase 15 — Python Language Parity (Generators & Dynamic Args) | ✅ Done | 4/4 |
 | Phase 16 — Multi-Stage Self-Hosting Bootstrap & Fixpoint Loop | ✅ Done | 3/3 |
-| Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ⏳ Pending | 0/4 |
+| Phase 17 — Typed High-Level IR (CIR) & SSA Monomorphization | ✅ Done | 4/4 |
 | Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ⏳ Pending | 0/4 |
 | Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ⏳ Pending | 0/4 |
 | Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ⏳ Pending | 0/4 |
@@ -208,10 +208,10 @@ Achieve true self-hosting verification with a multi-stage compilation cycle.
 
 Incorporate research findings from Codon, Numba, and PyPy into Luthon's intermediate representation.
 
-- [ ] High-Level IR (CIR): position a typed intermediate representation between the AST and Lua lowerer that normalizes primitive operations into typed magic method invocations (`int.__add__[int, int]`)
-- [ ] Constraint-Based Type Inference (CPA): implement monotonic type-set propagation across SSA phi nodes and control-flow merges
-- [ ] Call-Site Monomorphization: specialize polymorphic function definitions for concrete scalar argument types (`int`, `float`, `bool`) to generate unboxed, branchless Lua routines
-- [ ] Idiomatic Pattern Fusion: early optimizer passes to recognize and fuse high-level dictionary and sequence idioms (`d[k] = d.get(k, 0) + 1`, chained range iteration) before lowering
+- [x] High-Level IR (CIR): position a typed intermediate representation between the AST and Lua lowerer that normalizes primitive operations into typed magic method invocations (`int.__add__[int, int]`)
+- [x] Constraint-Based Type Inference (CPA): implement monotonic type-set propagation across SSA phi nodes and control-flow merges
+- [x] Call-Site Monomorphization: specialize polymorphic function definitions for concrete scalar argument types (`int`, `float`, `bool`) to generate unboxed, branchless Lua routines
+- [x] Idiomatic Pattern Fusion: early optimizer passes to recognize and fuse high-level dictionary and sequence idioms (`d[k] = d.get(k, 0) + 1`, chained range iteration) before lowering
 
 ## Phase 18 — Allocation Sinking, Object Virtualization & Vtables
 

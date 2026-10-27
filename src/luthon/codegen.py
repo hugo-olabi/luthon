@@ -21,6 +21,9 @@ def _emit(ins):
         l = ins.args[1] if ins.args[1] is not None else "nil"
         r = ins.args[2] if ins.args[2] is not None else "nil"
         raw_op = (ins.args[0] or "").lower()
+        # Clean typed magic method signatures (e.g. int.__typed_add__ -> add)
+        if "__typed_" in raw_op:
+            raw_op = raw_op.split("__typed_")[1].rstrip("_")
         if raw_op in ("floordiv", "//"):
             return ins.result + " = math.floor(" + l + " / " + r + ")"
         elif raw_op in ("band", "bitand", "&"):
@@ -33,7 +36,7 @@ def _emit(ins):
             return ins.result + " = bit.lshift(" + l + ", " + r + ")"
         elif raw_op in (">>", "rshift"):
             return ins.result + " = bit.rshift(" + l + ", " + r + ")"
-        return ins.result + " = " + l + " " + _op(ins.args[0]) + " " + r
+        return ins.result + " = " + l + " " + _op(raw_op) + " " + r
     if o == "UNOP":
         if ins.args[0] == "neg":
             return ins.result + " = -" + ins.args[1]
@@ -126,6 +129,9 @@ def _emit(ins):
         return ins.result + " = list_repeat(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "LIST_APPEND":
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
+    if o == "DICT_COUNTER_INC":
+        d_name, k_name, step_val = ins.args[0], ins.args[1], ins.args[2]
+        return f"{d_name}[{k_name}] = ({d_name}[{k_name}] or 0) + {step_val}"
     if o == "NEXT":
         return ins.result + " = " + ins.args[0] + "()"
     if o == "IMPORT":

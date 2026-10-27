@@ -63,7 +63,9 @@ def constant_fold_function(fn: Function) -> bool:
                 const_env.pop(ins.result, None)
                 new_instrs.append(ins)
             elif op == "BINOP" and ins.result and len(ins.args) >= 3:
-                binop, left, right = ins.args[0].lower(), ins.args[1], ins.args[2]
+                raw_binop = ins.args[0].lower()
+                binop = raw_binop.split("__typed_")[1].rstrip("_") if "__typed_" in raw_binop else raw_binop
+                left, right = ins.args[1], ins.args[2]
                 left_c = const_env.get(left, left) if isinstance(left, str) else left
                 right_c = const_env.get(right, right) if isinstance(right, str) else right
                 folded = False
@@ -99,10 +101,10 @@ def constant_fold_function(fn: Function) -> bool:
                     new_instrs.append(ins)
             elif op == "CMP" and ins.result and len(ins.args) >= 3:
                 cmpop, left, right = ins.args[0].lower(), ins.args[1], ins.args[2]
-                left_c = const_env.get(left, left) if isinstance(left, str) else left
-                right_c = const_env.get(right, right) if isinstance(right, str) else right
+                left_c = const_env.get(left, None) if isinstance(left, str) and left in const_env else (left if not isinstance(left, str) else None)
+                right_c = const_env.get(right, None) if isinstance(right, str) and right in const_env else (right if not isinstance(right, str) else None)
                 folded = False
-                if cmpop in _CMP_EVAL and isinstance(left_c, (int, float, bool, str)) and isinstance(right_c, (int, float, bool, str)):
+                if cmpop in _CMP_EVAL and left_c is not None and right_c is not None and isinstance(left_c, (int, float, bool, str)) and isinstance(right_c, (int, float, bool, str)):
                     try:
                         res = _CMP_EVAL[cmpop](left_c, right_c)
                         const_env[ins.result] = res
@@ -367,6 +369,11 @@ def optimize_function(fn: Function, max_iterations: int = 5) -> None:
 
 def optimize(module: Module) -> Module:
     """Run optimizer passes over all functions in the IR module."""
+    try:
+        from .cir import optimize_cir
+        optimize_cir(module)
+    except Exception:
+        pass
     for fn in module.functions:
         optimize_function(fn)
     return module
