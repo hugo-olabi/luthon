@@ -30,7 +30,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 18 — Allocation Sinking, Object Virtualization & Vtables | ✅ Done | 4/4 |
 | Phase 19 — Strict LuaJIT Trace JIT Specialization & NYI Eliminator | ✅ Done | 4/4 |
 | Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | ✅ Done | 4/4 |
-| Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ⏳ Pending | 0/4 |
+| Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | ✅ Done | 4/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -244,10 +244,10 @@ Provide modern, moving-GC-compatible C extension interoperability based on HPy r
 
 Target ultra-low latency, game scripting, quantitative finance, and embedded systems based on Snabb and LuaVTS patterns.
 
-- [ ] Zero-GC Preallocated Memory Freelists: implement memory freelist pools for financial models and game loops to eliminate garbage collection jitter entirely during steady-state processing
-- [ ] Host-to-Script Fast Edge: provide ultra-low latency (~10ns) C host invocation bindings for embedding Luthon in game engines and simulation runtimes
-- [ ] PyPerformance & CLBG Automated Benchmark Suite: integrate real-world benchmark suites (nbody, spectral-norm, binary-trees, json-parsing) measuring speedups vs CPython and PyPy
-- [ ] Embedded & Edge Profile: generate minimal standalone LuaJIT bundles (<500 KB) for memory-constrained and edge IoT devices
+- [x] Zero-GC Preallocated Memory Freelists: implement memory freelist pools for financial models and game loops to eliminate garbage collection jitter entirely during steady-state processing
+- [x] Host-to-Script Fast Edge: provide ultra-low latency (~10ns) C host invocation bindings for embedding Luthon in game engines and simulation runtimes
+- [x] PyPerformance & CLBG Automated Benchmark Suite: integrate real-world benchmark suites (nbody, spectral-norm, binary-trees, json-parsing) measuring speedups vs CPython and PyPy
+- [x] Embedded & Edge Profile: generate minimal standalone LuaJIT bundles (<500 KB) for memory-constrained and edge IoT devices
 
 ## How to update
 
