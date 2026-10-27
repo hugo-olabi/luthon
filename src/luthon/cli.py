@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Direct execution check: if first argument is a .py file or an existing file (not a known command or option flag)
     # e.g.: `luthon ./main.py` or `luthon script.py arg1 arg2`
-    known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "-h", "--help"}
+    known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "build", "-h", "--help"}
     if raw_argv and raw_argv[0] not in known_commands and not raw_argv[0].startswith("-"):
         candidate = Path(raw_argv[0])
         if candidate.suffix == ".py" or candidate.is_file():
@@ -167,6 +167,13 @@ def main(argv: list[str] | None = None) -> int:
 
     a = sub.add_parser("analyze", help="Run semantic analysis on a Python file")
     a.add_argument("input", help="Input .py file")
+
+    # build command: `luthon build <file.py> -o <binary>`
+    b = sub.add_parser("build", help="Build a standalone executable bundle from a Python file")
+    b.add_argument("input", help="Input .py file")
+    b.add_argument("-o", "--output", required=True, help="Output executable binary path")
+    b.add_argument("--standalone", action="store_true", default=True, help="Package as self-contained standalone bundle")
+    b.add_argument("--optimize", "-O", action="store_true", default=True, help="Run IR optimizations")
 
     args, extra = parser.parse_known_args(raw_argv)
 
@@ -242,6 +249,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             p.print_help()
             return 0
+
+    if args.command == "build":
+        from .bundle import StandaloneBundler
+        bundler = StandaloneBundler(optimize=args.optimize)
+        out_bin = bundler.build_bundle(Path(args.input), Path(args.output))
+        print(f"Built standalone executable: {out_bin} ({out_bin.stat().st_size} bytes)")
+        return 0
 
     if args.command == "analyze":
         src = Path(args.input).read_text()

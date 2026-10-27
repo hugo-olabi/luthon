@@ -32,7 +32,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 20 — Native HPy Universal ABI & Zero-Copy CData Buffers | [Done] | 4/4 |
 | Phase 21 — Real-Time Systems, Zero-GC Freelists & Domain Benchmarks | [Done] | 4/4 |
 | Phase 22 — PyPerformance Full Benchmarking Suite & Profiler | [Done] | 4/4 |
-| Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | Pending | 0/4 |
+| Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | [Done] | 4/4 |
 | Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | Pending | 0/4 |
 
 ## Phase 0 — Baseline & Audit
@@ -265,10 +265,10 @@ Implement comprehensive benchmarking across realistic Python workloads measuring
 
 Enable single-binary compilation packaging Luthon Python scripts into standalone native executables.
 
-- [ ] Amalgamation Builder: combine runtime prelude, user modules, and LuaJIT bytecode into a single self-contained `.c` or object file
-- [ ] Embedded C Driver: provide a minimal C runner (`main.c`) initializing the LuaJIT VM and invoking the entry point without requiring Python or Lua installed
-- [ ] Single-Binary CLI (`luthon build --standalone`): CLI command compiling Python source into a standalone ELF / Mach-O executable
-- [ ] Binary Footprint Optimization: strip unused stdlib modules to produce executables under 1 MB for edge / IoT distribution
+- [x] Amalgamation Builder: combine runtime prelude, user modules, and LuaJIT bytecode into a single self-contained `.c` or object file
+- [x] Embedded C Driver: provide a minimal C runner (`main.c`) initializing the LuaJIT VM and invoking the entry point without requiring Python or Lua installed
+- [x] Single-Binary CLI (`luthon build --standalone`): CLI command compiling Python source into a standalone ELF / Mach-O executable
+- [x] Binary Footprint Optimization: strip unused stdlib modules to produce executables under 1 MB for edge / IoT distribution
 
 ## Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration
 

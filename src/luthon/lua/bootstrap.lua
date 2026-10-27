@@ -499,7 +499,12 @@ os.difftime = os.difftime or os.difftime
 os.execute = os.execute or function(cmd) return os.execute(cmd) end
 
 -- sys
-sys.argv = (arg and type(arg) == "table") and arg or sys.argv or {}
+sys.argv = setmetatable({}, _list_mt)
+if arg and type(arg) == "table" then
+  table.insert(sys.argv, arg[0] or "luthon")
+  local n = #arg
+  for i = 1, n do table.insert(sys.argv, arg[i]) end
+end
 sys.path = sys.path or {}
 sys.version = sys.version or "3.14"
 sys.platform = "linux"
