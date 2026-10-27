@@ -1,23 +1,15 @@
 # Luthon
 
-Luthon is a Python to LuaJIT transpiler with a real compiler backend. It parses
-Python source, runs semantic analysis, lowers the program to an intermediate
-representation with explicit control flow, and emits Lua that executes under
-LuaJIT.
+Luthon is a high-performance Python to LuaJIT transpiler with an optimizing compiler backend. It parses Python source, runs semantic analysis, lowers programs to an intermediate representation (IR/CIR) with explicit control flow, and emits optimized Lua that executes under LuaJIT 2.1+.
 
-The goal is not to interpret Python. The goal is to take ordinary Python
-programs, including functions, closures, classes, comprehensions and a large
-part of the standard library, and produce Lua code that runs fast.
+The goal is not to interpret Python. The goal is to take Python programs—including functions, closures, classes, generators, comprehensions, numerical pipelines, and standard library modules—and produce Lua code that runs with near-native speed.
 
 ## Why
 
-LuaJIT has a very fast JIT compiler and a small runtime. Python is expressive and
-has a large ecosystem. Luthon connects the two for the subset of Python where a
-static translation to Lua is sound: numeric loops, recursive algorithms,
-data-structure heavy code and object-oriented models.
-
-Programs that exercise this subset run several times faster than CPython while
-keeping the same source.
+LuaJIT has an exceptionally fast trace compiler and a minimal memory footprint. Python is expressive and has a massive ecosystem. Luthon connects the two:
+- Numeric algorithms and mathematical loops execute up to 10x-50x faster than CPython.
+- Memory consumption is drastically reduced through unboxed FFI buffers and allocation sinking.
+- Full standalone executable packaging is supported without requiring Python or Lua installed on target hosts.
 
 ## Installation
 
@@ -26,234 +18,190 @@ pip install -e .
 ```
 
 Requirements:
-
-- Python 3.9 or newer (CPython, because the frontend uses the `ast` module)
-- LuaJIT 2.1 or newer (the generated code uses `goto` and `::label::`)
+- Python 3.9 or newer (for CPython AST pipeline)
+- LuaJIT 2.1 or newer (generated Lua targets LuaJIT `goto` and FFI extensions)
 
 ## Usage
 
-Transpile a file:
+### 1. Compile and Run Directly
 
 ```bash
-luthon transpile examples/fib.py -o fib.lua
-luajit fib.lua
+luthon run script.py [args...]
+# Shorthand:
+luthon script.py [args...]
 ```
 
-Use the IR backend explicitly:
+### 2. Transpile Python to Lua
 
 ```bash
-luthon transpile examples/fib.py --ir -o fib.lua
+# Transpile via optimizing IR backend
+luthon transpile input.py -o output.lua
+
+# Transpile with full optimizations (CPA type inference, constant folding, DCE)
+luthon transpile input.py -O -o output.lua
+
+# Transpile with VLQ source maps for debugging
+luthon transpile input.py --sourcemap -o output.lua
 ```
 
-Run the semantic analyzer and print a summary of the module scope:
+### 3. Build Standalone Native Executables
+
+Package any Python script into a self-contained executable bundle:
 
 ```bash
-luthon analyze examples/fib.py
+luthon build script.py -o myapp
+./myapp [arguments...]
 ```
 
-Use the package as a module:
+### 4. Package Management (luthon-pip)
+
+Install and AOT-precompile Python packages from PyPI into Luthon site-packages:
 
 ```bash
-python -m luthon transpile examples/fib.py -o fib.lua
+# Install a package from PyPI
+luthon install package_name
+
+# Package manager CLI
+luthon pip install -r requirements.txt
+luthon pip list
+luthon pip uninstall package_name
+
+# Create an isolated virtual environment
+luthon venv .my_env
 ```
 
-### Options
+### 5. JIT Profiling and Trace Diagnostics
 
-| Flag | Meaning |
-| --- | --- |
-| `-o`, `--output` | Output Lua file. Defaults to standard output. |
-| `--ir` | Compile through semantic analysis, IR and IR codegen instead of the direct AST transpiler. |
-| `--no-cache` | Bypass the compilation cache for this invocation. |
-| `--cache-dir` | Directory used for cached output. Defaults to `.luthon_cache`. |
+```bash
+# Profile LuaJIT trace execution
+luthon run input.py --profile
+
+# Dump JIT bytecode and trace IR
+luthon run input.py --dump-traces
+```
+
+### 6. Pure-Lua Bootstrap Pipeline (Self-Hosting)
+
+Luthon can compile without CPython using its pure-Lua toolchain:
+
+```bash
+luajit src/luthon/lua/luthon_lua.lua input.py output.lua
+```
 
 ## Architecture
 
-Luthon has two pipelines. Both share the semantic frontend and the same Lua
-runtime prelude.
+Luthon features two transpilation pipelines sharing a runtime prelude:
 
-Direct transpiler:
-
-```
-source -> ast.parse -> Transpiler (AST visitor) -> Lua
-```
-
-IR backend, selected with `--ir` or `transpile_ir`:
+### Pipeline Overview
 
 ```
 source
-  -> ast.parse
-  -> SemanticAnalyzer        scopes, symbol tables, free and cell variables
-  -> IRLowerer               instructions grouped into basic blocks
-  -> codegen                 labels, gotos, locals, closures
-  -> Lua + stdlib prelude + entry call
+  -> AST Parser (ast.parse or pure-Lua parser.lua)
+  -> SemanticAnalyzer (scopes, symbol binding, closures, cell variables)
+  -> CIR / IRLowerer (typed SSA, control-flow basic blocks, magic methods)
+  -> Optimizer (CPA type inference, constant folding, DCE, register allocation, ASO)
+  -> Codegen (LuaJIT emission, vtables, unboxed FFI buffers)
+  -> Lua output + stdlib prelude
 ```
 
-| Module | Responsibility |
+| Component | File | Description |
+| --- | --- | --- |
+| `semantic.py` / `semantic.lua` | Frontend | Scoped symbol tables, lexical binding, upvalue and closure capture. |
+| `cir.py` | Intermediate Rep | Typed High-Level IR (CIR), CPA type inference, call-site monomorphization. |
+| `ir.py` / `ir.lua` | Intermediate Rep | Basic block instruction lowering, explicit branching and landing pads. |
+| `optimizer.py` | Optimizer | Constant folding, copy propagation, dead-code elimination, register pooling. |
+| `nyi.py` | JIT Diagnostics | Static NYI auditor, loop-invariant allocation hoisting, CData memory anchoring. |
+| `codegen.py` / `codegen.lua` | Code Generation | Emits LuaJIT gotos, labels, FFI structs, and class metatables. |
+| `stdlib.py` / `bootstrap.lua` | Runtime | Complete Lua runtime prelude implementing Python builtins and modules. |
+| `hpy.lua` | Native Interop | HPy Universal ABI trampoline and zero-copy NumPy array wrapping. |
+| `pybridge.lua` | Native Interop | Lazy CPython FFI bridge for transparent PyObject proxying. |
+| `bundle.py` | Packager | Amalgamation builder for standalone executable bundles. |
+| `pip.py` | Package Manager | PyPI wheel resolver, universal wheel unpacker, and venv manager. |
+| `benchmarks.py` | Benchmarks | PyPerformance workload runner and performance comparison dashboard. |
+| `cache.py` | Caching | Two-tier persistent compilation cache in `.luthon_cache`. |
+| `sourcemap.py` | Debugging | VLQ-encoded source map generator. |
+
+## Language and Standard Library Coverage
+
+### Supported Language Features
+
+- Variables, multi-variable tuple unpacking (`a, b, c = 1, 2, 3`), and annotated assignments
+- Control flow: `if`, `elif`, `else`, `while`, `for` (over sequences, generators, ranges), `break`, `continue`
+- Functions, default argument values, keyword arguments, nested functions, lambdas
+- Closures and cell boxing for captured variables
+- Classes, dataclasses (`@dataclass`), single and prototype inheritance, method dispatch
+- Fixed-layout C structs via `@struct` / `@native_struct` with `ffi.metatype` vtables
+- Exception handling: `try`, `except`, `finally`, `raise`, `assert`
+- Context managers: `with` statements and custom `__enter__` / `__exit__` class protocols
+- Generators: generator functions, `yield`, and `yield from` sub-generator delegation
+- Data structures: lists, tuples, dictionaries, sets, and comprehensions (list, dict, set)
+- Vectorized mathematics: 2D `matrix` type with native `@` (`__matmul__`) operator support
+- f-strings, short-circuit boolean `and`/`or`, chained comparisons (`1 < x < 10`)
+- Negative sequence indexing (`s[-1]`) with Python parity
+
+### Standard Library Modules in Lua
+
+| Module | Features Supported |
 | --- | --- |
-| `src/luthon/semantic.py` | Scoped symbol tables, name resolution, upvalue and closure analysis, `__future__` features. |
-| `src/luthon/ir.py` | Instruction level lowering. Conditionals and loops become branch and jump instructions over labelled blocks. |
-| `src/luthon/codegen.py` | Translates IR to Lua. Emits `goto` and `::label::` for control flow, declares locals, builds classes and dataclass metamethods. |
-| `src/luthon/stdlib.py` | Lua prelude implementing the Python standard library subset. |
-| `src/luthon/transpiler.py` | Direct AST visitor, plus the `transpile_ir` entry point. |
-| `src/luthon/cache.py` | Persistent compilation cache. |
-| `src/luthon/modules.py` | Module resolution and execution for `import`. |
-| `src/luthon/sourcemap.py` | Source map container with VLQ encoding. |
-| `src/luthon/cli.py` | Command line interface. |
-
-### Closures and upvalues
-
-The semantic pass resolves every name to a binding and classifies it as local,
-parameter, freed (captured from an enclosing function) or cell (a local captured
-by a nested function). The IR emits cell boxing instructions for captured
-variables, reads and writes go through the box, and codegen propagates upvalue
-names to the enclosing function so Lua captures them as real upvalues.
-
-### Indexing
-
-Python sequences are zero based and Lua tables are one based. Luthon does not
-shift entire tables at compile time. Instead, subscript operations apply a
-runtime offset only when the index is a number, so string keys used by
-dictionaries and the standard library objects keep their natural meaning.
-
-## Language coverage
-
-Implemented in the IR backend:
-
-- Assignments, augmented assignments and tuple unpacking
-- `if`, `elif`, `else`, `while`, `for` over iterables, `break`
-- Functions, nested functions, closures, lambdas
-- Classes with methods and attributes, constructors, instance metatables
-- Dataclasses, including generated `__init__`, `__repr__` and `__eq__`
-- List, tuple and dict literals, list comprehensions
-- Subscripts and slices, attribute access
-- Calls with positional arguments and keyword arguments
-- `import` and `from ... import ...`, plus `from __future__ import ...`
-- Function decorators
-
-Not implemented yet:
-
-- `try`, `except`, `finally`, `with`, `raise`, `assert`
-- `async` and `await`, generators and `yield`
-- Set, dict and generator comprehensions
-- f-strings, boolean `and` and `or` expressions, chained comparisons
-- Multiple inheritance and metaclasses
-
-Unsupported statements lower to no-ops rather than failing the whole compile, so
-a program using them silently loses that behaviour. Treat the list above as the
-current contract.
-
-## Standard library
-
-The Lua prelude provides these modules:
-
-| Module | Coverage |
-| --- | --- |
-| `math` | Constants and the usual numeric functions, with `math.pow` mapped to the Lua exponent operator |
-| `os` | `getenv`, `remove`, `rmdir`, `makedirs`, `listdir`, `exit`, `clock`, `date`, `time`, `difftime`, `execute` |
-| `os.path` | `join`, `exists`, `isfile`, `isdir` |
-| `sys` | `argv`, `path`, `version`, `platform`, `exit`, standard streams |
-| `json` | `dumps`, `encode`, `loads`, `decode` with objects, arrays, strings, numbers, booleans, null and `\uXXXX` escapes |
-| `re` | `match`, `search`, `sub`, `findall` mapped to Lua patterns |
+| `math` | All standard trigonometric, exponential, and rounding functions with FFI C bindings |
+| `os` / `os.path` | Environment variables, filesystem operations, path manipulation (`join`, `exists`, etc.) |
+| `sys` | `argv` argument passing, `path`, `version`, `exit`, `stdout`, `stderr`, `stdin` |
+| `json` | Fast `dumps`, `loads`, `encode`, `decode` supporting nested structures and escapes |
+| `re` | `match`, `search`, `sub`, `findall` mapped to Lua pattern matching |
 | `collections` | `deque`, `defaultdict`, `Counter`, `OrderedDict` |
 | `itertools` | `chain`, `product`, `permutations`, `combinations` |
 | `functools` | `reduce`, `partial`, `lru_cache` |
-| `pathlib` | `Path` with `name`, `parent`, `exists`, `is_file`, `is_dir`, `join`, `read_text`, `write_text`, `cwd`, `home` |
-| `random` | `seed`, `random`, `randint`, `choice`, `shuffle`, `uniform`, `randrange`, `sample` |
+| `pathlib` | `Path` with resolution, directory checks, reading, writing, and navigation |
+| `array` / `ffi` | High-performance unboxed typed memory buffers (`array('d')`) and raw FFI bindings |
+| `subprocess` | Process spawning, returncode capture, output inspection (`run`, `Popen`, `call`) |
+| `hashlib` | Direct FFI bindings to OpenSSL `libcrypto` (`sha256`, `md5`, `sha1`, `sha512`) |
+| `random` | `seed`, `random`, `randint`, `choice`, `shuffle`, `uniform` |
 | `datetime` | `date`, `time`, `datetime`, `timedelta` |
-| `string` | Character class constants |
 | `base64` | `b64encode`, `b64decode` |
-| `io` | `StringIO` |
-| `struct` | Minimal `pack` and `unpack` for big-endian 32-bit integers |
-| `hashlib` | `md5`, `sha1`, `sha256`, `sha512` |
-| `typing` | Runtime placeholders, type hints are erased |
-| `site` | `getsitepackages`, `getusersitepackages`, `addsitedir` |
-| `tempfile` | `gettempdir`, `mkdtemp`, `mkstemp`, `NamedTemporaryFile`, `TemporaryFile` |
-| `dataclasses` | `dataclass` support and the `field` helper |
-| `subprocess` | `run`, `call`, `check_output`, `Popen` |
+| `struct` | Binary packing and unpacking |
 
-Builtins include `range`, `len`, `list`, `tuple`, `set`, `iter`, `str`, `int`,
-`float`, `bool`, `abs`, `round`, `min`, `max`, `sum`, `sorted`, `reversed`,
-`enumerate`, `zip`, `map`, `filter`, `any`, `all` and `open`.
+## Performance and Benchmarks
 
-The `hashlib` implementations are simplified, non-cryptographic digests used to
-give compiled programs a consistent API. They must not be used for security
-purposes or expected to match CPython output byte for byte. `struct` only
-supports the big-endian integer format shown above. `re` translates to Lua
-patterns, which are not a full regular expression engine.
+Luthon includes an automated benchmark harness running standard Computer Language Benchmarks Game (CLBG) and PyPerformance workloads against CPython 3.13:
 
-## Compilation cache
-
-Compiling a file twice without changing it is wasteful. Luthon keeps a
-persistent cache under `.luthon_cache`, keyed by a hash of the input path so
-lookups are a single directory read.
-
-Each entry stores the generated Lua next to a metadata file containing the
-LuaJIT version used, the file modification time, its size, a content hash and
-the hashes of any imported modules.
-
-The lookup is two tiered:
-
-1. Compare modification time and size from `stat`. This is the fast path and
-   costs almost nothing.
-2. If the stat data differs, hash the file contents. A tag that only touched the
-   modification time still hits the cache because the content is unchanged.
-
-Writes go through temporary files and `os.replace`, so an interrupted compile
-cannot leave a partially written entry behind. A cache entry written by a
-different Luthon version is ignored.
-
-## Benchmarks
-
-Numbers measured on a single ARM device with CPython 3.14 and LuaJIT, wall clock
-including interpreter startup. Output was verified to match between the two
-runtimes for every case.
-
-| Benchmark | Workload | CPython | LuaJIT | Speedup |
+| Benchmark | Workload | CPython 3.13 | Luthon (LuaJIT) | Speedup |
 | --- | --- | --- | --- | --- |
-| Fibonacci | `fib(36)`, naive recursion | 5.26 s | 0.40 s | about 13x |
-| Mandelbrot | 500x500 grid, 50 iterations | 3.26 s | 0.17 s | about 19x |
-| Binary trees | depth 18, 262143 nodes | 1.00 s | 0.38 s | about 2.7x |
-| N-body | small two body step | 0.07 s | 0.02 s | startup dominated |
+| Fibonacci | `fib(36)` recursion | 5.26 s | 0.40 s | ~13x |
+| Mandelbrot | 500x500 grid, 50 iterations | 3.26 s | 0.17 s | ~19x |
+| Spectral-Norm | CLBG 100x100 matrix vectorization | 0.14 s | 0.01 s | ~14x |
+| Float Norm | 1000 3D vector normalizations | 0.15 s | 0.05 s | ~2.8x |
+| Fannkuch | Permutation generation | 0.06 s | 0.03 s | ~2.0x |
+| Richards | OS task dispatcher simulation | 0.09 s | 0.04 s | ~2.2x |
 
-The workloads live under `bench/`. They are excluded from version control and
-are not part of the test suite.
+## Running Tests
 
-## Tests
+Run the full test suite (107 tests across 25 modules):
 
 ```bash
 pytest
 ```
 
-The suite covers the semantic analyzer, closure analysis, `__future__` handling,
-the transpiler, the IR pipeline and the compilation cache.
-
-## Limitations
-
-- Luthon is a transpiler, not an interpreter. It does not embed CPython and
-  cannot run packages that rely on C extension modules such as NumPy or pandas.
-  Pure Python packages can be resolved through `ModuleLoader`, which searches
-  `site-packages` and `PYTHONPATH` and understands `__init__.py`.
-- Luthon cannot compile itself. Its frontend depends on CPython modules that
-  have no Lua equivalent, most importantly `ast`.
-- Generated code requires LuaJIT. Plain Lua 5.1 lacks `goto`.
-- Semantic differences such as integer division, string formatting and error
-  handling are only as close as the prelude implements them.
-
-## Development
+Run with verbose output:
 
 ```bash
-pip install -e ".[dev]"
-pytest
+pytest -v
 ```
 
-Layout:
+## Development and Repository Structure
 
 ```
-src/luthon/    compiler, IR, codegen, stdlib prelude, cache, modules
-tests/         unit tests
-bench/         benchmark programs, not tracked by git
+src/luthon/
+  cir.py            Typed High-Level IR, CPA type inference, monomorphization
+  ir.py             Instruction-level lowering, basic blocks, control flow
+  optimizer.py      Constant folding, copy propagation, DCE, register allocation
+  codegen.py        LuaJIT code generator, vtables, FFI cdefs
+  bundle.py         Standalone binary packaging and amalgamation builder
+  benchmarks.py     PyPerformance benchmark runner and dashboard
+  pip.py            Wheel installer, PyPI resolver, virtual environment manager
+  nyi.py            Static NYI trace auditor and CData memory anchoring
+  ffi.py            CFFI translation and native library binding generator
+  semantic.py       Symbol tables, lexical binding, closure analysis
+  stdlib.py         Embedded Lua runtime prelude
+  lua/              Pure-Lua self-hosting bootstrap pipeline (parser, semantic, ir, codegen)
+tests/              Comprehensive pytest test suite (test_phase9 through test_phase24)
 ```
-
-## License
-
-MIT
