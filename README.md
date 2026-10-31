@@ -173,6 +173,10 @@ Luthon includes an automated benchmark harness running standard Computer Languag
 | Fannkuch | Permutation generation | 0.06 s | 0.03 s | ~2.0x |
 | Richards | OS task dispatcher simulation | 0.09 s | 0.04 s | ~2.2x |
 
+## AI Disclaimer and Community Contribution
+
+This project is an experimental endeavor created to explore the boundaries of transpiling Python to LuaJIT with a real optimizing compiler backend. Writing this entire compiler toolchain manually from scratch would have taken months or even over a year. With this context in mind, human code review, real-world bug reports, and community contributions are very welcome! If you spot an edge case or have ideas for performance improvements, please feel free to open an issue or pull request.
+
 ## Running Tests
 
 Run the full test suite (107 tests across 25 modules):

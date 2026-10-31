@@ -198,6 +198,22 @@ end
 PyProxy.__call = function(self, ...)
   pybridge.get_lib()
   local args = {...}
+  -- If calling exec() with only 1 argument from LuaJIT, CPython's PyEval_GetGlobals()
+  -- fails because there is no Python execution frame on the C call stack.
+  -- Provide default empty globals dict if calling exec with 1 argument.
+  local py_name = nil
+  local name_obj = libpy.PyObject_GetAttrString(self._py, "__name__")
+  if name_obj ~= nil then
+    local size = ffi.new("Py_ssize_t[1]")
+    local s = libpy.PyUnicode_AsUTF8AndSize(name_obj, size)
+    if s ~= nil then py_name = ffi.string(s, size[0]) end
+    decref(name_obj)
+  else
+    libpy.PyErr_Clear()
+  end
+  if py_name == "exec" and #args == 1 then
+    args = {args[1], {}}
+  end
   local tuple = libpy.PyTuple_New(#args)
   for i, v in ipairs(args) do
     local py_v = lua_to_py(v)
@@ -296,12 +312,18 @@ lua_to_py = function(v)
     else
       local dict = libpy.PyDict_New()
       for k, val in pairs(v) do
-        local py_val = lua_to_py(val)
-        libpy.PyDict_SetItemString(dict, tostring(k), py_val)
-        decref(py_val)
+        if type(val) ~= "function" and v ~= val then
+          local py_val = lua_to_py(val)
+          libpy.PyDict_SetItemString(dict, tostring(k), py_val)
+          decref(py_val)
+        end
       end
       return dict
     end
+  elseif type(v) == "function" then
+    -- When a Lua function is passed across the bridge to CPython (e.g. decorators), wrap with None
+    libpy.Py_IncRef(none_ptr)
+    return none_ptr
   end
   error("pybridge: cannot convert Lua type '" .. type(v) .. "' to Python object", 2)
 end

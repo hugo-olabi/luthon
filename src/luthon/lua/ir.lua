@@ -729,10 +729,10 @@ function IRLowerer:_lower_expr_impl(node)
         self:_emit("BRANCH_FALSE", {left_tmp, false_lbl})
         -- Evaluate right operand
         local right_tmp = self:lower_expr(node.values[2])
-        self:_emit("STORE", {right_tmp, result})
+        self:_emit("STORE", {result, right_tmp})
         self:_emit("JUMP", {end_lbl})
         self._cur_block = self:_new_block(false_lbl)
-        self:_emit("STORE", {left_tmp, result})
+        self:_emit("STORE", {result, left_tmp})
         self._cur_block = self:_new_block(end_lbl)
     elseif op_name == "Or" then
         -- a or b: if a then goto true_label (result is _t1)
@@ -740,10 +740,10 @@ function IRLowerer:_lower_expr_impl(node)
         self:_emit("BRANCH_TRUE", {left_tmp, true_lbl})
         -- Evaluate right operand
         local right_tmp = self:lower_expr(node.values[2])
-        self:_emit("STORE", {right_tmp, result})
+        self:_emit("STORE", {result, right_tmp})
         self:_emit("JUMP", {end_lbl})
         self._cur_block = self:_new_block(true_lbl)
-        self:_emit("STORE", {left_tmp, result})
+        self:_emit("STORE", {result, left_tmp})
         self._cur_block = self:_new_block(end_lbl)
     end
     return result

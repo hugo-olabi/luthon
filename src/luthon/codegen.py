@@ -42,6 +42,8 @@ def _emit(ins):
     if o == "UNOP":
         if ins.args[0] == "neg":
             return ins.result + " = -" + ins.args[1]
+        elif ins.args[0] == "not":
+            return ins.result + " = not " + ins.args[1]
         elif ins.args[0] in ("inv", "invert"):
             return ins.result + " = bit.bnot(" + ins.args[1] + ")"
         return ins.result + " = " + ins.args[1]
@@ -53,6 +55,10 @@ def _emit(ins):
         return "if " + ins.args[0] + " then goto " + ins.args[1] + " else goto " + ins.args[2] + " end"
     if o == "BRANCH_NONE":
         return "if " + ins.args[0] + " == nil then goto " + ins.args[1] + " end"
+    if o == "BRANCH_TRUE":
+        return "if " + ins.args[0] + " then goto " + ins.args[1] + " end"
+    if o == "BRANCH_FALSE":
+        return "if not " + ins.args[0] + " then goto " + ins.args[1] + " end"
     if o == "CMP":
         cmp_op = (ins.args[0] or "")
         if cmp_op in ("in", "In"):
@@ -60,10 +66,12 @@ def _emit(ins):
         elif cmp_op in ("notin", "NotIn", "not in"):
             return ins.result + " = _luthon_not_in(" + ins.args[1] + ", " + ins.args[2] + ")"
         mapped_op = cmp_op.replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=")
-        return ins.result + " = (" + ins.args[1] + " " + mapped_op + " " + ins.args[2] + ")"
+        return ins.result + " = _luthon_cmp('" + mapped_op + "', " + ins.args[1] + ", " + ins.args[2] + ")"
     if o == "CALL":
         args = ", ".join(str(a) for a in ins.args[1:])
-        return ins.result + " = " + str(ins.args[0]) + "(" + args + ")"
+        if ins.result:
+            return ins.result + " = " + str(ins.args[0]) + "(" + args + ")"
+        return str(ins.args[0]) + "(" + args + ")"
     if o == "DO":
         return "do"
     if o == "END":
@@ -86,14 +94,7 @@ def _emit(ins):
         return ins.result + " = " + ins.args[0]
     if o == "MAKE_LIST":
         if ins.args:
-            args = []
-            for a in ins.args:
-                s = str(a)
-                if s.startswith("_t"):
-                    args.append(s)
-                else:
-                    args.append('"' + s + '"')
-            return ins.result + " = setmetatable({" + ", ".join(args) + "}, _list_mt)"
+            return ins.result + " = setmetatable({" + ", ".join(str(a) for a in ins.args) + "}, _list_mt)"
         return ins.result + " = setmetatable({}, _list_mt)"
     if o == "MAKE_TABLE":
         return ins.result + " = {}"
@@ -144,22 +145,13 @@ def _emit(ins):
 
 
 def generate(module, sourcemap=None):
-    # propagate upvalue names into enclosing locals for Lua capture
-    by_name = {f.name: f for f in module.functions}
-    for fn in module.functions:
-        for child in module.functions:
-            if child is fn:
-                continue
-            for uv in getattr(child, "upvalues", []):
-                if uv not in fn.locals:
-                    fn.locals.append(uv)
     out = [
         "local _bit_band, _bit_bor, _bit_bxor, _bit_lshift, _bit_rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift",
         "local _math_floor, _math_abs, _math_min, _math_max = math.floor, math.abs, math.min, math.max",
         "local _table_insert, _table_concat, _string_sub = table.insert, table.concat, string.sub",
     ]
     _fnames = {f.name for f in module.functions}
-    # hoist class tables for dotted method names
+    # hoist class tables for dotted method names and MAKE_CLASS statements
     classes = set()
     all_upvalues = set()
     for fn in module.functions:
@@ -167,30 +159,37 @@ def generate(module, sourcemap=None):
             classes.add(fn.name.split(".", 1)[0])
         for uv in getattr(fn, "upvalues", []) or []:
             all_upvalues.add(uv)
+        for b in fn.blocks:
+            for ins in b.instrs:
+                if ins.op == "MAKE_CLASS" and ins.args:
+                    classes.add(ins.args[0])
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
-    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","ffi","bit","set","frozenset","table","dict"}
+    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__"}
     # Hoist module-level locals that are captured as upvalues
     hoisted_set = set()
-    main_fn = next((f for f in module.functions if f.name == "main"), None)
-    if main_fn and all_upvalues:
-        hoisted = [uv for uv in sorted(all_upvalues) if uv in main_fn.locals and uv not in builtins]
-        if hoisted:
-            out.append("local " + ", ".join(hoisted))
-            hoisted_set = set(hoisted)
     for fn in module.functions:
         if "." in fn.name:
             prefix, meth = fn.name.split(".", 1)
-            out.append(prefix + "." + meth + " = function(" + ", ".join(fn.params) + ")")
-        else:
+            if meth in ("and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"):
+                out.append(prefix + '["' + meth + '"] = function(' + ", ".join(fn.params) + ")")
+            else:
+                out.append(prefix + "." + meth + " = function(" + ", ".join(fn.params) + ")")
+        elif fn.name == "main":
             out.append("local function " + fn.name + "(" + ", ".join(fn.params) + ")")
+        else:
+            out.append("function " + fn.name + "(" + ", ".join(fn.params) + ")")
         if getattr(fn, "upvalues", None):
             out.append("  -- upvalues: " + ", ".join(fn.upvalues))
-        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored"}
-        _classes = {fn.name.split(chr(46),1)[0] for fn in module.functions if chr(46) in fn.name}
+        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__"}
+        _classes = set(classes)
         uv_set = set(getattr(fn, "upvalues", []) or [])
-        locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set]
-        tmps = [t for t in getattr(fn, "tmps", []) if t not in locs]
+        param_set = set(fn.params or [])
+        if fn.name == "main":
+            locs = []
+        else:
+            locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set and l not in param_set]
+        tmps = [t for t in getattr(fn, "tmps", []) if t not in locs and t not in param_set and t not in _classes]
         # Declare tmps as locals only when the count is small enough to avoid LuaJIT's 200-local limit.
         # Recursive functions (fib, binarytrees) need local tmps; large non-recursive main() can use globals.
         if len(locs) + len(tmps) <= 150:
@@ -225,21 +224,25 @@ def generate(module, sourcemap=None):
         init_assigns = " ".join([f"inst.{f} = {f} or 0;" for f in s_fields])
         out.append(f"setmetatable({s_name}, {{__call = function(cls, {init_args}) local inst = ffi.new('{s_name}_t'); {init_assigns} return inst end}})")
 
-    for c in sorted({fn.name.split(chr(46),1)[0] for fn in module.functions if chr(46) in fn.name}):
+    for c in sorted(classes):
         if c in struct_classes:
             continue
         has_repr = any(f.name == c + ".__repr__" for f in module.functions)
+        has_str = any(f.name == c + ".__str__" for f in module.functions)
         has_eq = any(f.name == c + ".__eq__" for f in module.functions)
         out.append(c + ".__index = " + c)
-        mt_setup = c + ".__instance_mt = {__index = " + c
-        if has_repr:
+        mt_setup = c + ".__instance_mt = {__index = function(inst, k) local v = " + c + "[k]; if type(v) == 'table' and type(v.__get__) == 'function' then return v:__get__(inst, " + c + ") end; return v end"
+        if has_str:
+            mt_setup += ", __tostring = function(inst) return " + c + ".__str__(inst) end"
+        elif has_repr:
             mt_setup += ", __tostring = function(inst) return " + c + ".__repr__(inst) end"
         if has_eq:
             mt_setup += ", __eq = function(a, b) return " + c + ".__eq__(a, b) end"
         mt_setup += "}"
         out.append(mt_setup)
-        call_body = "local self = setmetatable({}, " + c + ".__instance_mt); if " + c + ".__init__ then " + c + ".__init__(self, ...) end; return self"
-        out.append("setmetatable(" + c + ", {__call = function(cls, ...) " + call_body + " end})")
+        call_body = "local self = setmetatable({__class__ = " + c + "}, " + c + ".__instance_mt); if " + c + ".__init__ then " + c + ".__init__(self, ...) end; return self"
+        cls_mt = "{__index = function(t, k) local b = rawget(t, '__base__'); return b and b[k] end, __call = function(cls, ...) " + call_body + " end}"
+        out.append("setmetatable(" + c + ", " + cls_mt + ")")
     return "\n".join(out) + "\n"
 
 

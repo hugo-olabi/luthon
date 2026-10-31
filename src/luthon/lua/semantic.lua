@@ -55,6 +55,11 @@ local BUILTINS = {
   ["range"] = true, ["set"] = true, ["sorted"] = true, ["str"] = true,
   ["sum"] = true, ["tuple"] = true, ["zip"] = true,
   ["True"] = true, ["False"] = true, ["None"] = true, ["print"] = true,
+  ["iter"] = true, ["isinstance"] = true, ["super"] = true,
+  ["getattr"] = true, ["hasattr"] = true, ["setattr"] = true, ["delattr"] = true,
+  ["round"] = true, ["map"] = true, ["filter"] = true, ["frozenset"] = true,
+  ["slice"] = true, ["property"] = true, ["staticmethod"] = true, ["classmethod"] = true,
+  ["object"] = true, ["types"] = true,
 }
 
 local FUTURE_FEATURES = {

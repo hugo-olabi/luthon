@@ -161,11 +161,16 @@ def eliminate_dead_code_function(fn: Function) -> bool:
     changed = False
 
     # 1. Truncate instructions following unconditional JUMP or RETURN in each block
+    # (except block containing structural markers like END_TRY, END_CATCH, END_ALL_CATCH)
     for block in fn.blocks:
         trimmed: List[Instr] = []
         for ins in block.instrs:
             trimmed.append(ins)
             if ins.op in ("JUMP", "RETURN"):
+                # If block contains structural try/catch markers, keep them
+                remaining_structural = [i for i in block.instrs[len(trimmed):] if i.op in ("END_TRY", "END_CATCH", "END_ALL_CATCH")]
+                if remaining_structural:
+                    trimmed.extend(remaining_structural)
                 if len(trimmed) < len(block.instrs):
                     changed = True
                 break
@@ -182,17 +187,35 @@ def eliminate_dead_code_function(fn: Function) -> bool:
             blk = block_map.get(curr)
             if not blk:
                 continue
+            idx = fn.blocks.index(blk) if blk in fn.blocks else -1
+            if not blk.instrs and idx != -1 and idx + 1 < len(fn.blocks):
+                next_lbl = fn.blocks[idx + 1].label
+                if next_lbl not in reachable:
+                    reachable.add(next_lbl)
+                    queue.append(next_lbl)
             for ins in blk.instrs:
                 if ins.op == "JUMP" and ins.args:
                     target = ins.args[0]
                     if target not in reachable and target in block_map:
                         reachable.add(target)
                         queue.append(target)
-                elif ins.op in ("BRANCH", "BRANCH_NONE") and len(ins.args) >= 2:
+                elif ins.op in ("BRANCH", "BRANCH_NONE", "BRANCH_TRUE", "BRANCH_FALSE") and len(ins.args) >= 2:
                     for target in ins.args[1:]:
                         if target and target not in reachable and target in block_map:
                             reachable.add(target)
                             queue.append(target)
+                elif ins.op == "TRY_BEGIN":
+                    # Blocks inside try/except are reachable via exception handlers or fallthrough
+                    if idx != -1 and idx + 1 < len(fn.blocks):
+                        next_lbl = fn.blocks[idx + 1].label
+                        if next_lbl not in reachable:
+                            reachable.add(next_lbl)
+                            queue.append(next_lbl)
+            if blk.instrs and blk.instrs[-1].op not in ("JUMP", "RETURN") and idx != -1 and idx + 1 < len(fn.blocks):
+                next_lbl = fn.blocks[idx + 1].label
+                if next_lbl not in reachable:
+                    reachable.add(next_lbl)
+                    queue.append(next_lbl)
         if len(reachable) < len(fn.blocks):
             fn.blocks = [b for b in fn.blocks if b.label in reachable]
             changed = True

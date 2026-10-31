@@ -23,7 +23,7 @@ class Scope:
         return sym
 
 
-BUILTINS = {"abs","all","any","bool","dict","enumerate","float","int","len","list","max","min","range","set","sorted","str","sum","tuple","zip","True","False","None","print"}
+BUILTINS = {"abs","all","any","bool","dict","enumerate","float","int","len","list","max","min","range","set","sorted","str","sum","tuple","zip","True","False","None","print","iter","isinstance","super","getattr","hasattr","setattr","delattr","round","map","filter","frozenset","slice","property","staticmethod","classmethod","object","types"}
 
 # Recognized __future__ feature names
 FUTURE_FEATURES = {
@@ -251,13 +251,20 @@ class SemanticAnalyzer(ast.NodeVisitor):
                 s = s.parent
             self.errors.append(f"nonlocal '{name}' not found")
             return None
+        if name in BUILTINS:
+            root = self._module()
+            if name not in root.locals:
+                root.define(name, kind="global", node=node)
+            return root.locals.get(name)
         s = scope
         first = True
         while s is not None:
             if name in s.locals:
                 if s is not scope:
-                    scope.freevars.add(name)
-                    s.cellvars.add(name)
+                    # Only inner functions capture variables from enclosing functions/classes as freevars
+                    if s.kind != "module":
+                        scope.freevars.add(name)
+                        s.cellvars.add(name)
                 return s.locals[name]
             if name in s.globals:
                 root = self._module()
@@ -266,11 +273,6 @@ class SemanticAnalyzer(ast.NodeVisitor):
                 return root.locals.get(name)
             s = s.parent
             first = False
-        if name in BUILTINS:
-            root = self._module()
-            if name not in root.locals:
-                root.define(name, kind="global", node=node)
-            return root.locals.get(name)
         root = self._module()
         if name not in root.locals:
             root.define(name, kind="global", node=node)
@@ -298,9 +300,9 @@ class SemanticAnalyzer(ast.NodeVisitor):
         for child in scope.children:
             self._resolve_up(child)
             for fv in child.freevars:
-                if fv in scope.locals:
+                if fv in scope.locals and scope.kind != "module":
                     scope.cellvars.add(fv)
-        if scope.parent is not None:
+        if scope.parent is not None and scope.parent.kind != "module":
             for fv in scope.freevars:
                 if fv in scope.parent.locals:
                     scope.parent.cellvars.add(fv)

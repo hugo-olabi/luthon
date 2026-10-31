@@ -131,13 +131,16 @@ local function _emit(ins)
     if c == "_luthon_in" or c == "_luthon_not_in" then
       return ins.result .. " = " .. c .. "(" .. args[2] .. ", " .. args[3] .. ")"
     end
-    return ins.result .. " = (" .. args[2] .. " " .. c .. " " .. args[3] .. ")"
+    return ins.result .. " = _luthon_cmp('" .. c .. "', " .. args[2] .. ", " .. args[3] .. ")"
   elseif o == "CALL" then
     local lua_args = {}
     for i = 2, #args do
       table.insert(lua_args, tostring(args[i]))
     end
-    return ins.result .. " = " .. args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
+    if ins.result then
+      return ins.result .. " = " .. args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
+    end
+    return args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
   elseif o == "TRY_BEGIN" then
     return "do\nlocal ok, err = pcall(function()"
   elseif o == "END_TRY" then
@@ -225,23 +228,6 @@ function M.generate(module, skip_prelude, sourcemap)
     table.insert(fnames, fn.name)
   end
 
-  -- Propagate upvalue names into enclosing locals for Lua capture
-  for _, fn in ipairs(module.functions or {}) do
-    for _, child in ipairs(module.functions or {}) do
-      if child ~= fn then
-        for _, uv in ipairs(child.upvalues or {}) do
-          local found = false
-          for _, loc in ipairs(fn.locals or {}) do
-            if loc == uv then found = true break end
-          end
-          if not found then
-            table.insert(fn.locals, uv)
-          end
-        end
-      end
-    end
-  end
-
   -- Hoist class tables
   local classes = {}
   for _, fn in ipairs(module.functions or {}) do
@@ -268,7 +254,12 @@ function M.generate(module, skip_prelude, sourcemap)
     if dot then
       local prefix = fn.name:sub(1, dot - 1)
       local meth = fn.name:sub(dot + 1)
-      table.insert(out, prefix .. "." .. meth .. " = function(" .. table.concat(fn.params, ", ") .. ")")
+      local kw = {["and"]=true,["break"]=true,["do"]=true,["else"]=true,["elseif"]=true,["end"]=true,["false"]=true,["for"]=true,["function"]=true,["goto"]=true,["if"]=true,["in"]=true,["local"]=true,["nil"]=true,["not"]=true,["or"]=true,["repeat"]=true,["return"]=true,["then"]=true,["true"]=true,["until"]=true,["while"]=true}
+      if kw[meth] then
+        table.insert(out, prefix .. "[\"" .. meth .. "\"] = function(" .. table.concat(fn.params, ", ") .. ")")
+      else
+        table.insert(out, prefix .. "." .. meth .. " = function(" .. table.concat(fn.params, ", ") .. ")")
+      end
     elseif fn.name == "main" and fn.is_entry_point then
       -- Module entry point: use a distinct name to avoid recursion with user-defined main()
       table.insert(out, "local function _luthon_module_entry(" .. table.concat(fn.params, ", ") .. ")")
@@ -282,7 +273,8 @@ function M.generate(module, skip_prelude, sourcemap)
       "str","int","float","abs","min","max","sum","sorted","reversed","enumerate",
       "zip","map","filter","any","all","bool","datetime","collections","itertools",
       "functools","pathlib","string","base64","io","struct","hashlib","typing",
-      "site","tempfile","open","dataclasses","subprocess","ast","bit","array","matrix","ffi",
+      "site","tempfile","open","dataclasses","subprocess","ast","bit","array","matrix","ffi","__name__","isinstance",
+      "super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals",
       "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
       "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
       "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
@@ -298,7 +290,9 @@ function M.generate(module, skip_prelude, sourcemap)
       for c in pairs(classes) do if c == l then is_class = true break end end
       local is_uv = false
       for _, uv in ipairs(fn.upvalues or {}) do if uv == l then is_uv = true break end end
-      if not is_builtin and not is_fn and not is_class and not is_uv then
+      local is_param = false
+      for _, p in ipairs(fn.params or {}) do if p == l then is_param = true break end end
+      if not is_builtin and not is_fn and not is_class and not is_uv and not is_param then
         table.insert(locs, l)
       end
     end
@@ -306,6 +300,7 @@ function M.generate(module, skip_prelude, sourcemap)
     for _, t in ipairs(fn.tmps or {}) do
       local found = false
       for _, l in ipairs(locs) do if l == t then found = true break end end
+      for _, p in ipairs(fn.params or {}) do if p == t then found = true break end end
       if not found then table.insert(tmps, t) end
     end
 
@@ -338,7 +333,9 @@ function M.generate(module, skip_prelude, sourcemap)
   for c in pairs(classes) do
     table.insert(out, c .. ".__index = " .. c)
     table.insert(out, c .. ".__instance_mt = {__index = " .. c .. "}")
-    table.insert(out, "setmetatable(" .. c .. ", {__call = function(cls, ...) local self = setmetatable({}, " .. c .. ".__instance_mt); cls.__init__(self, ...); return self end})")
+    local call_body = "local self = setmetatable({__class__ = " .. c .. "}, " .. c .. ".__instance_mt); if " .. c .. ".__init__ then " .. c .. ".__init__(self, ...) end; return self"
+    local cls_mt = "{__index = function(t, k) local b = rawget(t, '__base__'); return b and b[k] end, __call = function(cls, ...) " .. call_body .. " end}"
+    table.insert(out, "setmetatable(" .. c .. ", " .. cls_mt .. ")")
   end
 
   -- Runtime helpers for exceptions, asserts and context managers.

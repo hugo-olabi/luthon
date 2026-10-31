@@ -34,6 +34,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 22 — PyPerformance Full Benchmarking Suite & Profiler | [Done] | 4/4 |
 | Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | [Done] | 4/4 |
 | Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | [Done] | 4/4 |
+| Phase 25 — Real-World Ecosystem Compatibility & Showcase Verification | [Done] | 5/5 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -278,6 +279,16 @@ Leverage SIMD CPU vectorization and native BLAS libraries for matrix operations.
 - [x] Vectorized Array Operations: element-wise arithmetic (+, -, *, /) on `array('d')` using 128/256-bit SIMD intrinsics or unrolled FFI loops
 - [x] Multi-Dimensional Strided Slicing: support 2D and 3D tensor indexing with stride arrays without memory copying
 - [x] Matrix Multiplication Operator (`@` / `__matmul__`): lower Python `@` operator on 2D arrays directly to `cblas_dgemm`
+
+## Phase 25 — Real-World Ecosystem Compatibility & Showcase Verification
+
+Harden compiler, codegen, runtime stdlib, and module loader against real-world third-party packages and advanced showcase examples.
+
+- [x] Entry-Point & Name Environment Parity: ensure `__name__` evaluates to `"__main__"` when executing entry modules under LuaJIT without accidental local shadowing
+- [x] Safe List Literal Codegen: fix `MAKE_LIST` in `codegen.py` to prevent erroneous string quoting of register variables (`_r*`) and numeric expressions
+- [x] Stdlib Builtins & Metamethod Expansion: implement `isinstance` in runtime preludes and register `super`, `getattr`, `hasattr`, `setattr`, `delattr`, and `isinstance` in builtin symbol sets
+- [x] Robust Typing & Subscript Protocol: make `__luthon_get` gracefully tolerate subscripting non-table objects such as runtime generic types (`Union[...]`, `tuple[...]`)
+- [x] Showcase Verification & Package Precompilation: retranspile site-packages and verify all showcase examples in `examples/` and `tests/test_examples.py` pass cleanly under LuaJIT
 
 ## How to update
 

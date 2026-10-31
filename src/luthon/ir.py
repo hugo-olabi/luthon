@@ -47,6 +47,19 @@ class Module:
     native_structs: List[Tuple[str, str, List[str]]] = field(default_factory=list)
 
 
+LUA_RESERVED_KEYWORDS = {
+    "and", "break", "do", "else", "elseif", "end", "false", "for",
+    "function", "goto", "if", "in", "local", "nil", "not", "or",
+    "repeat", "return", "then", "true", "until", "while",
+}
+
+
+def _safe_var(name: str) -> str:
+    if name in LUA_RESERVED_KEYWORDS:
+        return f"_py_{name}"
+    return name
+
+
 class IRLowerer:
     def __init__(self):
         self._tmp = 0
@@ -55,7 +68,9 @@ class IRLowerer:
         self._cur_block: Optional[Block] = None
         self._cur_node: Optional[ast.AST] = None
         self._label_counter = 0
+        self._fn_counter = {}
         self._break_stack = []
+        self._imported_modules = set()
 
     def _new_tmp(self):
         self._tmp += 1
@@ -141,33 +156,41 @@ class IRLowerer:
                 val = self.lower_expr(node.value)
                 for t in node.targets:
                     if isinstance(t, ast.Name):
+                        safe_name = _safe_var(t.id)
                         if self._cur_fn is not None and t.id in getattr(self._cur_fn, "cellvars", []):
-                            self._emit("CELL_SET", [t.id, val])
+                            self._emit("CELL_SET", [safe_name, val])
                         else:
-                            self._emit("STORE", [t.id, val])
+                            self._emit("STORE", [safe_name, val])
                     elif isinstance(t, ast.Subscript):
                         base = self.lower_expr(t.value)
                         sl = self.lower_expr(t.slice)
                         self._emit("STORE_SUBSCR", [base, sl, val])
                     elif isinstance(t, ast.Attribute):
                         obj = self.lower_expr(t.value)
-                        self._emit("SET_ATTR", [obj, t.attr, val])
+                        attr = t.attr
+                        if attr in LUA_RESERVED_KEYWORDS:
+                            self._emit("STORE_SUBSCR", [obj, f'"{attr}"', val])
+                        else:
+                            self._emit("SET_ATTR", [obj, attr, val])
         elif isinstance(node, ast.AugAssign):
             lhs = self.lower_expr(node.target)
             rhs = self.lower_expr(node.value)
             res = self._new_tmp()
             self._emit("BINOP", [self._binop(node.op), lhs, rhs], result=res)
             if isinstance(node.target, ast.Name):
-                self._emit("STORE", [node.target.id, res])
+                self._emit("STORE", [_safe_var(node.target.id), res])
         elif isinstance(node, ast.Return):
             val = self.lower_expr(node.value) if node.value else None
             self._emit("RETURN", [val] if val else [])
         elif isinstance(node, ast.If):
             cond = self.lower_expr(node.test)
+            # Ensure boolean truthiness check if cond is not already boolean
+            chk_cond = self._new_tmp()
+            self._emit("CALL", ["bool", cond], result=chk_cond)
             then_lbl = self._new_label("then")
             else_lbl = self._new_label("else")
             end_lbl = self._new_label("endif")
-            self._emit("BRANCH", [cond, then_lbl, else_lbl])
+            self._emit("BRANCH", [chk_cond, then_lbl, else_lbl])
             # then
             self._cur_block = self._new_block(then_lbl)
             for s in node.body:
@@ -228,7 +251,14 @@ class IRLowerer:
                 self._break_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.FunctionDef):
-            fn = Function(name=node.name, params=[a.arg for a in node.args.args])
+            fn_sym = node.name
+            count = self._fn_counter.get(node.name, 0) + 1
+            self._fn_counter[node.name] = count
+            unique_fn_name = node.name if count == 1 else f"{node.name}_{count}"
+            params = [_safe_var(a.arg) for a in node.args.args]
+            if node.args.vararg:
+                params.append("...")
+            fn = Function(name=unique_fn_name, params=params)
             # Find nonlocal declarations in function body
             fn_nonlocals = set()
             for stmt in node.body:
@@ -241,6 +271,18 @@ class IRLowerer:
             b = Block(label="entry")
             fn.blocks.append(b)
             self._cur_block = b
+            # If vararg is present, pack into a table
+            if node.args.vararg:
+                vararg_name = _safe_var(node.args.vararg.arg)
+                t_dots = self._new_tmp()
+                self._emit("CALL", ["table.pack", "..."], result=t_dots)
+                self._emit("STORE", [vararg_name, t_dots])
+            # If kwarg is present, initialize table
+            if node.args.kwarg:
+                kwarg_name = _safe_var(node.args.kwarg.arg)
+                t_kw = self._new_tmp()
+                self._emit("MAKE_DICT", [], result=t_kw)
+                self._emit("STORE", [kwarg_name, t_kw])
             # initialize cell boxes for captured variables
             for cv in getattr(fn, "cellvars", []):
                 cell = self._new_tmp()
@@ -253,7 +295,7 @@ class IRLowerer:
             if defaults:
                 offset = len(args_list) - len(defaults)
                 for i, default in enumerate(defaults):
-                    param_name = args_list[offset + i].arg
+                    param_name = _safe_var(args_list[offset + i].arg)
                     def_tmp = self.lower_expr(default)
                     is_nil_lbl = self._new_label("def_set")
                     skip_lbl = self._new_label("def_skip")
@@ -277,7 +319,7 @@ class IRLowerer:
                 self.module.functions.append(fn)
 
                 # Now create the wrapper function that calls make_generator(impl_name, ...)
-                wrapper_fn = Function(name=node.name, params=[a.arg for a in node.args.args])
+                wrapper_fn = Function(name=unique_fn_name, params=[_safe_var(a.arg) for a in node.args.args])
                 sc = getattr(node, "_scope", None)
                 if sc is not None:
                     wrapper_fn.freevars = sorted(getattr(sc, "freevars", set()))
@@ -290,7 +332,7 @@ class IRLowerer:
 
                 # Call make_generator(impl_name, arg1, arg2, ...)
                 gen_res = self._new_tmp()
-                call_args = ["make_generator", impl_name] + [a.arg for a in node.args.args]
+                call_args = ["make_generator", impl_name] + [_safe_var(a.arg) for a in node.args.args]
                 self._emit("CALL", call_args, result=gen_res)
                 self._emit("RETURN", [gen_res])
                 self.module.functions.append(wrapper_fn)
@@ -302,17 +344,20 @@ class IRLowerer:
                 # Switch back to enclosing block before applying decorators
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
+            self._emit("STORE", [_safe_var(fn_sym), unique_fn_name])
             # Apply decorators (innermost first)
             for dec in reversed(node.decorator_list):
                 dec_tmp = self.lower_expr(dec)
                 fn_tmp = self._new_tmp()
-                self._emit("LOAD", [fn.name], result=fn_tmp)
+                self._emit("LOAD", [_safe_var(fn_sym)], result=fn_tmp)
                 result_tmp = self._new_tmp()
                 self._emit("CALL", [dec_tmp, fn_tmp], result=result_tmp)
-                self._emit("STORE", [fn.name, result_tmp])
+                self._emit("STORE", [_safe_var(fn_sym), result_tmp])
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 name = alias.asname or alias.name.split(".")[0]
+                self._imported_modules.add(name)
+                self._imported_modules.add(alias.name)
                 self._emit("IMPORT", [name, alias.name])
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
@@ -377,6 +422,11 @@ class IRLowerer:
             cls = self._new_tmp()
             self._emit("MAKE_CLASS", [node.name], result=cls)
 
+            # Set base class if inheritance is used
+            if node.bases:
+                base_tmp = self.lower_expr(node.bases[0])
+                self._emit("SET_ATTR", [node.name, "__base__", base_tmp])
+
             # Set __name__ and __dataclass_fields__ on class
             name_tmp = self._new_tmp()
             self._emit("CONST", [node.name], result=name_tmp)
@@ -386,6 +436,18 @@ class IRLowerer:
                 fields_tmp = self._new_tmp()
                 self._emit("MAKE_LIST", fields_list, result=fields_tmp)
                 self._emit("SET_ATTR", [node.name, "__dataclass_fields__", fields_tmp])
+
+            # Lower class-level variable assignments
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign):
+                    val = self.lower_expr(stmt.value)
+                    for t in stmt.targets:
+                        if isinstance(t, ast.Name):
+                            self._emit("SET_ATTR", [node.name, _safe_var(t.id), val])
+                elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                    if isinstance(stmt.target, ast.Name):
+                        val = self.lower_expr(stmt.value)
+                        self._emit("SET_ATTR", [node.name, _safe_var(stmt.target.id), val])
 
             # lower existing methods and track which dunder methods exist
             has_init = False
@@ -399,7 +461,10 @@ class IRLowerer:
                         has_repr = True
                     if stmt.name == "__eq__":
                         has_eq = True
-                    fn = Function(name=node.name + "." + stmt.name, params=[a.arg for a in stmt.args.args])
+                    params = [_safe_var(a.arg) for a in stmt.args.args]
+                    if stmt.args.vararg:
+                        params.append("...")
+                    fn = Function(name=node.name + "." + stmt.name, params=params)
                     sc = getattr(stmt, "_scope", None)
                     if sc is not None:
                         fn.freevars = sorted(getattr(sc, "freevars", set()))
@@ -411,6 +476,23 @@ class IRLowerer:
                     b = Block(label="entry")
                     fn.blocks.append(b)
                     self._cur_block = b
+                    # initialize cell boxes for captured variables
+                    for cv in getattr(fn, "cellvars", []):
+                        cell = self._new_tmp()
+                        self._emit("MAKE_CELL", [cv], result=cell)
+                        self._emit("STORE", [cv, cell])
+                    # If vararg is present, pack into a table
+                    if stmt.args.vararg:
+                        vararg_name = _safe_var(stmt.args.vararg.arg)
+                        t_dots = self._new_tmp()
+                        self._emit("CALL", ["table.pack", "..."], result=t_dots)
+                        self._emit("STORE", [vararg_name, t_dots])
+                    # If kwarg is present, initialize table
+                    if stmt.args.kwarg:
+                        kwarg_name = _safe_var(stmt.args.kwarg.arg)
+                        t_kw = self._new_tmp()
+                        self._emit("MAKE_DICT", [], result=t_kw)
+                        self._emit("STORE", [kwarg_name, t_kw])
                     for s2 in stmt.body:
                         self.lower_stmt(s2)
                     if not stmt.body or not isinstance(stmt.body[-1], ast.Return):
@@ -418,6 +500,17 @@ class IRLowerer:
                     self.module.functions.append(fn)
                     self._cur_fn = prev_fn
                     self._cur_block = prev_block
+                    # Check for @property decorator on class method
+                    is_prop = any((isinstance(d, ast.Name) and d.id == "property") for d in stmt.decorator_list)
+                    if is_prop:
+                        # Wrap as property object
+                        prop_tmp = self._new_tmp()
+                        prop_ref = f'{node.name}["{stmt.name}"]' if stmt.name in LUA_RESERVED_KEYWORDS else f"{node.name}.{stmt.name}"
+                        self._emit("CALL", ["property", prop_ref], result=prop_tmp)
+                        if stmt.name in LUA_RESERVED_KEYWORDS:
+                            self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
+                        else:
+                            self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
 
             # Auto-generate __init__ if dataclass and not defined
             if is_dataclass and not has_init and fields:
@@ -572,10 +665,16 @@ class IRLowerer:
         kw_table = self._new_tmp()
         self._emit("MAKE_TABLE", [], result=kw_table)
         for kw in node.keywords:
-            key_tmp = self._new_tmp()
-            self._emit("CONST", [kw.arg], result=key_tmp)
-            val_tmp = self.lower_expr(kw.value)
-            self._emit("STORE_SUBSCR", [kw_table, key_tmp, val_tmp])
+            if kw.arg is None:
+                # **kwargs dictionary unpacking: copy all key-values into kw_table
+                dict_tmp = self.lower_expr(kw.value)
+                # Call helper or iterate
+                self._emit("CALL", ["_dict_update", kw_table, dict_tmp])
+            else:
+                key_tmp = self._new_tmp()
+                self._emit("CONST", [kw.arg], result=key_tmp)
+                val_tmp = self.lower_expr(kw.value)
+                self._emit("STORE_SUBSCR", [kw_table, key_tmp, val_tmp])
         return kw_table
 
     def _emit_call(self, fn, args, kw_table=None):
@@ -620,54 +719,40 @@ class IRLowerer:
             return t
         if isinstance(node, ast.Subscript):
             v = self.lower_expr(node.value)
-            sl = self.lower_expr(node.slice)
             if isinstance(node.slice, ast.Slice):
-                # Python s[lower:upper] -> Lua string.sub(v, lower+1, upper)
-                # 0-based -> 1-based, upper is exclusive in Python, inclusive in Lua
-                lower_tmp = None
-                upper_tmp = None
-                if node.slice.lower is not None:
-                    l_val = self.lower_expr(node.slice.lower)
-                    loff = self._new_tmp()
-                    self._emit("CONST", [1], result=loff)
-                    lower_tmp = self._new_tmp()
-                    self._emit("BINOP", ["add", l_val, loff], result=lower_tmp)
-                if node.slice.upper is not None:
-                    upper_tmp = self.lower_expr(node.slice.upper)
-                    # upper is exclusive in Python, inclusive in Lua: no offset needed
-                    # string.sub(v, lower, upper) includes upper
-                if lower_tmp is not None and upper_tmp is not None:
-                    t = self._new_tmp()
-                    self._emit("CALL", ["string.sub", v, lower_tmp, upper_tmp], result=t)
-                    return t
-                elif lower_tmp is not None:
-                    t = self._new_tmp()
-                    self._emit("CALL", ["string.sub", v, lower_tmp], result=t)
-                    return t
-                elif upper_tmp is not None:
-                    t = self._new_tmp()
-                    self._emit("CALL", ["string.sub", v, 1, upper_tmp], result=t)
-                    return t
-                else:
-                    t = self._new_tmp()
-                    self._emit("CALL", ["string.sub", v, 1], result=t)
-                    return t
+                lower_tmp = self.lower_expr(node.slice.lower) if node.slice.lower is not None else None
+                upper_tmp = self.lower_expr(node.slice.upper) if node.slice.upper is not None else None
+                step_tmp = self.lower_expr(node.slice.step) if node.slice.step is not None else None
+                args = [v]
+                args.append(lower_tmp if lower_tmp is not None else "nil")
+                args.append(upper_tmp if upper_tmp is not None else "nil")
+                if step_tmp is not None:
+                    args.append(step_tmp)
+                t = self._new_tmp()
+                self._emit("CALL", ["_luthon_slice"] + args, result=t)
+                return t
             else:
+                sl = self.lower_expr(node.slice)
                 t = self._new_tmp()
                 self._emit("SUBSCR", [v, sl], result=t)
                 return t
         if isinstance(node, ast.Attribute):
             obj = self.lower_expr(node.value)
             t = self._new_tmp()
-            self._emit("GET_ATTR", [obj, node.attr], result=t)
+            attr = node.attr
+            if attr in LUA_RESERVED_KEYWORDS:
+                self._emit("SUBSCR", [obj, f'"{attr}"'], result=t)
+            else:
+                self._emit("GET_ATTR", [obj, attr], result=t)
             return t
         if isinstance(node, ast.Name):
+            safe_name = _safe_var(node.id)
             if self._cur_fn is not None and node.id in getattr(self._cur_fn, "cellvars", []):
                 t = self._new_tmp()
-                self._emit("CELL_GET", [node.id], result=t)
+                self._emit("CELL_GET", [safe_name], result=t)
                 return t
             t = self._new_tmp()
-            self._emit("LOAD", [node.id], result=t)
+            self._emit("LOAD", [safe_name], result=t)
             return t
         if isinstance(node, ast.BinOp) and isinstance(node.left, ast.List) and isinstance(node.op, ast.Mult):
             l = self.lower_expr(node.left)
@@ -699,14 +784,16 @@ class IRLowerer:
                 root = node.func.value
                 while isinstance(root, ast.Attribute):
                     root = root.value
-                if isinstance(root, ast.Name) and root.id in ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table"):
+                known_modules = ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table","operator","six","packaging")
+                is_module = (isinstance(root, ast.Name) and root.id in known_modules) or (hasattr(self, "_imported_modules") and isinstance(root, ast.Name) and root.id in self._imported_modules)
+                if is_module:
                     fn = self.lower_expr(node.func)
                     args = [self.lower_expr(a) for a in node.args]
                     kw_table = self._lower_call_keywords(node)
                     return self._emit_call(fn, args, kw_table)
                 obj = self.lower_expr(node.func.value)
                 meth = self._new_tmp()
-                self._emit("GET_ATTR", [obj, node.func.attr], result=meth)
+                self._emit("SUBSCR", [obj, f'"{node.func.attr}"'], result=meth)
                 args = [obj] + [self.lower_expr(a) for a in node.args]
                 kw_table = self._lower_call_keywords(node)
                 return self._emit_call(meth, args, kw_table)
@@ -714,13 +801,48 @@ class IRLowerer:
             args = [self.lower_expr(a) for a in node.args]
             kw_table = self._lower_call_keywords(node)
             return self._emit_call(fn, args, kw_table)
+        if isinstance(node, ast.BoolOp):
+            result = self._new_tmp()
+            left_tmp = self.lower_expr(node.values[0])
+            end_lbl = self._new_label("bool_end")
+            if isinstance(node.op, ast.And):
+                false_lbl = self._new_label("and_false")
+                self._emit("BRANCH_FALSE", [left_tmp, false_lbl])
+                right_tmp = self.lower_expr(node.values[1])
+                self._emit("STORE", [result, right_tmp])
+                self._emit("JUMP", [end_lbl])
+                self._cur_block = self._new_block(false_lbl)
+                self._emit("STORE", [result, left_tmp])
+                self._cur_block = self._new_block(end_lbl)
+            elif isinstance(node.op, ast.Or):
+                true_lbl = self._new_label("or_true")
+                self._emit("BRANCH_TRUE", [left_tmp, true_lbl])
+                right_tmp = self.lower_expr(node.values[1])
+                self._emit("STORE", [result, right_tmp])
+                self._emit("JUMP", [end_lbl])
+                self._cur_block = self._new_block(true_lbl)
+                self._emit("STORE", [result, left_tmp])
+                self._cur_block = self._new_block(end_lbl)
+            return result
         if isinstance(node, ast.IfExp):
             cond = self.lower_expr(node.test)
-            t = self._new_tmp()
+            chk_cond = self._new_tmp()
+            self._emit("CALL", ["bool", cond], result=chk_cond)
+            res = self._new_tmp()
+            then_lbl = self._new_label("ifexp_then")
+            else_lbl = self._new_label("ifexp_else")
+            end_lbl = self._new_label("ifexp_end")
+            self._emit("BRANCH", [chk_cond, then_lbl, else_lbl])
+            self._cur_block = self._new_block(then_lbl)
             a = self.lower_expr(node.body)
+            self._emit("STORE", [res, a])
+            self._emit("JUMP", [end_lbl])
+            self._cur_block = self._new_block(else_lbl)
             b = self.lower_expr(node.orelse)
-            self._emit("SELECT", [cond, a, b], result=t)
-            return t
+            self._emit("STORE", [res, b])
+            self._emit("JUMP", [end_lbl])
+            self._cur_block = self._new_block(end_lbl)
+            return res
         if isinstance(node, ast.List):
             t = self._new_tmp()
             els = [self.lower_expr(e) for e in node.elts]

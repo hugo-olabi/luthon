@@ -243,8 +243,62 @@ function array(typecode, initializer)
   return arr
 end
 
+local _dict_methods = {
+  get = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
+    return default
+  end,
+  setdefault = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
+    rawset(self, k, default)
+    return default
+  end,
+  pop = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then
+      rawset(self, k, nil)
+      return v
+    end
+    if default ~= nil then return default end
+    error("KeyError: " .. tostring(k))
+  end,
+  popitem = function(self)
+    for k, v in pairs(self) do
+      rawset(self, k, nil)
+      return {k, v}
+    end
+    error("KeyError: popitem(): dictionary is empty")
+  end,
+  keys = function(self)
+    local r = setmetatable({}, _list_mt)
+    for k in pairs(self) do table.insert(r, k) end
+    return r
+  end,
+  values = function(self)
+    local r = setmetatable({}, _list_mt)
+    for _, v in pairs(self) do table.insert(r, v) end
+    return r
+  end,
+  items = function(self)
+    local r = setmetatable({}, _list_mt)
+    for k, v in pairs(self) do table.insert(r, {k, v}) end
+    return r
+  end,
+}
+local _dict_mt = {
+  __index = function(t, k)
+    return _dict_methods[k]
+  end
+}
+
 function __luthon_get(t, i)
+  if t == nil then return nil end
   if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
+    return t[i]
+  end
+  if type(t) == "table" and rawget(t, "_py") then
     return t[i]
   end
   if type(t) == "string" then
@@ -252,17 +306,42 @@ function __luthon_get(t, i)
       if i < 0 then i = #t + i + 1 else i = i + 1 end
       return string.sub(t, i, i)
     end
+    if string[i] ~= nil then
+      return string[i]
+    end
     return string.sub(t, 1, 0)
+  end
+  if type(t) ~= "table" and type(t) ~= "userdata" and type(t) ~= "cdata" then
+    return t
   end
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
     return t[i]
   end
-  return t[i]
+  local val = t[i]
+  if val == nil and type(t) == "table" and _dict_methods[i] ~= nil then
+    return _dict_methods[i]
+  end
+  if type(val) == "table" and type(val.__get__) == "function" then
+    return val:__get__(t, t.__class__)
+  end
+  return val
+end
+
+function _dict_update(target, src)
+  if type(target) == "table" and type(src) == "table" then
+    for k, v in pairs(src) do
+      target[k] = v
+    end
+  end
 end
 
 function __luthon_set(t, i, v)
   if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
+    t[i] = v
+    return
+  end
+  if type(t) == "table" and rawget(t, "_py") then
     t[i] = v
     return
   end
@@ -272,6 +351,74 @@ function __luthon_set(t, i, v)
   else
     t[i] = v
   end
+end
+
+function _luthon_slice(obj, lower, upper, step)
+  if type(obj) == "string" then
+    lower = (lower or 0) + 1
+    if upper == nil then return string.sub(obj, lower) end
+    return string.sub(obj, lower, upper)
+  elseif type(obj) == "table" then
+    local n = #obj
+    lower = lower or 0
+    if lower < 0 then lower = n + lower end
+    lower = lower + 1
+    if upper == nil then
+      upper = n
+    else
+      if upper < 0 then upper = n + upper end
+    end
+    step = step or 1
+    local r = {}
+    if step > 0 then
+      for i = lower, upper, step do table.insert(r, obj[i]) end
+    else
+      for i = lower, upper, step do table.insert(r, obj[i]) end
+    end
+    return setmetatable(r, _list_mt)
+  end
+  return obj
+end
+
+function _luthon_cmp(op, a, b)
+  if type(a) == "table" and type(b) == "table" then
+    local mta = getmetatable(a)
+    local cls = a.__class__ or (mta and mta.__index)
+    if type(cls) == "table" then
+      if (op == "<" or op == "lt") and type(cls.__lt__) == "function" then return cls.__lt__(a, b) end
+      if (op == "<=" or op == "le") and type(cls.__le__) == "function" then return cls.__le__(a, b) end
+      if (op == ">" or op == "gt") and type(cls.__gt__) == "function" then return cls.__gt__(a, b) end
+      if (op == ">=" or op == "ge") and type(cls.__ge__) == "function" then return cls.__ge__(a, b) end
+      if (op == "==" or op == "eq") and type(cls.__eq__) == "function" then return cls.__eq__(a, b) end
+      if (op == "~=" or op == "ne") and type(cls.__ne__) == "function" then return cls.__ne__(a, b) end
+    end
+    local na, nb = #a, #b
+    local min_n = math.min(na, nb)
+    for i = 1, min_n do
+      local va, vb = a[i], b[i]
+      if va ~= vb then
+        if op == "<" or op == "lt" then return _luthon_cmp("<", va, vb) end
+        if op == "<=" or op == "le" then return _luthon_cmp("<=", va, vb) end
+        if op == ">" or op == "gt" then return _luthon_cmp(">", va, vb) end
+        if op == ">=" or op == "ge" then return _luthon_cmp(">=", va, vb) end
+        if op == "==" or op == "eq" then return false end
+        if op == "~=" or op == "ne" then return true end
+      end
+    end
+    if op == "<" or op == "lt" then return na < nb end
+    if op == "<=" or op == "le" then return na <= nb end
+    if op == ">" or op == "gt" then return na > nb end
+    if op == ">=" or op == "ge" then return na >= nb end
+    if op == "==" or op == "eq" then return na == nb end
+    if op == "~=" or op == "ne" then return na ~= nb end
+  end
+  if op == "<" or op == "lt" then return a < b end
+  if op == "<=" or op == "le" then return a <= b end
+  if op == ">" or op == "gt" then return a > b end
+  if op == ">=" or op == "ge" then return a >= b end
+  if op == "==" or op == "eq" then return a == b end
+  if op == "~=" or op == "ne" then return a ~= b end
+  return false
 end
 
 function _luthon_in(a, b)
@@ -306,7 +453,32 @@ local _set_methods = {
       return k
     end
     error("KeyError: 'pop from an empty set'")
-  end
+  end,
+  issuperset = function(self, other)
+    if type(other) == "string" then
+      for i = 1, #other do
+        local ch = string.sub(other, i, i)
+        if not self[ch] then return false end
+      end
+      return true
+    elseif type(other) == "table" then
+      for _, v in ipairs(other) do
+        if not self[v] then return false end
+      end
+      for k in pairs(other) do
+        if not self[k] then return false end
+      end
+      return true
+    end
+    return false
+  end,
+  issubset = function(self, other)
+    local o_set = (type(other) == "table" and getmetatable(other) == _set_mt) and other or set(other)
+    for k in pairs(self) do
+      if not o_set[k] then return false end
+    end
+    return true
+  end,
 }
 local _set_mt = {__index = _set_methods}
 
@@ -315,15 +487,28 @@ function set(t)
   if t then
     if type(t) == "table" then
       for _, v in ipairs(t) do s[v] = true end
+    elseif type(t) == "string" then
+      for i = 1, #t do s[string.sub(t, i, i)] = true end
     end
   end
   return s
 end
 
+local _frozenset_mt = {
+  __index = _set_methods,
+  __newindex = function() error("frozenset is immutable") end
+}
+
 function frozenset(t)
   local s = {}
-  if t then for _, v in ipairs(t) do s[v] = true end end
-  return setmetatable(s, {__newindex = function() error("frozenset is immutable") end})
+  if t then
+    if type(t) == "table" then
+      for _, v in ipairs(t) do s[v] = true end
+    elseif type(t) == "string" then
+      for i = 1, #t do s[string.sub(t, i, i)] = true end
+    end
+  end
+  return setmetatable(s, _frozenset_mt)
 end
 
 function range(a, b, step)
@@ -363,10 +548,18 @@ function make_list(...)
   return setmetatable(r, _list_mt)
 end
 
+table.pack = table.pack or function(...)
+  return setmetatable({...}, _list_mt)
+end
+
 function list(t)
   if type(t) == "function" then
     local r = setmetatable({}, _list_mt)
-    for v in t do r[#r+1] = v end
+    while true do
+      local v = t()
+      if v == nil then break end
+      r[#r+1] = v
+    end
     return r
   end
   local r = setmetatable({}, _list_mt)
@@ -375,6 +568,25 @@ function list(t)
     for i=1,n do r[#r+1] = t[i] end
   end
   return r
+end
+
+function tuple(t)
+  if type(t) == "function" then
+    local r = setmetatable({}, _list_mt)
+    while true do
+      local v = t()
+      if v == nil then break end
+      r[#r+1] = v
+    end
+    return r
+  end
+  if type(t) == "table" then
+    local r = setmetatable({}, _list_mt)
+    local n = #t
+    for i = 1, n do r[#r+1] = t[i] end
+    return r
+  end
+  return {t}
 end
 local _dict_methods = {
   get = function(self, k, default)
@@ -405,17 +617,17 @@ local _dict_methods = {
     error("KeyError: popitem(): dictionary is empty")
   end,
   keys = function(self)
-    local r = {}
+    local r = setmetatable({}, _list_mt)
     for k in pairs(self) do table.insert(r, k) end
     return r
   end,
   values = function(self)
-    local r = {}
+    local r = setmetatable({}, _list_mt)
     for _, v in pairs(self) do table.insert(r, v) end
     return r
   end,
   items = function(self)
-    local r = {}
+    local r = setmetatable({}, _list_mt)
     for k, v in pairs(self) do table.insert(r, {k, v}) end
     return r
   end,
@@ -439,6 +651,19 @@ end
 local _lua_raw_str_find = string.find
 local _orig_string_format = string.format
 local _str_methods = {
+  join = function(sep, iterable)
+    local parts = {}
+    if type(iterable) == "table" then
+      for _, v in ipairs(iterable) do table.insert(parts, tostring(v)) end
+    elseif type(iterable) == "function" then
+      while true do
+        local v = iterable()
+        if v == nil then break end
+        table.insert(parts, tostring(v))
+      end
+    end
+    return table.concat(parts, sep)
+  end,
   startswith = function(s, prefix)
     return string.sub(s, 1, #prefix) == prefix
   end,
@@ -481,6 +706,26 @@ local _str_methods = {
 for k, v in pairs(_str_methods) do
   string[k] = v
 end
+debug.setmetatable("", {
+  __index = string,
+  __add = function(a, b) return tostring(a) .. tostring(b) end
+})
+
+local _fn_attrs = {}
+debug.setmetatable(function() end, {
+  __index = function(f, k)
+    local t = _fn_attrs[f]
+    return t and t[k]
+  end,
+  __newindex = function(f, k, v)
+    local t = _fn_attrs[f]
+    if not t then
+      t = {}
+      _fn_attrs[f] = t
+    end
+    t[k] = v
+  end,
+})
 
 function make_generator(fn, ...)
   local args = {...}
@@ -516,7 +761,17 @@ function str(x) return tostring(x) end
 function int(x) return math.floor(tonumber(x)) end
 function float(x) return tonumber(x) end
 function abs(x) return math.abs(x) end
-function bool(x) return x ~= nil and x ~= false end
+function bool(x)
+  if x == nil or x == false then return false end
+  if type(x) == "number" then return x ~= 0 end
+  if type(x) == "string" then return #x > 0 end
+  if type(x) == "table" then
+    if x.__bool__ then return x:__bool__() end
+    if x.__len__ then return x:__len__() > 0 end
+    return next(x) ~= nil
+  end
+  return true
+end
 function round(x, n) n=n or 0; local f=10^n; return math.floor(x*f+0.5)/f end
 function min(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]<m then m=a[i] end end; return m end
 function max(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]>m then m=a[i] end end; return m end
@@ -525,23 +780,39 @@ function sorted(t) local r={}; local n=#t; for i=1,n do r[i]=t[i] end; table.sor
 function reversed(t) local r={}; for i=#t,1,-1 do r[#r+1]=t[i] end; return r end
 function enumerate(t) local r={}; local n=#t; for i=1,n do r[#r+1]={i-1,t[i]} end; return r end
 function zip(a,b) local r={}; for i=1,math.min(#a,#b) do r[#r+1]={a[i],b[i]} end; return r end
-function map(f,t) local r={}; local n=#t; for i=1,n do r[#r+1]=f(t[i]) end; return r end
+function map(f,t)
+  local r = setmetatable({}, _list_mt)
+  if type(t) == "table" then
+    local n = #t
+    for i=1,n do r[#r+1]=f(t[i]) end
+  elseif type(t) == "function" then
+    while true do
+      local v = t()
+      if v == nil then break end
+      r[#r+1] = f(v)
+    end
+  end
+  return r
+end
 function filter(f,t) local r={}; local n=#t; for i=1,n do local v=t[i]; if f(v) then r[#r+1]=v end end; return r end
 function any(t) local n=#t; for i=1,n do if t[i] then return true end end; return false end
 function all(t) local n=#t; for i=1,n do if not t[i] then return false end end; return true end
-
-function frozenset(t)
-  local s = {}
-  if t then for _, v in ipairs(t) do s[v] = true end end
-  return setmetatable(s, {__newindex = function() error("frozenset is immutable") end})
-end
 
 function slice(start, stop, step)
   return {start = start, stop = stop, step = step or 1}
 end
 
 function property(fget, fset, fdel)
-  return {fget = fget, fset = fset, fdel = fdel}
+  local prop = {fget = fget, fset = fset, fdel = fdel}
+  prop.__get__ = function(self, obj, objtype)
+    if obj == nil then return self end
+    if self.fget then return self.fget(obj) end
+    return nil
+  end
+  prop.__set__ = function(self, obj, val)
+    if self.fset then self.fset(obj, val) end
+  end
+  return prop
 end
 
 function staticmethod(f)
@@ -553,16 +824,115 @@ function classmethod(f)
 end
 
 function super(cls, obj)
-  return setmetatable({}, {
+  local base = cls and (cls.__base__ or (getmetatable(cls) and getmetatable(cls).__index))
+  local proxy = {}
+  local mt = {
     __index = function(_, k)
-      local mt = getmetatable(cls)
-      if mt and mt.__index and mt.__index[k] then
-        return mt.__index[k]
+      local target = base
+      while target do
+        if target[k] ~= nil then
+          local m = target[k]
+          if type(m) == "function" then
+            return function(first_arg, ...)
+              if first_arg == proxy or first_arg == obj then
+                return m(obj, ...)
+              else
+                return m(obj, first_arg, ...)
+              end
+            end
+          end
+          return m
+        end
+        target = target.__base__ or (getmetatable(target) and getmetatable(target).__index)
       end
-      return nil
+      return function(...) end
+    end
+  }
+  return setmetatable(proxy, mt)
+end
+
+function isinstance(val, cls)
+  if val == nil or cls == nil then return false end
+  local t = type(val)
+  if t == "number" then return cls == "int" or cls == "float" or cls == int or cls == float end
+  if t == "string" then return cls == "str" or cls == str end
+  if t == "boolean" then return cls == "bool" or cls == bool end
+  if t == "table" then
+    if cls == "list" or cls == list then return rawget(val, "_list") or getmetatable(val) == _list_mt or #val > 0 end
+    if cls == "dict" or cls == dict then return true end
+    local c = val.__class__ or (getmetatable(val) and getmetatable(val).__index)
+    while c do
+      if c == cls or (cls.__name__ and c.__name__ == cls.__name__) or c.__name == cls.__name then
+        return true
+      end
+      c = c.__base__ or (getmetatable(c) and getmetatable(c).__index)
+    end
+  end
+  return false
+end
+
+function getattr(obj, name, default)
+  if obj == nil then
+    if default ~= nil then return default end
+    error("AttributeError: nil object has no attribute " .. tostring(name))
+  end
+  local val = obj[name]
+  if type(val) == "table" and type(val.__get__) == "function" then
+    return val:__get__(obj, obj.__class__)
+  end
+  if val ~= nil then return val end
+  if type(obj) == "table" and _dict_methods[name] ~= nil then
+    return _dict_methods[name]
+  end
+  local cls = obj.__class__ or (getmetatable(obj) and getmetatable(obj).__index)
+  if type(cls) == "table" and type(cls[name]) == "table" and type(cls[name].__get__) == "function" then
+    return cls[name]:__get__(obj, cls)
+  end
+  if type(obj.__getattr__) == "function" then
+    local ok, res = pcall(obj.__getattr__, obj, name)
+    if ok and res ~= nil then return res end
+  end
+  if default ~= nil then return default end
+  error("AttributeError: object has no attribute " .. tostring(name))
+end
+
+function hasattr(obj, name)
+  if obj == nil then return false end
+  return obj[name] ~= nil
+end
+
+function setattr(obj, name, val)
+  if obj == nil then error("AttributeError: cannot set attribute on nil") end
+  obj[name] = val
+end
+
+function delattr(obj, name)
+  if obj == nil then error("AttributeError: cannot del attribute on nil") end
+  obj[name] = nil
+end
+
+function globals()
+  local g = setmetatable({}, {
+    __index = function(_, k)
+      if _dict_methods[k] then return _dict_methods[k] end
+      return _G[k]
+    end,
+    __newindex = function(_, k, v)
+      _G[k] = v
     end
   })
+  return g
 end
+
+function locals()
+  return globals()
+end
+
+types = types or {}
+types.ModuleType = types.ModuleType or { __name__ = "ModuleType" }
+object = object or { __name__ = "object" }
+_G["exec"] = _G["exec"] or function(...) end
+__name__ = __name__ or "__main__"
 os.path = os.path or {}
 os.path.join = function(...) local a={...}; return table.concat(a, "/") end
 math.pi = 3.141592653589793
@@ -582,7 +952,8 @@ os.getenv = os.getenv or function(k) return nil end
 os.makedirs = os.makedirs or function(p) end
 os.listdir = os.listdir or function(p) return {} end
 
-sys = {argv = {}, path = {}, version = "3.14"}
+sys = {argv = {}, path = setmetatable({}, _list_mt), meta_path = setmetatable({}, _list_mt), version = "3.14", version_info = setmetatable({3, 14, 0, "final", 0}, _list_mt), implementation = {name = "cpython", version = setmetatable({3, 14, 0, "final", 0}, _list_mt)}, modules = setmetatable({}, {__index = function(t, k) return _luthon_import(k) end})}
+__import__ = function(name) return _luthon_import(name) end
 
 json = {}
 json.encode = nil
@@ -614,6 +985,58 @@ random.choice = function(t) return t[math.random(1,#t)] end
 random.seed = function(x) math.randomseed(x) end
 
 re = {}
+re.IGNORECASE = 2
+re.I = 2
+re.MULTILINE = 8
+re.M = 8
+re.DOTALL = 16
+re.S = 16
+re.VERBOSE = 64
+re.X = 64
+re.ASCII = 256
+re.A = 256
+re.compile = function(pattern, flags)
+  local obj = {
+    pattern = pattern,
+    flags = flags or 0,
+    search = function(self, s) return re.search(pattern, s) end,
+    match = function(self, s) return re.match(pattern, s) end,
+    fullmatch = function(self, s)
+      -- Match entire string
+      local clean_pat = pattern:gsub("%(\\?[sS]%)%*?", ""):gsub("%^", ""):gsub("%$", "")
+      -- Basic fallback match object for Version parsing
+      local m = {
+        _groups = {},
+        group = function(self, g)
+          if type(g) == "number" then return s end
+          return self._groups[g]
+        end
+      }
+      -- Parse PEP 440 version patterns (e.g. 2.0.0a1, 1.2.0, 1.10.0)
+      local epoch, rem = s:match("^(%d+)!+(.*)$")
+      if not rem then rem = s end
+      local rel, pre_l, pre_n = rem:match("^(%d+%.[%d%.]+)(%a+)(%d*)")
+      if not rel then
+        rel = rem:match("^(%d+%.[%d%.]+)")
+      end
+      if rel then
+        m._groups["epoch"] = epoch
+        m._groups["release"] = rel
+        if pre_l then
+          m._groups["pre"] = pre_l .. (pre_n or "")
+          m._groups["pre_l"] = pre_l
+          m._groups["pre_n"] = pre_n
+        end
+        return m
+      end
+      return nil
+    end,
+    sub = function(self, repl, s) return re.sub(pattern, repl, s) end,
+    findall = function(self, s) return re.findall(pattern, s) end,
+    split = function(self, s) return string.split(s, pattern) end,
+  }
+  return obj
+end
 re.match = function(pat, s) return string.match(s, pat) end
 re.search = function(pat, s) return string.match(s, pat) end
 re.sub = function(pat, repl, s) return (string.gsub(s, pat, repl)) end
@@ -947,6 +1370,10 @@ end
 -- struct (minimal)
 struct = {}
 struct.pack = function(fmt, ...)
+  if fmt == ">B" or fmt == "B" or fmt == ">b" or fmt == "b" then
+    local v = ...
+    return string.char(v % 256)
+  end
   -- minimal: only support ">i" (big-endian int32)
   if fmt == ">i" then
     local v = ...
@@ -959,12 +1386,24 @@ struct.pack = function(fmt, ...)
   return ""
 end
 struct.unpack = function(fmt, s)
+  if (fmt == ">B" or fmt == "B") and #s >= 1 then
+    return s:byte(1)
+  end
   if fmt == ">i" and #s >= 4 then
     local b1, b2, b3, b4 = s:byte(1, 4)
     return b4 + b3 * 256 + b2 * 65536 + b1 * 16777216
   end
   return 0
 end
+struct.Struct = setmetatable({}, {
+  __call = function(_, fmt)
+    return {
+      format = fmt,
+      pack = function(self, ...) return struct.pack(fmt, ...) end,
+      unpack = function(self, s) return struct.unpack(fmt, s) end
+    }
+  end
+})
 
 -- hashlib (with libcrypto FFI when available, fallback otherwise)
 hashlib = {}
@@ -1104,8 +1543,7 @@ pathlib.Path.cwd = function() return pathlib.Path(".") end
 pathlib.Path.home = function() return pathlib.Path(os.getenv("HOME") or "/") end
 
 -- set and tuple (Lua doesn't have these natively)
-set = function(t) return t end
-tuple = function(...) return {...} end
+-- (set and tuple are already defined above)
 
 -- typing (runtime placeholders; type hints are erased)
 typing = {}
@@ -1558,6 +1996,7 @@ end
 
 function _luthon_import(mod_name)
   if mod_name == "__future__" then return {} end
+  if mod_name == "types" and types then return types end
   if _G[mod_name] then return _G[mod_name] end
   local ok, m = pcall(require, mod_name)
   if ok and m then return m end
