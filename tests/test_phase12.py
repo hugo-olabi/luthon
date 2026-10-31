@@ -86,6 +86,32 @@ print("res:", safe_parse("err"))
     assert "res:\t999" in res.stdout or "res: 999" in res.stdout
 
 
+def test_try_except_with_many_temporaries_upvalue_limit(tmp_path):
+    """Ensure functions with try blocks producing > 60 temporaries do not exceed LuaJIT 60 upvalue limit."""
+    assignments = "\n            ".join(f"t{i} = i * {i} + 1" for i in range(75))
+    py_code = f"""
+def complex_try_func():
+    total = 0
+    for i in range(2):
+        try:
+            {assignments}
+            total += t74
+        except Exception:
+            pass
+    return total
+
+print("COMPLEX_TRY_TOTAL:", complex_try_func())
+"""
+    py_file = tmp_path / "test_try_upvals.py"
+    py_file.write_text(py_code)
+    lua_file = tmp_path / "test_try_upvals.lua"
+
+    compile_file(py_file, use_ir=True, no_cache=True, output_path=lua_file)
+    res = subprocess.run(["luajit", str(lua_file)], capture_output=True, text=True)
+    assert res.returncode == 0, f"Lua error: {res.stderr}"
+    assert "COMPLEX_TRY_TOTAL:" in res.stdout
+
+
 def test_pure_lua_raw_strings_and_tuple_unpacking(tmp_path):
     lua_test = tmp_path / "test_parser.lua"
     lua_test.write_text("""
