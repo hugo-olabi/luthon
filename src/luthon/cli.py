@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Direct execution check: if first argument is a .py file or an existing file (not a known command or option flag)
     # e.g.: `luthon ./main.py` or `luthon script.py arg1 arg2`
-    known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "build", "-h", "--help"}
+    known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "build", "vendor", "-h", "--help"}
     if raw_argv and raw_argv[0] not in known_commands and not raw_argv[0].startswith("-"):
         candidate = Path(raw_argv[0])
         if candidate.suffix == ".py" or candidate.is_file():
@@ -203,6 +203,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("-o", "--output", required=True, help="Output executable binary path")
     b.add_argument("--standalone", action="store_true", default=True, help="Package as self-contained standalone bundle")
     b.add_argument("--optimize", "-O", action="store_true", default=True, help="Run IR optimizations")
+
+    # vendor command: `luthon vendor <source_path_or_wheel> [-o <target_dir>]`
+    ven = sub.add_parser("vendor", help="Transpile Python packages or wheels AOT into pure Lua libraries")
+    ven.add_argument("source", help="Python source file, package directory, or .whl file to convert")
+    ven.add_argument("-o", "--target", default=None, help="Output directory to store transpiled Lua package")
+    ven.add_argument("--name", default=None, help="Override package name")
+    ven.add_argument("--clean", action="store_true", help="Clean destination directory before transpiling")
+    ven.add_argument("--no-optimize", action="store_true", help="Disable IR optimizations during conversion")
 
     args, extra = parser.parse_known_args(raw_argv)
 
@@ -285,6 +293,22 @@ def main(argv: list[str] | None = None) -> int:
         bundler = StandaloneBundler(optimize=args.optimize)
         out_bin = bundler.build_bundle(Path(args.input), Path(args.output))
         print(f"Built standalone executable: {out_bin} ({out_bin.stat().st_size} bytes)")
+        return 0
+
+    if args.command == "vendor":
+        from .vendor import PackageVendor
+        target_dir = Path(args.target) if args.target else None
+        vendor = PackageVendor(target_dir=target_dir, optimize=not args.no_optimize)
+        src_path = Path(args.source)
+        stats = vendor.vendor_from_source(src_path, package_name=args.name, clean=args.clean)
+        print(f"[+] Successfully converted {stats.succeeded_files}/{stats.total_files} files to Lua")
+        print(f"    Target directory: {vendor.target_dir}")
+        print(f"    Python bytes: {stats.total_bytes_py} -> Lua bytes: {stats.total_bytes_lua}")
+        if stats.failed_files > 0:
+            print(f"[-] {stats.failed_files} file(s) failed during conversion:")
+            for path, err in stats.errors.items():
+                print(f"    - {path}: {err}")
+            return 1
         return 0
 
     if args.command == "analyze":
