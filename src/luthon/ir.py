@@ -371,7 +371,12 @@ class IRLowerer:
                 name = alias.asname or alias.name.split(".")[0]
                 self._imported_modules.add(name)
                 self._imported_modules.add(alias.name)
-                self._emit("IMPORT", [name, alias.name])
+                if alias.asname:
+                    # Explicit alias: import a.b as c -> c = _luthon_import("a.b")
+                    self._emit("IMPORT", [name, alias.name])
+                else:
+                    # Dotted without alias: import a.b -> a = _luthon_import("a", "a.b")
+                    self._emit("IMPORT", [name, name, alias.name])
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             level = getattr(node, "level", 0) or 0

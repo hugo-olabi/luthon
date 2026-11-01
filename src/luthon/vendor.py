@@ -99,7 +99,7 @@ class PackageVendor:
                 if f.endswith(".py"):
                     src_f = Path(root) / f
                     stem = Path(f).stem
-                    # __init__.py -> __init__.lua or init.lua
+                    # __init__.py -> __init__.lua (plus init.lua alias)
                     out_name = "__init__.lua" if stem == "__init__" else f"{stem}.lua"
                     dest_f = target_sub / out_name
 
@@ -109,7 +109,14 @@ class PackageVendor:
                         current_pkg = ".".join([pkg_name] + rel_parts)
                     else:
                         current_pkg = ".".join([pkg_name] + rel_parts)
-                    self._transpile_single_file(src_f, dest_f, stats, package=current_pkg)
+                    ok = self._transpile_single_file(src_f, dest_f, stats, package=current_pkg)
+                    if ok and stem == "__init__":
+                        # Provide init.lua alias for standard Lua package.path conventions
+                        init_alias = target_sub / "init.lua"
+                        try:
+                            init_alias.write_text(dest_f.read_text(encoding="utf-8"), encoding="utf-8")
+                        except Exception:
+                            pass
 
         self._generate_package_manifest(dest_pkg_dir, pkg_name, stats)
         return stats

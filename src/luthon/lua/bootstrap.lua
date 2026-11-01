@@ -2713,9 +2713,27 @@ local function _get_modules_mod()
   return _luthon_modules_mod
 end
 
-function _luthon_import(mod_name)
+function _luthon_import(mod_name, full_name)
   if mod_name == "__future__" then return {} end
   if mod_name == "types" and types then return types end
+
+  -- If full_name is provided (e.g. root = "mypkg", full_name = "mypkg.bar")
+  if full_name and full_name ~= mod_name then
+    local sub = _luthon_import(full_name)
+    local root = _luthon_import(mod_name)
+    if type(root) == "table" and type(sub) == "table" then
+      local parts = {}
+      for p in full_name:gmatch("([^%.]+)") do table.insert(parts, p) end
+      local curr = root
+      for i = 2, #parts - 1 do
+        curr[parts[i]] = curr[parts[i]] or {}
+        curr = curr[parts[i]]
+      end
+      curr[parts[#parts]] = sub
+    end
+    return root
+  end
+
   if _MODULES and type(_MODULES[mod_name]) == "table" then return _MODULES[mod_name] end
   if type(_G[mod_name]) == "table" then return _G[mod_name] end
   local mm = _get_modules_mod()
