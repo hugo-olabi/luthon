@@ -146,6 +146,8 @@ def _emit(ins):
     if o == "NEXT":
         return ins.result + " = " + ins.args[0] + "()"
     if o == "IMPORT":
+        if len(ins.args) > 2 and ins.args[2]:
+            return ins.args[0] + " = _luthon_import(\"" + ins.args[1] + "\", \"" + ins.args[2] + "\")"
         return ins.args[0] + " = _luthon_import(\"" + ins.args[1] + "\")"
     if o == "IMPORT_FROM":
         return ins.args[0] + " = _luthon_import_from(\"" + ins.args[1] + "\", \"" + ins.args[2] + "\")"

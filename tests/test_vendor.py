@@ -73,7 +73,9 @@ class TestPackageVendor(unittest.TestCase):
 
             target_pkg = vendor_out / "my_geometry"
             self.assertTrue((target_pkg / "__init__.lua").exists())
+            self.assertTrue((target_pkg / "init.lua").exists())
             self.assertTrue((target_pkg / "shapes" / "__init__.lua").exists())
+            self.assertTrue((target_pkg / "shapes" / "init.lua").exists())
             self.assertTrue((target_pkg / "shapes" / "rect.lua").exists())
             self.assertTrue((target_pkg / "luthon_pkg.json").exists())
 
@@ -153,9 +155,11 @@ class TestPackageVendor(unittest.TestCase):
             from luthon.transpiler import transpile_ir
             app_code = (
                 "import calc_pkg\n"
+                "import calc_pkg.operations\n"
                 "assert calc_pkg.x == 100\n"
                 "assert calc_pkg.add(5, 7) == 12\n"
                 "assert calc_pkg.multiply(3, 4) == 12\n"
+                "assert calc_pkg.operations.add(10, 20) == 30\n"
                 "print('VENDOR_INTEGRATION_SUCCESS')\n"
             )
             app_lua = tmp_path / "app.lua"
@@ -163,7 +167,8 @@ class TestPackageVendor(unittest.TestCase):
 
             root_src = Path(__file__).parent.parent / "src"
             env = os.environ.copy()
-            env["LUA_PATH"] = f"{vendor_out}/?.lua;{vendor_out}/?/__init__.lua;{root_src}/?.lua;{root_src}/luthon/lua/?.lua;;"
+            # Note: package.path uses ?/init.lua standard
+            env["LUA_PATH"] = f"{vendor_out}/?.lua;{vendor_out}/?/init.lua;{root_src}/?.lua;{root_src}/luthon/lua/?.lua;;"
             res = subprocess.run(["luajit", str(app_lua)], env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, f"Lua execution failed: {res.stderr}")
             self.assertIn("VENDOR_INTEGRATION_SUCCESS", res.stdout)
