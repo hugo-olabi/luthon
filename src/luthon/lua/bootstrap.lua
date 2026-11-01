@@ -2716,20 +2716,24 @@ end
 function _luthon_import(mod_name)
   if mod_name == "__future__" then return {} end
   if mod_name == "types" and types then return types end
-  if _MODULES and _MODULES[mod_name] then return _MODULES[mod_name] end
-  if _G[mod_name] then return _G[mod_name] end
-  local ok, m = pcall(require, mod_name)
-  if ok and m then return m end
+  if _MODULES and type(_MODULES[mod_name]) == "table" then return _MODULES[mod_name] end
+  if type(_G[mod_name]) == "table" then return _G[mod_name] end
   local mm = _get_modules_mod()
-  if mm then
+  if mm and mm.load then
     local ok2, m2 = pcall(mm.load, mod_name)
-    if ok2 and m2 then return m2 end
+    if ok2 and type(m2) == "table" then return m2 end
   end
-  return _G[mod_name] or {}
+  local ok, m = pcall(require, mod_name)
+  if ok and type(m) == "table" then return m end
+  if type(_G[mod_name]) == "table" then return _G[mod_name] end
+  return (type(m) == "table" and m) or _G[mod_name] or {}
 end
 
 function _luthon_import_from(mod_name, item_name)
   if mod_name == "__future__" then return item_name end
+  if mod_name == "" and __package__ and __package__ ~= "" then
+    mod_name = __package__
+  end
   local m = _luthon_import(mod_name)
   if type(m) == "table" and m[item_name] ~= nil then
     return m[item_name]

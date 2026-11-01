@@ -124,6 +124,50 @@ class TestPackageVendor(unittest.TestCase):
             self.assertTrue(out_lua.exists())
             self.assertIn("42", out_lua.read_text(encoding="utf-8"))
 
+    def test_vendor_relative_imports_and_execution(self):
+        """Test that packages with relative imports execute properly under LuaJIT."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pkg_dir = tmp_path / "calc_pkg"
+            pkg_dir.mkdir()
+            (pkg_dir / "__init__.py").write_text(
+                "from .operations import add, multiply\n"
+                "x = 100\n",
+                encoding="utf-8",
+            )
+            (pkg_dir / "operations.py").write_text(
+                "def add(a, b):\n"
+                "    return a + b\n"
+                "def multiply(a, b):\n"
+                "    return a * b\n",
+                encoding="utf-8",
+            )
+
+            vendor_out = tmp_path / "vendor_out"
+            vendor = PackageVendor(target_dir=vendor_out)
+            stats = vendor.vendor_from_source(pkg_dir)
+            self.assertEqual(stats.succeeded_files, 2)
+            self.assertEqual(stats.failed_files, 0)
+
+            # Test execution by compiling an app that imports the vendored package
+            from luthon.transpiler import transpile_ir
+            app_code = (
+                "import calc_pkg\n"
+                "assert calc_pkg.x == 100\n"
+                "assert calc_pkg.add(5, 7) == 12\n"
+                "assert calc_pkg.multiply(3, 4) == 12\n"
+                "print('VENDOR_INTEGRATION_SUCCESS')\n"
+            )
+            app_lua = tmp_path / "app.lua"
+            app_lua.write_text(transpile_ir(app_code), encoding="utf-8")
+
+            root_src = Path(__file__).parent.parent / "src"
+            env = os.environ.copy()
+            env["LUA_PATH"] = f"{vendor_out}/?.lua;{vendor_out}/?/__init__.lua;{root_src}/?.lua;{root_src}/luthon/lua/?.lua;;"
+            res = subprocess.run(["luajit", str(app_lua)], env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"Lua execution failed: {res.stderr}")
+            self.assertIn("VENDOR_INTEGRATION_SUCCESS", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

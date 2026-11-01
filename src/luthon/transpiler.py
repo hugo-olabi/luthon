@@ -613,7 +613,7 @@ def transpile(source: str) -> str:
     return Transpiler().transpile(source)
 
 
-def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, filename: str = ""):
+def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, filename: str = "", package: str = ""):
     """Transpile via the IR pipeline (semantic -> IR -> Lua codegen)."""
     import ast
     from .semantic import analyze
@@ -622,7 +622,7 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
     from .stdlib import STDLIB_LUA
     tree = ast.parse(source)
     scope = analyze(tree)
-    ir = IRLowerer()
+    ir = IRLowerer(package=package)
     module = ir.lower_module(tree, scope)
     if optimize:
         from .optimizer import optimize as opt_pass
@@ -636,6 +636,7 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
                 allocate_registers_function(fn)
     has_module_entry = any(getattr(f, "is_entry_point", False) for f in module.functions)
     entry_call = "_luthon_module_entry()" if has_module_entry else "main()"
+    module_export = "\nlocal _M = setmetatable({}, {\n  __index = function(t, k) return _G[k] end,\n  __newindex = function(t, k, v) _G[k] = v end,\n})\nreturn _M"
     file_prefix = ""
     from pathlib import Path
     try:
@@ -648,7 +649,9 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
         import os
         abs_fn = os.path.abspath(filename)
         file_prefix += f'__file__ = __file__ or "{abs_fn}"\n'
+    if package:
+        file_prefix += f'__package__ = __package__ or "{package}"\n'
     if sourcemap:
         lua, sm = generate_with_sourcemap(module, filename=filename)
-        return STDLIB_LUA + chr(10) + file_prefix + lua + chr(10) + entry_call, sm
-    return STDLIB_LUA + chr(10) + file_prefix + generate(module) + chr(10) + entry_call
+        return STDLIB_LUA + chr(10) + file_prefix + lua + chr(10) + entry_call + chr(10) + module_export, sm
+    return STDLIB_LUA + chr(10) + file_prefix + generate(module) + chr(10) + entry_call + chr(10) + module_export
