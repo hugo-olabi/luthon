@@ -72,6 +72,7 @@ class IRLowerer:
         self._fn_counter = {}
         self._break_stack = []
         self._continue_stack = []
+        self._try_depth = 0
         self._imported_modules = set()
 
     def _new_tmp(self):
@@ -183,7 +184,10 @@ class IRLowerer:
                 self._emit("STORE", [_safe_var(node.target.id), res])
         elif isinstance(node, ast.Return):
             val = self.lower_expr(node.value) if node.value else None
-            self._emit("RETURN", [val] if val else [])
+            if self._try_depth > 0:
+                self._emit("TRY_RETURN", [val] if val else [])
+            else:
+                self._emit("RETURN", [val] if val else [])
         elif isinstance(node, ast.If):
             cond = self.lower_expr(node.test)
             # Ensure boolean truthiness check if cond is not already boolean
@@ -380,8 +384,10 @@ class IRLowerer:
             try_block = self._new_block(try_label)
             self._cur_block = try_block
             self._emit("TRY_BEGIN", [], result=self._new_tmp())
+            self._try_depth += 1
             for s in node.body:
                 self.lower_stmt(s)
+            self._try_depth -= 1
             self._emit("END_TRY", [], result=self._new_tmp())
             finally_label = self._new_label("finally")
             end_label = self._new_label("end_try")
@@ -401,6 +407,7 @@ class IRLowerer:
                 for s in node.finalbody:
                     self.lower_stmt(s)
             self._cur_block = self._new_block(end_label)
+            self._emit("TRY_UNWIND", [])
         elif isinstance(node, ast.ClassDef):
             # Check for @dataclass or @struct / @native_struct decorator
             is_dataclass = False
@@ -992,6 +999,19 @@ class IRLowerer:
             self._emit("LOAD", ["str"], result=str_fn)
             self._emit("CALL", [str_fn, val_tmp], result=res)
             return res
+        if isinstance(node, ast.Slice):
+            lower_tmp = self.lower_expr(node.lower) if node.lower is not None else None
+            upper_tmp = self.lower_expr(node.upper) if node.upper is not None else None
+            step_tmp = self.lower_expr(node.step) if node.step is not None else None
+            args = [
+                lower_tmp if lower_tmp is not None else "nil",
+                upper_tmp if upper_tmp is not None else "nil",
+            ]
+            if step_tmp is not None:
+                args.append(step_tmp)
+            t = self._new_tmp()
+            self._emit("CALL", ["_luthon_slice_desc"] + args, result=t)
+            return t
         if isinstance(node, ast.Yield):
             val_tmp = self.lower_expr(node.value) if node.value else None
             args = [val_tmp] if val_tmp else []

@@ -80,6 +80,10 @@ ffi.cdef[[
   void Py_IncRef(PyObject *o);
   void Py_DecRef(PyObject *o);
 
+  PyObject* PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs);
+  PyObject* PySlice_New(PyObject *start, PyObject *stop, PyObject *step);
+  PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op);
+
   int PyCallable_Check(PyObject *o);
   PyObject* PyErr_Occurred(void);
   void PyErr_Clear(void);
@@ -231,6 +235,42 @@ PyProxy.__call = function(self, ...)
   if py_name == "exec" and #args == 1 then
     args = {args[1], {}}
   end
+
+  local total_args = select("#", ...)
+  -- Check if Luthon padded calling convention with kwargs table was used:
+  -- e.g. fn(arg1, nil, nil, nil, nil, {kw = val})
+  local py_kwargs = nil
+  local last_arg = select(total_args, ...)
+  if total_args >= 2 and type(last_arg) == "table" and not last_arg._py and not (getmetatable(last_arg) and getmetatable(last_arg).__tuple__) then
+    -- Verify if intermediate args between pos args and last_arg are nils
+    local pos_count = 0
+    for i = 1, total_args - 1 do
+      local a = select(i, ...)
+      if a ~= nil then pos_count = i end
+    end
+    -- It is a kwargs call
+    py_kwargs = libpy.PyDict_New()
+    for k, val in pairs(last_arg) do
+      local py_val = lua_to_py(val)
+      libpy.PyDict_SetItemString(py_kwargs, tostring(k), py_val)
+      decref(py_val)
+    end
+    local tuple = libpy.PyTuple_New(pos_count)
+    for i = 1, pos_count do
+      local py_v = lua_to_py(select(i, ...))
+      libpy.PyTuple_SetItem(tuple, i - 1, py_v)
+    end
+    local res = libpy.PyObject_Call(self._py, tuple, py_kwargs)
+    decref(tuple)
+    decref(py_kwargs)
+    if res == nil then
+      check_py_error()
+    end
+    local lua_res = py_to_lua(res)
+    decref(res)
+    return lua_res
+  end
+
   local tuple = libpy.PyTuple_New(#args)
   for i, v in ipairs(args) do
     local py_v = lua_to_py(v)
@@ -304,6 +344,26 @@ lua_to_py = function(v)
     if v._py then
       libpy.Py_IncRef(v._py)
       return v._py
+    end
+    if v.__slice__ then
+      local py_lower = v.lower and lua_to_py(v.lower) or nil
+      local py_upper = v.upper and lua_to_py(v.upper) or nil
+      local py_step = v.step and lua_to_py(v.step) or nil
+      local sl = libpy.PySlice_New(py_lower, py_upper, py_step)
+      if py_lower then decref(py_lower) end
+      if py_upper then decref(py_upper) end
+      if py_step then decref(py_step) end
+      return sl
+    end
+    local mt = getmetatable(v)
+    if mt and mt.__tuple__ then
+      local n = #v
+      local tup = libpy.PyTuple_New(n)
+      for i = 1, n do
+        local item = lua_to_py(v[i])
+        libpy.PyTuple_SetItem(tup, i - 1, item)
+      end
+      return tup
     end
     -- Check if sequential array
     local is_array = true

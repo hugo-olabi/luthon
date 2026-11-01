@@ -29,6 +29,10 @@ function _luthon_is_anchored(cdata_ptr)
   return _CDATA_ANCHORS[tostring(cdata_ptr)] ~= nil
 end
 
+-- Return unwinding for try/except blocks
+local _luthon_ret_val = nil
+local _luthon_has_ret = false
+
 -- FFI and C-runtime bindings
 local ffi = require("ffi")
 pcall(function()
@@ -243,6 +247,20 @@ function array(typecode, initializer)
   return arr
 end
 
+local function _luthon_key_repr(k)
+  if type(k) == "table" and (k.__tuple__ or (getmetatable(k) and getmetatable(k).__tuple__)) then
+    for idx = 1, #k do
+      if type(k[idx]) == "table" and (k[idx].__slice__ or rawget(k[idx], "_py")) then
+        return k
+      end
+    end
+    local p = {"__tup__"}
+    for idx = 1, #k do table.insert(p, tostring(_luthon_key_repr(k[idx]))) end
+    return table.concat(p, "\0")
+  end
+  return k
+end
+
 -- Luthon stdlib
 function __luthon_get(t, i)
   if t == nil then return nil end
@@ -252,6 +270,7 @@ function __luthon_get(t, i)
   if type(t) == "table" and rawget(t, "_py") then
     return t[i]
   end
+  i = _luthon_key_repr(i)
   if type(t) == "string" then
     if type(i) == "number" then
       if i < 0 then i = #t + i + 1 else i = i + 1 end
@@ -289,6 +308,7 @@ function __luthon_set(t, i, v)
     t[i] = v
     return
   end
+  i = _luthon_key_repr(i)
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
     t[i] = v
@@ -298,6 +318,28 @@ function __luthon_set(t, i, v)
 end
 
 function _luthon_cmp(op, a, b)
+  if (type(a) == "table" and rawget(a, "_py")) or (type(b) == "table" and rawget(b, "_py")) then
+    local ok, pybridge = pcall(require, "luthon.lua.pybridge")
+    if not ok or not pybridge then ok, pybridge = pcall(require, "src/luthon/lua/pybridge") end
+    if ok and pybridge and pybridge.get_lib then
+      local ok_lib, libpy = pcall(pybridge.get_lib)
+      if ok_lib and libpy and libpy.PyObject_RichCompare then
+        local op_map = {["<"]=0, ["lt"]=0, ["<="]=1, ["le"]=1, ["=="]=2, ["eq"]=2, ["~="]=3, ["!="]=3, ["ne"]=3, [">"]=4, ["gt"]=4, [">="]=5, ["ge"]=5}
+        local op_num = op_map[op] or 2
+        local py_a = pybridge.lua_to_py(a)
+        local py_b = pybridge.lua_to_py(b)
+        local res = libpy.PyObject_RichCompare(py_a, py_b, op_num)
+        libpy.Py_DecRef(py_a)
+        libpy.Py_DecRef(py_b)
+        if res ~= nil then
+          local lres = pybridge.py_to_lua(res)
+          libpy.Py_DecRef(res)
+          return lres
+        end
+        libpy.PyErr_Clear()
+      end
+    end
+  end
   if type(a) == "table" and type(b) == "table" then
     local mta = getmetatable(a)
     local cls = a.__class__ or (mta and mta.__index)
@@ -347,7 +389,15 @@ function range(a, b, step)
   return r
 end
 function len(t)
-  if type(t) == "table" and rawget(t, "_len") ~= nil then return rawget(t, "_len") end
+  if t == nil then return 0 end
+  if type(t) == "table" then
+    if rawget(t, "_len") ~= nil then return rawget(t, "_len") end
+    local n = #t
+    if n > 0 then return n end
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
+  end
   return #t
 end
 local _list_methods = {
@@ -397,9 +447,20 @@ function list(t)
   return r
 end
 
+_tuple_mt = {
+  __tuple__ = true,
+  __index = function(t, k)
+    if type(k) == "number" then
+      if k < 0 then k = #t + k + 1 else k = k + 1 end
+      return t[k]
+    end
+    return nil
+  end
+}
+
 function tuple(t)
+  local r = setmetatable({}, _tuple_mt)
   if type(t) == "function" then
-    local r = setmetatable({}, _list_mt)
     while true do
       local v = t()
       if v == nil then break end
@@ -408,12 +469,12 @@ function tuple(t)
     return r
   end
   if type(t) == "table" then
-    local r = setmetatable({}, _list_mt)
     local n = #t
     for i = 1, n do r[#r+1] = t[i] end
     return r
   end
-  return {t}
+  r[1] = t
+  return r
 end
 local _dict_methods = {
   get = function(self, k, default)
@@ -851,6 +912,14 @@ os.path.getsize = os.path.getsize or function(p)
   local sz = f:seek("end")
   f:close()
   return sz or 0
+end
+os.path.exists = os.path.exists or function(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
+os.path.isfile = os.path.isfile or os.path.exists
+os.path.isdir = os.path.isdir or function(p)
+  p = tostring(p or "")
+  if p == "" then return false end
+  local ok = os.execute("test -d \"" .. p .. "\"")
+  return ok == true or ok == 0
 end
 math.pi = 3.141592653589793
 math.e = 2.718281828459045
@@ -1324,11 +1393,17 @@ end
 
 io.BytesIO = function(initial)
   initial = tostring(initial or "")
-  local ok, py_bridge = pcall(require, "src/luthon/lua/pybridge")
+  local ok, py_bridge = pcall(require, "luthon.lua.pybridge")
+  if not ok or not py_bridge then
+    ok, py_bridge = pcall(require, "src/luthon/lua/pybridge")
+  end
   if ok and py_bridge and py_bridge.get_lib then
     local ok_lib, libpy = pcall(py_bridge.get_lib)
     if ok_lib and libpy and libpy.PyBytes_FromStringAndSize then
-      local ok_mod, mm = pcall(require, "src/luthon/lua/modules")
+      local ok_mod, mm = pcall(require, "luthon.lua.modules")
+      if not ok_mod or not mm then
+        ok_mod, mm = pcall(require, "src/luthon/lua/modules")
+      end
       if ok_mod and mm and mm.load then
         local pio = mm.load("io")
         if pio and pio.BytesIO then
@@ -2040,7 +2115,15 @@ function range(a, b, step)
 end
 
 function len(t)
-  if type(t) == "table" and rawget(t, "_len") ~= nil then return rawget(t, "_len") end
+  if t == nil then return 0 end
+  if type(t) == "table" then
+    if rawget(t, "_len") ~= nil then return rawget(t, "_len") end
+    local n = #t
+    if n > 0 then return n end
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
+  end
   return #t
 end
 
@@ -2260,6 +2343,10 @@ end
 
 -- Slice support: _luthon_slice(lower, upper, step) creates a slice descriptor.
 -- Tables get an __index metatable that handles slice descriptors.
+function _luthon_slice_desc(lower, upper, step)
+  return {__slice__ = true, lower = lower, upper = upper, step = step}
+end
+
 function _luthon_slice(lower, upper, step)
   return {_is_slice = true, lower = lower, upper = upper, step = step or 1}
 end
@@ -2430,9 +2517,19 @@ end
 
 function _luthon_slice(obj, lower, upper, step)
   if type(obj) == "string" then
-    lower = (lower or 0) + 1
-    if upper == nil then return string.sub(obj, lower) end
-    return string.sub(obj, lower, upper)
+    local n = #obj
+    local l = 1
+    if lower ~= nil then
+      if lower >= 0 then l = lower + 1
+      else l = n + lower + 1; if l < 1 then l = 1 end end
+    end
+    local u = n
+    if upper ~= nil then
+      if upper >= 0 then u = upper
+      else u = n + upper; if u < 0 then u = 0 end end
+    end
+    if l > u then return "" end
+    return string.sub(obj, l, u)
   elseif type(obj) == "table" then
     local n = #obj
     lower = lower or 0

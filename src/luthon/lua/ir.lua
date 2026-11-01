@@ -122,6 +122,7 @@ function IRLowerer.new()
   self._label_counter = 0
   self._break_stack = {}
   self._continue_stack = {}
+  self._try_depth = 0
   return self
 end
 
@@ -257,10 +258,18 @@ function IRLowerer:_lower_stmt_impl(node)
   elseif t == "Return" then
     local val = nil
     if node.value then val = self:lower_expr(node.value) end
-    if val then
-      self:_emit("RETURN", {val})
+    if self._try_depth > 0 then
+      if val then
+        self:_emit("TRY_RETURN", {val})
+      else
+        self:_emit("TRY_RETURN", {})
+      end
     else
-      self:_emit("RETURN", {})
+      if val then
+        self:_emit("RETURN", {val})
+      else
+        self:_emit("RETURN", {})
+      end
     end
   elseif t == "Assert" then
     -- assert condition [, msg] -> _luthon_assert_fail(condition, msg)
@@ -400,9 +409,11 @@ function IRLowerer:_lower_stmt_impl(node)
     -- emit TRY_BEGIN marker
     self:_emit("TRY_BEGIN", {}, self:_new_tmp())
     -- lower try body
+    self._try_depth = self._try_depth + 1
     for _, s in ipairs(node.body or {}) do
       self:lower_stmt(s)
     end
+    self._try_depth = self._try_depth - 1
     -- end try block
     self:_emit("END_TRY", {}, self:_new_tmp())
     -- except handlers
@@ -439,6 +450,7 @@ function IRLowerer:_lower_stmt_impl(node)
       end
     end
     self._cur_block = self:_new_block(end_label)
+    self:_emit("TRY_UNWIND", {})
   elseif t == "Pass" then
     -- no-op
   elseif t == "AnnAssign" then

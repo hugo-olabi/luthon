@@ -49,6 +49,11 @@ def _emit(ins):
         return ins.result + " = " + ins.args[1]
     if o == "RETURN":
         return "do return " + (ins.args[0] if ins.args and ins.args[0] else "") + " end"
+    if o == "TRY_RETURN":
+        ret_val = ins.args[0] if ins.args and ins.args[0] else "nil"
+        return f"_luthon_ret_val = {ret_val}; _luthon_has_ret = true; do return end"
+    if o == "TRY_UNWIND":
+        return "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end"
     if o == "JUMP":
         return "goto " + ins.args[0]
     if o == "BRANCH":
@@ -111,8 +116,8 @@ def _emit(ins):
         return ins.result + " = setmetatable({" + ", ".join(pairs) + "}, _dict_mt)"
     if o == "MAKE_TUPLE":
         if ins.args:
-            return ins.result + " = {" + ", ".join(str(a) for a in ins.args) + "}"
-        return ins.result + " = {}"
+            return ins.result + " = setmetatable({" + ", ".join(str(a) for a in ins.args) + "}, _tuple_mt)"
+        return ins.result + " = setmetatable({}, _tuple_mt)"
     if o == "MAKE_SET":
         return ins.result + " = {}"
     if o == "SET_ADD":
