@@ -1,11 +1,6 @@
 # Luthon
 
-<picture>
-    <!-- 1. Para editores avançados (Zed, GitHub): Troca baseado no tema do sistema -->
-    <source media="(prefers-color-scheme: dark)" srcset="assets/icon.svg">
-    <!-- 2. O FALLBACK (Para VS Code): Se o editor ignorar o <picture>, ele lerá apenas esta tag <img> -->
-    <img align="right" src="assets/icon-white.svg" width="150" height="150" alt="Icon">
-</picture>
+<img src="./assets/icon-white.svg" align="right" style="filter: invert(1); background-color: inherit;" width="150px" height="150px">
 
 Luthon is a high-performance Python to LuaJIT transpiler with an optimizing compiler backend. It parses Python source, runs semantic analysis, lowers programs to an intermediate representation (IR/CIR) with explicit control flow, and emits optimized Lua that executes under LuaJIT 2.1+.
 
