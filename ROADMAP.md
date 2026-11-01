@@ -320,6 +320,15 @@ Restructure and mature Luthon's native C library (`src/luthon/native/`) from a s
 - [x] Comprehensive Type Metaclass & Slot Dispatch: implement complete `PyType_Ready`, `tp_richcompare`, `tp_iter`/`tp_iternext`, and dynamic heap-type allocation (`PyType_FromSpec`) across decomposed subsystems
 - [x] Native Extension Unit Test Harness & Header Verification: add C-level unit tests and ABI header compliance tests verifying third-party binary compatibility against standard CPython ABI headers
 
+## Phase 29 — Native C-API Dynamic Linking & ABI Expansion for Real Extensions
+
+Achieve zero-CPython native execution of third-party C-extensions (such as Pillow's `_imaging.so` and NumPy's `_multiarray_umath.so`) by expanding `libluthon_capi.so` dynamic symbols and type allocation without custom Lua reimplementations.
+
+- [ ] Dynamic Linker ABI Coverage: export missing CPython ABI symbols in `libluthon_capi.so` required by compiled extensions (`PyExc_*` exception singletons, `PyErr_Format`, `PyModule_AddObjectRef`, `PyCapsule_*`, `_PyObject_New`, `_Py_Dealloc`)
+- [ ] C-Level Heap Object Allocation & Lifetime: implement `_PyObject_New` allocating memory matching `PyTypeObject.tp_basicsize` and wire type slot dispatch directly to LuaJIT FFI trampolines
+- [ ] PyCapsule Inter-Module Table Sharing: implement `PyCapsule_New` and `PyCapsule_GetPointer` so C-extensions can pass internal C-API dispatch tables between shared libraries
+- [ ] In-Place C-Extension Reflection Verification: verify `_imaging.so` and `_multiarray_umath.so` load and execute in-place directly via `BinaryReflector` and `libluthon_capi.so` without `libpython3.so`
+
 ## How to update
 
 This file lives in the repo. When a step is completed, check its box and commit:
