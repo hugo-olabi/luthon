@@ -50,9 +50,15 @@ class BenchmarkRunner:
         # 3. Time Luthon (LuaJIT) execution
         lua_times = []
         lua_stdout = ""
+        env = os.environ.copy()
+        pkg_src = str(Path(__file__).parent.parent)
+        current_lua_path = env.get("LUA_PATH", ";;")
+        extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+        env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
+
         for _ in range(iterations):
             t0 = time.perf_counter()
-            res_lua = subprocess.run(["luajit", str(lua_file)], capture_output=True, text=True)
+            res_lua = subprocess.run(["luajit", str(lua_file)], capture_output=True, text=True, env=env)
             elapsed = time.perf_counter() - t0
             assert res_lua.returncode == 0, f"LuaJIT run failed: {res_lua.stderr}"
             lua_times.append(elapsed)
@@ -152,3 +158,40 @@ def run():
 
 print("richards:", run())
 """
+
+WORKLOAD_JSON = """
+import json
+
+def run():
+    items = []
+    for i in range(2000):
+        items.append({
+            "id": i,
+            "name": "asset_" + str(i),
+            "score": i * 1.5,
+            "active": True if (i % 2 == 0) else False,
+            "tags": ["mesh", "texture", "lod" + str(i % 4)]
+        })
+    s = json.dumps(items)
+    parsed = json.loads(s)
+    total_score = 0.0
+    for item in parsed:
+        total_score = total_score + item["score"]
+    return int(total_score)
+
+print("json_benchmark:", run())
+"""
+
+WORKLOAD_BASE64 = """
+import base64
+
+def run():
+    raw = ("LuthonHighPerformanceAssetPipelineSerializationBufferPayload_Chunk" * 50).encode("utf-8")
+    encoded = base64.b64encode(raw)
+    for _ in range(500):
+        decoded = base64.b64decode(encoded)
+    return len(decoded)
+
+print("base64_benchmark:", run())
+"""
+

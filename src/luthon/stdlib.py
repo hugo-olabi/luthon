@@ -627,6 +627,28 @@ function list(t)
     end
     return r
   end
+  if type(t) == "table" and t._py then
+    local ok_pb, pb = pcall(require, "luthon.lua.pybridge")
+    if not ok_pb or not pb then ok_pb, pb = pcall(require, "src/luthon/lua/pybridge") end
+    if ok_pb and pb and pb.get_lib then
+      local libpy = pb.get_lib()
+      local iter = libpy.PyObject_GetIter(t._py)
+      if iter ~= nil then
+        local r = setmetatable({}, _list_mt)
+        while true do
+          local item = libpy.PyIter_Next(iter)
+          if item == nil then break end
+          local val = pb.py_to_lua(item)
+          libpy.Py_DecRef(item)
+          r[#r+1] = val
+        end
+        libpy.Py_DecRef(iter)
+        return r
+      else
+        libpy.PyErr_Clear()
+      end
+    end
+  end
   local r = setmetatable({}, _list_mt)
   if t then
     local n = #t
@@ -777,6 +799,12 @@ local _str_methods = {
       end))
     end
     return _orig_string_format(s, ...)
+  end,
+  encode = function(s, encoding)
+    return s
+  end,
+  decode = function(s, encoding)
+    return s
   end
 }
 for k, v in pairs(_str_methods) do
@@ -784,7 +812,15 @@ for k, v in pairs(_str_methods) do
 end
 debug.setmetatable("", {
   __index = string,
-  __add = function(a, b) return tostring(a) .. tostring(b) end
+  __add = function(a, b) return tostring(a) .. tostring(b) end,
+  __mul = function(a, b)
+    if type(a) == "string" and type(b) == "number" then
+      return string.rep(a, b)
+    elseif type(b) == "string" and type(a) == "number" then
+      return string.rep(b, a)
+    end
+    error("TypeError: can only multiply string by integer")
+  end
 })
 
 local _fn_attrs = {}
@@ -1494,7 +1530,68 @@ local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 local b64map = {}
 for i = 1, #b64chars do b64map[b64chars:sub(i, i)] = i - 1 end
 
+local _b64_ffi_ok, _b64_ffi = pcall(require, "ffi")
+local _b64_bit_ok, _b64_bit = pcall(require, "bit")
+
+local _b64lut = nil
+local _b64chars_ptr = nil
+if _b64_ffi_ok and _b64_bit_ok then
+  _b64lut = _b64_ffi.new("int16_t[256]")
+  for i = 0, 255 do _b64lut[i] = -1 end
+  for i = 1, #b64chars do _b64lut[b64chars:byte(i)] = i - 1 end
+  _b64lut[61] = -2 -- "="
+  _b64lut[9] = -3  -- tab
+  _b64lut[10] = -3 -- LF
+  _b64lut[13] = -3 -- CR
+  _b64lut[32] = -3 -- space
+  _b64chars_ptr = _b64_ffi.cast("const uint8_t*", b64chars)
+end
+
 base64.b64encode = function(data)
+  data = tostring(data or "")
+  local len = #data
+  if len == 0 then return "" end
+
+  if _b64_ffi_ok and _b64_bit_ok then
+    local max_out = math.floor((len + 2) / 3) * 4 + 4
+    local buf = _b64_ffi.new("uint8_t[?]", max_out)
+    local ptr = _b64_ffi.cast("const uint8_t*", data)
+    local out_pos = 0
+    local i = 0
+    while i + 2 < len do
+      local a = ptr[i]
+      local b = ptr[i+1]
+      local c = ptr[i+2]
+      local n = _b64_bit.bor(_b64_bit.lshift(a, 16), _b64_bit.lshift(b, 8), c)
+      buf[out_pos] = _b64chars_ptr[_b64_bit.rshift(n, 18)]
+      buf[out_pos + 1] = _b64chars_ptr[_b64_bit.band(_b64_bit.rshift(n, 12), 0x3F)]
+      buf[out_pos + 2] = _b64chars_ptr[_b64_bit.band(_b64_bit.rshift(n, 6), 0x3F)]
+      buf[out_pos + 3] = _b64chars_ptr[_b64_bit.band(n, 0x3F)]
+      out_pos = out_pos + 4
+      i = i + 3
+    end
+    local rem = len - i
+    if rem == 1 then
+      local a = ptr[i]
+      local n = _b64_bit.lshift(a, 16)
+      buf[out_pos] = _b64chars_ptr[_b64_bit.rshift(n, 18)]
+      buf[out_pos + 1] = _b64chars_ptr[_b64_bit.band(_b64_bit.rshift(n, 12), 0x3F)]
+      buf[out_pos + 2] = 61
+      buf[out_pos + 3] = 61
+      out_pos = out_pos + 4
+    elseif rem == 2 then
+      local a = ptr[i]
+      local b = ptr[i+1]
+      local n = _b64_bit.bor(_b64_bit.lshift(a, 16), _b64_bit.lshift(b, 8))
+      buf[out_pos] = _b64chars_ptr[_b64_bit.rshift(n, 18)]
+      buf[out_pos + 1] = _b64chars_ptr[_b64_bit.band(_b64_bit.rshift(n, 12), 0x3F)]
+      buf[out_pos + 2] = _b64chars_ptr[_b64_bit.band(_b64_bit.rshift(n, 6), 0x3F)]
+      buf[out_pos + 3] = 61
+      out_pos = out_pos + 4
+    end
+    return _b64_ffi.string(buf, out_pos)
+  end
+
   local result = {}
   local pad = 0
   local i = 1
@@ -1515,7 +1612,56 @@ base64.b64encode = function(data)
 end
 
 base64.b64decode = function(data)
-  data = tostring(data or ""):gsub("%s+", "")
+  data = tostring(data or "")
+  local len = #data
+  if len == 0 then return "" end
+
+  if _b64_ffi_ok and _b64_bit_ok then
+    local max_out = math.floor(len * 3 / 4) + 4
+    local buf = _b64_ffi.new("uint8_t[?]", max_out)
+    local ptr = _b64_ffi.cast("const uint8_t*", data)
+    local quad_idx = 0
+    local val = 0
+    local out_pos = 0
+
+    for i = 0, len - 1 do
+      local code = _b64lut[ptr[i]]
+      if code >= 0 then
+        val = _b64_bit.bor(_b64_bit.lshift(val, 6), code)
+        quad_idx = quad_idx + 1
+        if quad_idx == 4 then
+          buf[out_pos] = _b64_bit.rshift(val, 16)
+          buf[out_pos + 1] = _b64_bit.band(_b64_bit.rshift(val, 8), 0xFF)
+          buf[out_pos + 2] = _b64_bit.band(val, 0xFF)
+          out_pos = out_pos + 3
+          quad_idx = 0
+          val = 0
+        end
+      elseif code == -2 then -- =
+        if quad_idx == 2 then
+          buf[out_pos] = _b64_bit.rshift(val, 4)
+          out_pos = out_pos + 1
+          quad_idx = 0
+        elseif quad_idx == 3 then
+          buf[out_pos] = _b64_bit.rshift(val, 10)
+          buf[out_pos + 1] = _b64_bit.band(_b64_bit.rshift(val, 2), 0xFF)
+          out_pos = out_pos + 2
+          quad_idx = 0
+        end
+      end
+    end
+    if quad_idx == 2 then
+      buf[out_pos] = _b64_bit.rshift(val, 4)
+      out_pos = out_pos + 1
+    elseif quad_idx == 3 then
+      buf[out_pos] = _b64_bit.rshift(val, 10)
+      buf[out_pos + 1] = _b64_bit.band(_b64_bit.rshift(val, 2), 0xFF)
+      out_pos = out_pos + 2
+    end
+    return _b64_ffi.string(buf, out_pos)
+  end
+
+  data = data:gsub("%s+", "")
   local result = {}
   local i = 1
   while i <= #data do
@@ -1766,7 +1912,7 @@ typing.TypeVar = function(name, ...) return name end
 typing.NoReturn = {}
 typing.ClassVar = function(x) return x end
 
--- json (complete)
+-- json (complete with FFI cJSON acceleration and fast fallback)
 json = {}
 json.encode = function(x)
   if type(x) == "table" then
@@ -1789,7 +1935,90 @@ json.encode = function(x)
   end
 end
 json.dumps = json.encode
+
+local _cjson_lib = nil
+local _cjson_init_done = false
+local function _get_cjson()
+  if _cjson_init_done then return _cjson_lib end
+  _cjson_init_done = true
+  local ffi_ok, ffi_mod = pcall(require, "ffi")
+  if not ffi_ok or not ffi_mod then return nil end
+  pcall(function()
+    ffi_mod.cdef[[
+      typedef struct cJSON {
+        struct cJSON *next;
+        struct cJSON *prev;
+        struct cJSON *child;
+        int type;
+        char *valuestring;
+        int valueint;
+        double valuedouble;
+        char *string;
+      } cJSON;
+
+      cJSON *cJSON_Parse(const char *value);
+      void cJSON_Delete(cJSON *c);
+    ]]
+  end)
+  local cand = {"libcjson.so.1", "libcjson.so", "/usr/lib64/libcjson.so.1", "/usr/local/lib/libcjson.so.1"}
+  for _, soname in ipairs(cand) do
+    local ok, lib = pcall(ffi_mod.load, soname)
+    if ok and lib then
+      _cjson_lib = {ffi = ffi_mod, lib = lib}
+      return _cjson_lib
+    end
+  end
+  return nil
+end
+
+local function _cjson_node_to_lua(node, ffi_mod)
+  if node == nil then return nil end
+  local t = node.type
+  if t == 16 then -- cJSON_String
+    return ffi_mod.string(node.valuestring)
+  elseif t == 8 then -- cJSON_Number
+    return node.valuedouble
+  elseif t == 2 then -- cJSON_True
+    return true
+  elseif t == 1 then -- cJSON_False
+    return false
+  elseif t == 4 then -- cJSON_NULL
+    return nil
+  elseif t == 32 then -- cJSON_Array
+    local arr = {}
+    local curr = node.child
+    local idx = 1
+    while curr ~= nil do
+      arr[idx] = _cjson_node_to_lua(curr, ffi_mod)
+      idx = idx + 1
+      curr = curr.next
+    end
+    rawset(arr, "_len", idx - 1)
+    return arr
+  elseif t == 64 then -- cJSON_Object
+    local obj = {}
+    local curr = node.child
+    while curr ~= nil do
+      obj[ffi_mod.string(curr.string)] = _cjson_node_to_lua(curr, ffi_mod)
+      curr = curr.next
+    end
+    return obj
+  end
+  return nil
+end
+
 json.decode = function(s)
+  s = tostring(s or "")
+  local cj = _get_cjson()
+  if cj ~= nil then
+    local root = cj.lib.cJSON_Parse(s)
+    if root ~= nil then
+      local res = _cjson_node_to_lua(root, cj.ffi)
+      cj.lib.cJSON_Delete(root)
+      return res
+    end
+  end
+
   local pos = 1
   local len = #s
   local parse_value, parse_object, parse_array, parse_string, parse_bool, parse_null, parse_number

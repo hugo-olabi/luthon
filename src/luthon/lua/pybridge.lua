@@ -85,6 +85,8 @@ ffi.cdef[[
   PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op);
 
   int PyCallable_Check(PyObject *o);
+  PyObject* PyObject_GetIter(PyObject *o);
+  PyObject* PyIter_Next(PyObject *o);
   PyObject* PyErr_Occurred(void);
   void PyErr_Clear(void);
   void PyErr_Fetch(PyObject **ptype, PyObject **pvalue, PyObject **ptraceback);
@@ -168,11 +170,23 @@ pybridge.PyProxy = PyProxy
 local lua_to_py, py_to_lua, make_proxy
 
 PyProxy.__index = function(self, key)
+  local cache = rawget(self, "__attr_cache__")
+  if cache and cache[key] ~= nil then
+    return cache[key]
+  end
+
   pybridge.get_lib()
   local py_attr = libpy.PyObject_GetAttrString(self._py, tostring(key))
   if py_attr ~= nil then
     local res = py_to_lua(py_attr)
     decref(py_attr)
+    if type(res) == "table" and res._py and libpy.PyCallable_Check(res._py) ~= 0 then
+      if not cache then
+        cache = {}
+        rawset(self, "__attr_cache__", cache)
+      end
+      cache[key] = res
+    end
     return res
   end
   libpy.PyErr_Clear()
@@ -190,6 +204,9 @@ PyProxy.__index = function(self, key)
 end
 
 PyProxy.__newindex = function(self, key, val)
+  local cache = rawget(self, "__attr_cache__")
+  if cache then cache[key] = nil end
+
   pybridge.get_lib()
   local py_val = lua_to_py(val)
   -- Try attribute first, then item
@@ -240,7 +257,7 @@ PyProxy.__call = function(self, ...)
   -- Check if Luthon padded calling convention with kwargs table was used:
   -- e.g. fn(arg1, nil, nil, nil, nil, {kw = val})
   local py_kwargs = nil
-  local last_arg = select(total_args, ...)
+  local last_arg = total_args > 0 and select(total_args, ...) or nil
   if total_args >= 2 and type(last_arg) == "table" and not last_arg._py and not (getmetatable(last_arg) and getmetatable(last_arg).__tuple__) then
     -- Verify if intermediate args between pos args and last_arg are nils
     local pos_count = 0

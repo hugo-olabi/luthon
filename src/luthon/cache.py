@@ -126,6 +126,40 @@ class CompilationCache:
         os.replace(tmp_out, out_path)
         os.replace(tmp_meta, meta_path)
 
+    def get_cached_output_path(self, path):
+        """Returns the Path to output.lua if cache entry is valid, else None."""
+        entry = self._entry_dir(path)
+        meta_path = entry / "meta.json"
+        out_path = entry / "output.lua"
+        if not meta_path.exists() or not out_path.exists():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        if meta.get("version") != LUTHON_VERSION or meta.get("compiler_hash") != _compiler_hash():
+            return None
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        stat_match = (meta.get("mtime") == getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)) and meta.get("size") == st.st_size)
+        if stat_match:
+            try:
+                ch = _content_hash(path)
+            except OSError:
+                return None
+            if ch == meta.get("content_hash"):
+                return out_path
+            return None
+        try:
+            ch = _content_hash(path)
+        except OSError:
+            return None
+        if ch == meta.get("content_hash"):
+            return out_path
+        return None
+
     def invalidate(self, path):
         import shutil
         entry = self._entry_dir(path)

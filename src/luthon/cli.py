@@ -63,8 +63,30 @@ def run_file(
     cache_dir: str | None = None,
     profile: bool = False,
     dump_traces: bool = False,
+    direct_jit: bool = False,
 ) -> int:
     """Compiles a Python file and executes it immediately under LuaJIT."""
+    # Fast path: direct execution of valid cached Lua artifact
+    if direct_jit and not no_cache:
+        cache = CompilationCache(cache_dir)
+        cached_lua = cache.get_cached_output_path(str(input_path))
+        if cached_lua is not None:
+            cmd = ["luajit"]
+            if profile:
+                cmd.extend(["-jp"])
+            if dump_traces:
+                cmd.extend(["-jdump"])
+            cmd.append(str(cached_lua))
+            if script_args:
+                cmd.extend(script_args)
+            env = os.environ.copy()
+            pkg_src = str(Path(__file__).parent.parent)
+            current_lua_path = env.get("LUA_PATH", ";;")
+            extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+            env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
+            proc = subprocess.run(cmd, env=env)
+            return proc.returncode
+
     with tempfile.NamedTemporaryFile(suffix=".lua", delete=False) as tmp:
         tmp_lua_path = Path(tmp.name)
 
@@ -112,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     if raw_argv and raw_argv[0] not in known_commands and not raw_argv[0].startswith("-"):
         candidate = Path(raw_argv[0])
         if candidate.suffix == ".py" or candidate.is_file():
-            return run_file(input_path=candidate, script_args=raw_argv[1:])
+            return run_file(input_path=candidate, script_args=raw_argv[1:], direct_jit=True)
 
     parser = argparse.ArgumentParser(prog="luthon", description="Python -> LuaJIT transpiler & runner")
     sub = parser.add_subparsers(dest="command")
@@ -158,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--optimize", "-O", action="store_true", help="Run IR optimizations")
     r.add_argument("--profile", action="store_true", help="Run with LuaJIT JIT profiler enabled (-jp)")
     r.add_argument("--dump-traces", action="store_true", help="Dump JIT trace bytecode and IR (-jdump)")
+    r.add_argument("--direct", "--jit", dest="direct_jit", action="store_true", help="Execute directly via LuaJIT if cached artifact exists")
     r.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     r.add_argument("--cache-dir", default=None, help="Cache directory")
 
@@ -195,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             cache_dir=args.cache_dir,
             profile=args.profile,
             dump_traces=args.dump_traces,
+            direct_jit=getattr(args, "direct_jit", False),
         )
 
     if args.command == "venv":
