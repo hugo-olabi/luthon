@@ -35,7 +35,8 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | [Done] | 4/4 |
 | Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | [Done] | 4/4 |
 | Phase 25 — Real-World Ecosystem Compatibility & Showcase Verification | [Done] | 5/5 |
-| Phase 26 — High-Throughput Asset & Serialization Performance | [Planned] | 0/4 |
+| Phase 26 — High-Throughput Asset & Serialization Performance | [Done] | 4/4 |
+| Phase 27 — Deep C-API Emulation, Native Codecs & Zero-Bridge Pipelines | [Planned] | 0/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -295,10 +296,19 @@ Harden compiler, codegen, runtime stdlib, and module loader against real-world t
 
 Maximize runtime throughput on asset, data-transformation, and I/O heavy workloads.
 
-- [ ] Native SIMD/FFI JSON Decoder: integrate fast C-FFI JSON parser (`simdjson`/`cJSON`) with automatic large-payload fallback to bypass Lua character iteration overhead
-- [ ] Native Base64 Streaming Decoder: bind OpenSSL `EVP_DecodeBlock` or dedicated unrolled SIMD buffer unpacker for zero-allocation binary stream decoding
-- [ ] Lazy PyBridge Initialization: defer `libpython` loading and module initialization until first attribute or method access on imported proxies
-- [ ] Direct LuaJIT Standalone Driver: enable direct `luajit` execution without Python wrapper process startup overhead for instant invocation (<10ms)
+- [x] Fast Filesystem & Traversal FFI: POSIX FFI `stat`, `opendir`, `readdir`, and `mkdir` bindings accelerating `os.walk`, `os.listdir`, `os.path.exists`, and `os.makedirs`
+- [x] High-Resolution POSIX Timers: direct `clock_gettime(CLOCK_MONOTONIC)` FFI bindings for `time.perf_counter` and `time.time`
+- [x] Fast Memory Buffers & Slicing: `bytearray` and `bytes` implementations backed by contiguous FFI `uint8_t` memory buffers with direct SIMD swizzling
+- [x] PyBridge NYI Telemetry & Fallback Reporter: automatic `<script>.luthon-nyi` report generation tracking all fallback modules, attributes, and protocol accesses
+
+## Phase 27 — Deep C-API Emulation, Native Codecs & Zero-Bridge Pipelines
+
+Eliminate PyBridge fallback overhead for heavy binary extensions (PIL/Pillow, NumPy) by bridging binary reflection with runtime module resolution and type protocol trampolines.
+
+- [ ] Automatic Binary Reflector Hook in Module Waterfall: intercept `.so`/`.pyd` imports in `modules.lua` (Tier 4.5) to automatically reflect and load native C-extensions via `capi_proxy` before falling back to `libpython3`
+- [ ] PyTypeObject & Object Protocol Emulation in `capi_proxy.c`: implement `tp_getattro`, `tp_call`, `tp_as_mapping` (subscripts, 3D slice tuples), `tp_as_number`, and `tp_descr_get` so native C-types (e.g. `ndarray`, `ImagingCore`) can be manipulated without CPython
+- [ ] Native Stream & Buffer Interoperability: implement Python C-stream protocol (`read`, `seek`, `tell`) and PEP 3118 buffer protocol directly inside `capi_proxy` for zero-copy `io.BytesIO` passing to C codecs
+- [ ] Direct Image Codec FFI Shims: standalone pure FFI bindings for `libpng`, `libjpeg-turbo`, and uncompressed pixel buffer manipulations (MER / channel packing) bypassing Pillow entirely
 
 ## How to update
 
