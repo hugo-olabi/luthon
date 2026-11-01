@@ -14,6 +14,48 @@ local ffi = require("ffi")
 
 local pybridge = {}
 
+-- Track non-implemented features accessed via PyBridge fallback
+local _nyi_features = {}
+local _nyi_registered_exit = false
+
+local function _record_nyi_feature(category, name)
+  local key = tostring(category) .. ": " .. tostring(name)
+  _nyi_features[key] = (_nyi_features[key] or 0) + 1
+  if not _nyi_registered_exit then
+    _nyi_registered_exit = true
+    local guard = newproxy(true)
+    getmetatable(guard).__gc = function()
+      pybridge.flush_nyi_report()
+    end
+    _G.__luthon_nyi_exit_guard__ = guard
+  end
+end
+
+function pybridge.flush_nyi_report()
+  local target_file = _G.__file__ or os.getenv("LUTHON_EXECUTED_FILE")
+  if not target_file or target_file == "" then return end
+  local count = 0
+  for _ in pairs(_nyi_features) do count = count + 1 end
+  if count == 0 then return end
+
+  -- Path beside the executed file: "<filename>.luthon-nyi"
+  local nyi_path = target_file .. ".luthon-nyi"
+  local f = io.open(nyi_path, "w")
+  if not f then return end
+
+  f:write("# Luthon Fallback NYI Feature Report\n")
+  f:write("# The following features were intercepted by pybridge (CPython fallback):\n\n")
+
+  local sorted_keys = {}
+  for k in pairs(_nyi_features) do table.insert(sorted_keys, k) end
+  table.sort(sorted_keys)
+
+  for _, k in ipairs(sorted_keys) do
+    f:write(string.format("- %s (invoked %d time%s)\n", k, _nyi_features[k], _nyi_features[k] == 1 and "" or "s"))
+  end
+  f:close()
+end
+
 -- CPython C-API declarations
 ffi.cdef[[
   typedef struct _object PyObject;
@@ -175,6 +217,12 @@ PyProxy.__index = function(self, key)
     return cache[key]
   end
 
+  if type(key) == "string" then
+    _record_nyi_feature("attribute", key)
+  else
+    _record_nyi_feature("item_subscript", type(key) == "table" and (key.__slice__ and "slice" or "tuple_index") or type(key))
+  end
+
   pybridge.get_lib()
   local py_attr = libpy.PyObject_GetAttrString(self._py, tostring(key))
   if py_attr ~= nil then
@@ -258,7 +306,8 @@ PyProxy.__call = function(self, ...)
   -- e.g. fn(arg1, nil, nil, nil, nil, {kw = val})
   local py_kwargs = nil
   local last_arg = total_args > 0 and select(total_args, ...) or nil
-  if total_args >= 2 and type(last_arg) == "table" and not last_arg._py and not (getmetatable(last_arg) and getmetatable(last_arg).__tuple__) then
+  local last_mt = type(last_arg) == "table" and getmetatable(last_arg) or nil
+  if total_args >= 2 and type(last_arg) == "table" and not last_arg._py and not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__)) then
     -- Verify if intermediate args between pos args and last_arg are nils
     local pos_count = 0
     for i = 1, total_args - 1 do
@@ -373,6 +422,10 @@ lua_to_py = function(v)
       return sl
     end
     local mt = getmetatable(v)
+    if mt and mt.__bytes__ then
+      local data = v[1] or ""
+      return libpy.PyBytes_FromStringAndSize(data, #data)
+    end
     if mt and mt.__tuple__ then
       local n = #v
       local tup = libpy.PyTuple_New(n)
@@ -418,6 +471,11 @@ lua_to_py = function(v)
     -- When a Lua function is passed across the bridge to CPython (e.g. decorators), wrap with None
     libpy.Py_IncRef(none_ptr)
     return none_ptr
+  elseif type(v) == "cdata" then
+    -- If raw PyObject* cdata is passed across the bridge, cast and inc_ref
+    local py_ptr = ffi.cast("PyObject*", v)
+    libpy.Py_IncRef(py_ptr)
+    return py_ptr
   end
   error("pybridge: cannot convert Lua type '" .. type(v) .. "' to Python object", 2)
 end
@@ -494,6 +552,7 @@ pybridge.py_to_lua = py_to_lua
 
 -- Import a Python module by name via libpython3
 function pybridge.import(name)
+  _record_nyi_feature("module", name)
   pybridge.get_lib()
   local mod = libpy.PyImport_ImportModule(name)
   if mod == nil then

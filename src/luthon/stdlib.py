@@ -42,8 +42,46 @@ pcall(function()
     double cos(double x);
     double exp(double x);
     void *memcpy(void *dest, const void *src, size_t n);
+
+    typedef struct __dirstream DIR;
+    struct dirent {
+      unsigned long  d_ino;
+      long           d_off;
+      unsigned short d_reclen;
+      unsigned char  d_type;
+      char           d_name[256];
+    };
+    DIR *opendir(const char *name);
+    struct dirent *readdir(DIR *dirp);
+    int closedir(DIR *dirp);
+
+    typedef struct stat {
+      unsigned long  st_dev;
+      unsigned long  st_ino;
+      unsigned long  st_nlink;
+      unsigned int   st_mode;
+      unsigned int   st_uid;
+      unsigned int   st_gid;
+      unsigned int   __pad0;
+      unsigned long  st_rdev;
+      long           st_size;
+      long           st_blksize;
+      long           st_blocks;
+      long           st_atime;
+      unsigned long  st_atime_nsec;
+      long           st_mtime;
+      unsigned long  st_mtime_nsec;
+      long           st_ctime;
+      unsigned long  st_ctime_nsec;
+      long           __unused[3];
+    } stat_t;
+    int stat(const char *pathname, stat_t *statbuf);
+    int mkdir(const char *pathname, unsigned int mode);
   ]]
 end)
+
+local _LUTHON_STAT_BUF = nil
+pcall(function() _LUTHON_STAT_BUF = ffi.new("stat_t") end)
 
 local _ARRAY_TYPE_MAP = {
   ["b"] = "int8_t",
@@ -668,6 +706,101 @@ _tuple_mt = {
   end
 }
 
+_bytes_mt = {
+  __bytes__ = true,
+  __tostring = function(t) return t[1] or "" end,
+  __len = function(t) return #(t[1] or "") end,
+  __index = function(t, k)
+    if type(k) == "number" then
+      local s = t[1] or ""
+      if k < 0 then k = #s + k + 1 else k = k + 1 end
+      return s:byte(k)
+    end
+    return nil
+  end
+}
+
+_bytearray_mt = {
+  __bytes__ = true,
+  __tostring = function(t)
+    local chars = {}
+    local len = rawget(t, "_len") or 0
+    local buf = rawget(t, "_buf")
+    if buf then
+      return ffi.string(buf, len)
+    end
+    for i = 0, len - 1 do chars[i + 1] = string.char(t[i] or 0) end
+    return table.concat(chars)
+  end,
+  __len = function(t) return rawget(t, "_len") or 0 end,
+  __index = function(t, k)
+    if type(k) == "number" then
+      local len = rawget(t, "_len") or 0
+      if k < 0 then k = len + k end
+      local buf = rawget(t, "_buf")
+      if buf then return buf[k] end
+      return rawget(t, k) or 0
+    end
+    return nil
+  end,
+  __newindex = function(t, k, v)
+    if type(k) == "number" then
+      local len = rawget(t, "_len") or 0
+      if k < 0 then k = len + k end
+      local buf = rawget(t, "_buf")
+      if buf then
+        buf[k] = v
+        return
+      end
+      rawset(t, k, v)
+    else
+      rawset(t, k, v)
+    end
+  end
+}
+
+function bytearray(init)
+  local len = 0
+  local obj = setmetatable({}, _bytearray_mt)
+  if type(init) == "number" then
+    len = math.floor(init)
+    if ffi and ffi.new then
+      rawset(obj, "_buf", ffi.new("uint8_t[?]", math.max(1, len)))
+    end
+    rawset(obj, "_len", len)
+  elseif type(init) == "string" then
+    len = #init
+    if ffi and ffi.new then
+      local buf = ffi.new("uint8_t[?]", math.max(1, len))
+      ffi.copy(buf, init, len)
+      rawset(obj, "_buf", buf)
+    else
+      for i = 0, len - 1 do rawset(obj, i, init:byte(i + 1)) end
+    end
+    rawset(obj, "_len", len)
+  elseif type(init) == "table" then
+    len = #init
+    if ffi and ffi.new then
+      local buf = ffi.new("uint8_t[?]", math.max(1, len))
+      for i = 0, len - 1 do buf[i] = (init[i + 1] or init[i] or 0) end
+      rawset(obj, "_buf", buf)
+    else
+      for i = 0, len - 1 do rawset(obj, i, init[i + 1] or init[i] or 0) end
+    end
+    rawset(obj, "_len", len)
+  else
+    rawset(obj, "_len", 0)
+  end
+  return obj
+end
+
+function bytes(s)
+  if type(s) == "table" and getmetatable(s) == _bytearray_mt then
+    return setmetatable({tostring(s)}, _bytes_mt)
+  end
+  return setmetatable({tostring(s or "")}, _bytes_mt)
+end
+
 function tuple(t)
   local r = setmetatable({}, _tuple_mt)
   if type(t) == "function" then
@@ -885,8 +1018,22 @@ function bool(x)
   return true
 end
 function round(x, n) n=n or 0; local f=10^n; return math.floor(x*f+0.5)/f end
-function min(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]<m then m=a[i] end end; return m end
-function max(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]>m then m=a[i] end end; return m end
+function min(...)
+  local a = {...}
+  if #a == 1 and type(a[1]) == "table" and not a[1]._py then a = a[1] end
+  local m = a[1]
+  local n = #a
+  for i = 2, n do if a[i] < m then m = a[i] end end
+  return m
+end
+function max(...)
+  local a = {...}
+  if #a == 1 and type(a[1]) == "table" and not a[1]._py then a = a[1] end
+  local m = a[1]
+  local n = #a
+  for i = 2, n do if a[i] > m then m = a[i] end end
+  return m
+end
 function sum(t) local s=0; local n=#t; for i=1,n do s=s+t[i] end; return s end
 function sorted(t) local r={}; local n=#t; for i=1,n do r[i]=t[i] end; table.sort(r); return r end
 function reversed(t) local r={}; for i=#t,1,-1 do r[#r+1]=t[i] end; return r end
@@ -1084,11 +1231,34 @@ os.path.getsize = os.path.getsize or function(p)
   f:close()
   return sz or 0
 end
-os.path.exists = os.path.exists or function(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
-os.path.isfile = os.path.isfile or os.path.exists
+os.path.exists = os.path.exists or function(p)
+  p = tostring(p or "")
+  if p == "" then return false end
+  if _LUTHON_STAT_BUF ~= nil then
+    return ffi.C.stat(p, _LUTHON_STAT_BUF) == 0
+  end
+  local f = io.open(p, "r"); if f then f:close(); return true end; return false
+end
+os.path.isfile = os.path.isfile or function(p)
+  p = tostring(p or "")
+  if p == "" then return false end
+  if _LUTHON_STAT_BUF ~= nil and ffi.C.stat(p, _LUTHON_STAT_BUF) == 0 then
+    local bit_ok, bit_mod = pcall(require, "bit")
+    if bit_ok and bit_mod then
+      return bit_mod.band(_LUTHON_STAT_BUF.st_mode, 0x8000) ~= 0
+    end
+  end
+  return os.path.exists(p)
+end
 os.path.isdir = os.path.isdir or function(p)
   p = tostring(p or "")
   if p == "" then return false end
+  if _LUTHON_STAT_BUF ~= nil and ffi.C.stat(p, _LUTHON_STAT_BUF) == 0 then
+    local bit_ok, bit_mod = pcall(require, "bit")
+    if bit_ok and bit_mod then
+      return bit_mod.band(_LUTHON_STAT_BUF.st_mode, 0x4000) ~= 0
+    end
+  end
   local ok = os.execute("test -d \"" .. p .. "\"")
   return ok == true or ok == 0
 end
@@ -1108,11 +1278,39 @@ math.sqrt = math.sqrt
 os.getenv = os.getenv or function(k) return nil end
 os.makedirs = os.makedirs or function(p)
   p = tostring(p or "")
+  if p == "" or os.path.isdir(p) then return end
+  if _LUTHON_STAT_BUF ~= nil then
+    local parts = {}
+    for part in p:gmatch("[^/]+") do table.insert(parts, part) end
+    local cur = p:sub(1, 1) == "/" and "/" or ""
+    for _, part in ipairs(parts) do
+      cur = cur == "/" and ("/" .. part) or (cur == "" and part or (cur .. "/" .. part))
+      if not os.path.isdir(cur) then
+        ffi.C.mkdir(cur, 511)
+      end
+    end
+    return
+  end
   if p ~= "" then os.execute("mkdir -p \"" .. p .. "\"") end
 end
 os.listdir = os.listdir or function(p)
   p = tostring(p or ".")
   local results = setmetatable({}, _list_mt)
+  if ffi and ffi.C and ffi.C.opendir then
+    local d = ffi.C.opendir(p)
+    if d ~= nil then
+      while true do
+        local ent = ffi.C.readdir(d)
+        if ent == nil then break end
+        local name = ffi.string(ent.d_name)
+        if name ~= "." and name ~= ".." then
+          table.insert(results, name)
+        end
+      end
+      ffi.C.closedir(d)
+      return results
+    end
+  end
   local cmd = "ls -1 -a \"" .. p .. "\" 2>/dev/null"
   local pipe = io.popen(cmd)
   if not pipe then return results end
@@ -1125,7 +1323,43 @@ os.listdir = os.listdir or function(p)
   return results
 end
 os.walk = os.walk or function(top)
+  top = tostring(top or ".")
   local results = setmetatable({}, _list_mt)
+  if ffi and ffi.C and ffi.C.opendir and _LUTHON_STAT_BUF ~= nil then
+    local bit_ok, bit_mod = pcall(require, "bit")
+    local function walk_rec(dir)
+      local d = ffi.C.opendir(dir)
+      if d == nil then return end
+      local subdirs = setmetatable({}, _list_mt)
+      local files = setmetatable({}, _list_mt)
+      while true do
+        local ent = ffi.C.readdir(d)
+        if ent == nil then break end
+        local name = ffi.string(ent.d_name)
+        if name ~= "." and name ~= ".." then
+          local full = dir .. "/" .. name
+          if ent.d_type == 4 then
+            table.insert(subdirs, name)
+          elseif ent.d_type == 0 and bit_ok and bit_mod then
+            if ffi.C.stat(full, _LUTHON_STAT_BUF) == 0 and bit_mod.band(_LUTHON_STAT_BUF.st_mode, 0x4000) ~= 0 then
+              table.insert(subdirs, name)
+            else
+              table.insert(files, name)
+            end
+          else
+            table.insert(files, name)
+          end
+        end
+      end
+      ffi.C.closedir(d)
+      table.insert(results, setmetatable({dir, subdirs, files}, _list_mt))
+      for _, s in ipairs(subdirs) do
+        walk_rec(dir .. "/" .. s)
+      end
+    end
+    walk_rec(top)
+    return results
+  end
   local p = io.popen("find \"" .. top .. "\" 2>/dev/null")
   if not p then return results end
   local dirs_map = {}
@@ -1493,6 +1727,36 @@ datetime.timedelta = function(days, seconds, microseconds, milliseconds, minutes
   return {days = days or 0, seconds = seconds or 0}
 end
 
+-- time
+time = time or {}
+local _time_tv = nil
+pcall(function()
+  ffi.cdef[[
+    typedef struct timeval {
+      long tv_sec;
+      long tv_usec;
+    } timeval;
+    int gettimeofday(struct timeval *tv, void *tz);
+  ]]
+  _time_tv = ffi.new("struct timeval")
+end)
+
+time.time = function()
+  if _time_tv ~= nil and ffi.C.gettimeofday then
+    ffi.C.gettimeofday(_time_tv, nil)
+    return tonumber(_time_tv.tv_sec) + tonumber(_time_tv.tv_usec) * 1e-6
+  end
+  return os.time()
+end
+time.perf_counter = time.time
+time.monotonic = time.time
+time.sleep = function(secs)
+  pcall(function()
+    ffi.cdef[[ int usleep(unsigned int usec); ]]
+    ffi.C.usleep(math.floor((secs or 0) * 1000000))
+  end)
+end
+
 -- string constants and methods
 string.ascii_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 string.ascii_lowercase = "abcdefghijklmnopqrstuvwxyz"
@@ -1693,8 +1957,111 @@ io.StringIO = function(initial)
   return s
 end
 
+local _cached_py_bio_ctor = nil
+local _cached_py_libpy = nil
+local _cached_py_bridge = nil
+local _cached_capi_stream = nil
+
 io.BytesIO = function(initial)
   initial = tostring(initial or "")
+
+  -- 1. Check for native Luthon C-API stream (Zero CPython Fallback)
+  if _cached_capi_stream == nil then
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi and ffi then
+      local ok_load, capi = pcall(function()
+        ffi.cdef[[
+          typedef struct _object PyObject;
+          typedef long Py_ssize_t;
+          PyObject* PyStream_FromBytes(const void *data, Py_ssize_t size);
+          Py_ssize_t PyStream_Read(PyObject *stream, void *dest, Py_ssize_t size);
+          Py_ssize_t PyStream_Write(PyObject *stream, const void *src, Py_ssize_t size);
+          Py_ssize_t PyStream_Seek(PyObject *stream, Py_ssize_t offset, int whence);
+          Py_ssize_t PyStream_Tell(PyObject *stream);
+          const uint8_t* PyStream_GetBuffer(PyObject *stream, Py_ssize_t *size);
+          void Py_DecRef(PyObject *o);
+        ]]
+        return ffi.load("src/luthon/native/libluthon_capi.so")
+      end)
+      if ok_load and capi then
+        _cached_capi_stream = capi
+      else
+        _cached_capi_stream = false
+      end
+    else
+      _cached_capi_stream = false
+    end
+  end
+
+  if _cached_capi_stream then
+    local ffi = require("ffi")
+    local capi = _cached_capi_stream
+    local c_stream = capi.PyStream_FromBytes(initial, #initial)
+    if c_stream ~= nil then
+      local s = {
+        _handle = c_stream,
+        _ffi = ffi,
+        _capi = capi,
+      }
+      function s:read(n)
+        n = n or -1
+        if n < 0 then
+          local cur = capi.PyStream_Tell(self._handle)
+          local sz = ffi.new("Py_ssize_t[1]")
+          local buf = capi.PyStream_GetBuffer(self._handle, sz)
+          local remaining = tonumber(sz[0]) - tonumber(cur)
+          if remaining <= 0 then return "" end
+          local tmp = ffi.new("uint8_t[?]", remaining)
+          local read_bytes = capi.PyStream_Read(self._handle, tmp, remaining)
+          return ffi.string(tmp, read_bytes)
+        else
+          local tmp = ffi.new("uint8_t[?]", n)
+          local read_bytes = capi.PyStream_Read(self._handle, tmp, n)
+          return ffi.string(tmp, read_bytes)
+        end
+      end
+      function s:write(str)
+        str = tostring(str or "")
+        capi.PyStream_Write(self._handle, str, #str)
+        return #str
+      end
+      function s:seek(offset, whence)
+        offset = offset or 0
+        local w = 0
+        if whence == "cur" or whence == 1 then w = 1
+        elseif whence == "end" or whence == 2 then w = 2
+        end
+        return tonumber(capi.PyStream_Seek(self._handle, offset, w))
+      end
+      function s:tell()
+        return tonumber(capi.PyStream_Tell(self._handle))
+      end
+      function s:getvalue()
+        local sz = ffi.new("Py_ssize_t[1]")
+        local buf = capi.PyStream_GetBuffer(self._handle, sz)
+        if buf ~= nil and sz[0] > 0 then
+          return ffi.string(buf, sz[0])
+        end
+        return ""
+      end
+      function s:close()
+        if self._handle ~= nil then
+          capi.Py_DecRef(self._handle)
+          self._handle = nil
+        end
+      end
+      return s
+    end
+  end
+
+  -- 2. Fallback to CPython bridge if native stream unavailable
+  if _cached_py_bio_ctor ~= nil then
+    local b = _cached_py_libpy.PyBytes_FromStringAndSize(initial, #initial)
+    local proxy = _cached_py_bridge.make_proxy(b)
+    _cached_py_libpy.Py_DecRef(b)
+    return _cached_py_bio_ctor(proxy)
+  end
+
   local ok, py_bridge = pcall(require, "luthon.lua.pybridge")
   if not ok or not py_bridge then
     ok, py_bridge = pcall(require, "src/luthon/lua/pybridge")
@@ -1709,9 +2076,13 @@ io.BytesIO = function(initial)
       if ok_mod and mm and mm.load then
         local pio = mm.load("io")
         if pio and pio.BytesIO then
+          _cached_py_bridge = py_bridge
+          _cached_py_libpy = libpy
+          _cached_py_bio_ctor = pio.BytesIO
           local b = libpy.PyBytes_FromStringAndSize(initial, #initial)
           local proxy = py_bridge.make_proxy(b)
-          return pio.BytesIO(proxy)
+          libpy.Py_DecRef(b)
+          return _cached_py_bio_ctor(proxy)
         end
       end
     end
