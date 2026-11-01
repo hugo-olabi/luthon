@@ -1537,8 +1537,100 @@ io.StringIO = function(initial)
   return s
 end
 
+local _cached_capi_stream = nil
+
 io.BytesIO = function(initial)
   initial = tostring(initial or "")
+
+  -- 1. Check for native Luthon C-API stream (Zero CPython Fallback)
+  if _cached_capi_stream == nil then
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi and ffi then
+      local ok_load, capi = pcall(function()
+        ffi.cdef[[
+          typedef struct _object PyObject;
+          typedef long Py_ssize_t;
+          PyObject* PyStream_FromBytes(const void *data, Py_ssize_t size);
+          Py_ssize_t PyStream_Read(PyObject *stream, void *dest, Py_ssize_t size);
+          Py_ssize_t PyStream_Write(PyObject *stream, const void *src, Py_ssize_t size);
+          Py_ssize_t PyStream_Seek(PyObject *stream, Py_ssize_t offset, int whence);
+          Py_ssize_t PyStream_Tell(PyObject *stream);
+          const uint8_t* PyStream_GetBuffer(PyObject *stream, Py_ssize_t *size);
+          void Py_DecRef(PyObject *o);
+        ]]
+        return ffi.load("src/luthon/native/libluthon_capi.so")
+      end)
+      if ok_load and capi then
+        _cached_capi_stream = capi
+      else
+        _cached_capi_stream = false
+      end
+    else
+      _cached_capi_stream = false
+    end
+  end
+
+  if _cached_capi_stream then
+    local ffi = require("ffi")
+    local capi = _cached_capi_stream
+    local c_stream = capi.PyStream_FromBytes(initial, #initial)
+    if c_stream ~= nil then
+      local s = {
+        _handle = c_stream,
+        _ffi = ffi,
+        _capi = capi,
+      }
+      function s:read(n)
+        n = n or -1
+        if n < 0 then
+          local cur = capi.PyStream_Tell(self._handle)
+          local sz = ffi.new("Py_ssize_t[1]")
+          local buf = capi.PyStream_GetBuffer(self._handle, sz)
+          local remaining = tonumber(sz[0]) - tonumber(cur)
+          if remaining <= 0 then return "" end
+          local tmp = ffi.new("uint8_t[?]", remaining)
+          local read_bytes = capi.PyStream_Read(self._handle, tmp, remaining)
+          return ffi.string(tmp, read_bytes)
+        else
+          local tmp = ffi.new("uint8_t[?]", n)
+          local read_bytes = capi.PyStream_Read(self._handle, tmp, n)
+          return ffi.string(tmp, read_bytes)
+        end
+      end
+      function s:write(str)
+        str = tostring(str or "")
+        capi.PyStream_Write(self._handle, str, #str)
+        return #str
+      end
+      function s:seek(offset, whence)
+        offset = offset or 0
+        local w = 0
+        if whence == "cur" or whence == 1 then w = 1
+        elseif whence == "end" or whence == 2 then w = 2
+        end
+        return tonumber(capi.PyStream_Seek(self._handle, offset, w))
+      end
+      function s:tell()
+        return tonumber(capi.PyStream_Tell(self._handle))
+      end
+      function s:getvalue()
+        local sz = ffi.new("Py_ssize_t[1]")
+        local buf = capi.PyStream_GetBuffer(self._handle, sz)
+        if buf ~= nil and sz[0] > 0 then
+          return ffi.string(buf, sz[0])
+        end
+        return ""
+      end
+      function s:close()
+        if self._handle ~= nil then
+          capi.Py_DecRef(self._handle)
+          self._handle = nil
+        end
+      end
+      return s
+    end
+  end
+
   local ok, py_bridge = pcall(require, "luthon.lua.pybridge")
   if not ok or not py_bridge then
     ok, py_bridge = pcall(require, "src/luthon/lua/pybridge")

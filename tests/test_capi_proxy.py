@@ -152,6 +152,174 @@ x = decimal.Decimal(42)
             self.assertIn("Luthon Fallback NYI Feature Report", report)
             self.assertIn("decimal", report)
 
+    def test_modular_capi_compilation_and_static_archive(self):
+        """Verify modular C native compilation outputs shared (.so) and static (.a) libraries."""
+        so_lib = get_capi_library_path()
+        a_lib = so_lib.with_suffix(".a")
+        self.assertTrue(so_lib.exists(), f"Missing shared library: {so_lib}")
+        self.assertTrue(a_lib.exists(), f"Missing static library: {a_lib}")
+        self.assertGreater(so_lib.stat().st_size, 5000)
+        self.assertGreater(a_lib.stat().st_size, 5000)
+
+    def test_type_slots_and_richcompare(self):
+        """Verify PyType_Ready slot inheritance and PyObject_RichCompareBool execution."""
+        script = f"""
+local ffi = require("ffi")
+ffi.cdef[[
+  typedef struct _object PyObject;
+  typedef struct _typeobject PyTypeObject;
+  PyObject* PyLong_FromLongLong(long long v);
+  int PyObject_RichCompareBool(PyObject *v, PyObject *w, int op);
+  int PyType_Ready(PyTypeObject *type);
+  void Py_DecRef(PyObject *o);
+]]
+local capi = ffi.load("{self.capi_lib}")
+local a = capi.PyLong_FromLongLong(42)
+local b = capi.PyLong_FromLongLong(100)
+assert(capi.PyObject_RichCompareBool(a, b, 0) == 1, "42 < 100 must be true (Py_LT=0)")
+assert(capi.PyObject_RichCompareBool(a, b, 2) == 0, "42 == 100 must be false (Py_EQ=2)")
+assert(capi.PyObject_RichCompareBool(a, a, 2) == 1, "42 == 42 must be true (Py_EQ=2)")
+capi.Py_DecRef(a)
+capi.Py_DecRef(b)
+print("TYPE_SLOTS_AND_RICHCOMPARE_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("TYPE_SLOTS_AND_RICHCOMPARE_PASSED", res.stdout)
+
+    def test_slice_and_multidimensional_indexing(self):
+        """Verify PySlice_New and PyObject_GetItem slice indexing on tuples."""
+        script = f"""
+local ffi = require("ffi")
+ffi.cdef[[
+  typedef struct _object PyObject;
+  typedef long Py_ssize_t;
+  PyObject* PyLong_FromLongLong(long long v);
+  PyObject* PyTuple_New(Py_ssize_t len);
+  int PyTuple_SetItem(PyObject *p, Py_ssize_t pos, PyObject *o);
+  PyObject* PySlice_New(PyObject *start, PyObject *stop, PyObject *step);
+  PyObject* PyObject_GetItem(PyObject *o, PyObject *key);
+  Py_ssize_t PyTuple_Size(PyObject *p);
+  long long PyLong_AsLongLong(PyObject *o);
+  PyObject* PyTuple_GetItem(PyObject *p, Py_ssize_t pos);
+  void Py_DecRef(PyObject *o);
+]]
+local capi = ffi.load("{self.capi_lib}")
+local tup = capi.PyTuple_New(5)
+for i = 0, 4 do
+  capi.PyTuple_SetItem(tup, i, capi.PyLong_FromLongLong(i * 10))
+end
+local s_start = capi.PyLong_FromLongLong(1)
+local s_stop = capi.PyLong_FromLongLong(4)
+local s_step = capi.PyLong_FromLongLong(1)
+local slice_obj = capi.PySlice_New(s_start, s_stop, s_step)
+
+local sub_tup = capi.PyObject_GetItem(tup, slice_obj)
+assert(sub_tup ~= nil, "sub_tup must not be nil")
+assert(tonumber(capi.PyTuple_Size(sub_tup)) == 3, "sliced tuple length must be 3")
+assert(tonumber(capi.PyLong_AsLongLong(capi.PyTuple_GetItem(sub_tup, 0))) == 10)
+assert(tonumber(capi.PyLong_AsLongLong(capi.PyTuple_GetItem(sub_tup, 1))) == 20)
+assert(tonumber(capi.PyLong_AsLongLong(capi.PyTuple_GetItem(sub_tup, 2))) == 30)
+
+capi.Py_DecRef(s_start)
+capi.Py_DecRef(s_stop)
+capi.Py_DecRef(s_step)
+capi.Py_DecRef(slice_obj)
+capi.Py_DecRef(sub_tup)
+capi.Py_DecRef(tup)
+print("SLICE_AND_INDEXING_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("SLICE_AND_INDEXING_PASSED", res.stdout)
+
+    def test_native_stream_bytesio(self):
+        """Verify native io.BytesIO stream wrapping and buffer protocol."""
+        script = """
+local bootstrap = loadfile("src/luthon/lua/bootstrap.lua")()
+local bio = io.BytesIO("LuthonNativeBufferStream")
+assert(bio:read(6) == "Luthon")
+assert(bio:read(6) == "Native")
+assert(bio:tell() == 12)
+bio:seek(0, "set")
+assert(bio:read() == "LuthonNativeBufferStream")
+bio:seek(0, "set")
+bio:write("ZeroPy")
+assert(bio:getvalue() == "ZeroPyNativeBufferStream")
+print("NATIVE_STREAM_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("NATIVE_STREAM_PASSED", res.stdout)
+
+    def test_tier_4_5_automatic_binary_resolution(self):
+        """Verify Tier 4.5 automatically discovers and executes compiled C extensions via modules.lua."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            c_code = """
+#include <stdint.h>
+typedef struct _object PyObject;
+typedef struct PyMethodDef { const char *ml_name; void *ml_meth; int ml_flags; const char *ml_doc; } PyMethodDef;
+typedef struct PyModuleDef { int m_base; const char *m_name; const char *m_doc; long m_size; PyMethodDef *m_methods; } PyModuleDef;
+extern PyObject* PyModule_Create2(PyModuleDef *def, int apiver);
+extern PyObject* PyLong_FromLongLong(long long v);
+extern int PyArg_ParseTuple(PyObject *args, const char *fmt, ...);
+
+static PyObject* square(PyObject *self, PyObject *args) {
+    long long x;
+    if (!PyArg_ParseTuple(args, "L", &x)) return 0;
+    return PyLong_FromLongLong(x * x);
+}
+
+static PyMethodDef Methods[] = {
+    {"square", (void*)square, 1, "Square a number"},
+    {0, 0, 0, 0}
+};
+static PyModuleDef Mod = { 0, "auto_ext", "Auto binary ext", -1, Methods };
+__attribute__((visibility("default"))) PyObject* PyInit_auto_ext(void) { return PyModule_Create2(&Mod, 3); }
+"""
+            so_file = tmp / "auto_ext.so"
+            self._compile_c_extension(c_code, so_file)
+
+            runner = tmp / "test_runner.lua"
+            runner.write_text(f"""
+local mm = require("src/luthon/lua/modules")
+mm.add_search_path("{tmp}")
+local auto_mod = mm.load("auto_ext")
+assert(type(auto_mod) == "table", "auto_mod must be a table")
+assert(type(auto_mod.square) == "function", "square must be a function")
+assert(auto_mod.square(9) == 81, "square(9) must be 81")
+print("TIER_4_5_AUTO_RESOLUTION_PASSED")
+""", encoding="utf-8")
+            res = subprocess.run(["luajit", str(runner)], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+            self.assertIn("TIER_4_5_AUTO_RESOLUTION_PASSED", res.stdout)
+
+    def test_native_image_codecs_and_swizzling(self):
+        """Verify pure LuaJIT FFI PNG encoding/decoding and texture channel packing."""
+        script = """
+local codecs = require("src/luthon/lua/native/codecs")
+if codecs.has_png then
+  local ffi = require("ffi")
+  local pixels = ffi.new("uint8_t[16*4]")
+  for i = 0, 15 do
+    pixels[i*4 + 0] = 128
+    pixels[i*4 + 1] = 64
+    pixels[i*4 + 2] = 32
+    pixels[i*4 + 3] = 255
+  end
+  local png = codecs.encode_png(4, 4, 4, pixels)
+  assert(#png > 0)
+  local dec = codecs.decode_png(png)
+  assert(dec.width == 4 and dec.height == 4 and dec.channels == 4)
+  assert(dec.data[0] == 128 and dec.data[1] == 64 and dec.data[2] == 32)
+end
+print("IMAGE_CODECS_TEST_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("IMAGE_CODECS_TEST_PASSED", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

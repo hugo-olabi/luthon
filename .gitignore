@@ -5,6 +5,7 @@ bench/
 test_file.txt
 *.lua
 !src/luthon/lua/*.lua
+!src/luthon/lua/**/*.lua
 .pytest_cache/
 .idea/
 .vscode/
@@ -12,3 +13,5 @@ src/luthon.egg-info/
 *.so
 *.dylib
 *.dll
+*.a
+src/luthon/native/build/

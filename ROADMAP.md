@@ -36,8 +36,8 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | [Done] | 4/4 |
 | Phase 25 — Real-World Ecosystem Compatibility & Showcase Verification | [Done] | 5/5 |
 | Phase 26 — High-Throughput Asset & Serialization Performance | [Done] | 4/4 |
-| Phase 27 — Deep C-API Emulation, Native Codecs & Zero-Bridge Pipelines | [Planned] | 0/4 |
-| Phase 28 — Modular C Native Library Architecture & Core Runtime Expansion | [Planned] | 0/4 |
+| Phase 27 — Deep C-API Emulation, Native Codecs & Zero-Bridge Pipelines | [Done] | 4/4 |
+| Phase 28 — Modular C Native Library Architecture & Core Runtime Expansion | [Done] | 4/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -306,19 +306,19 @@ Maximize runtime throughput on asset, data-transformation, and I/O heavy workloa
 
 Eliminate PyBridge fallback overhead for heavy binary extensions (PIL/Pillow, NumPy) by bridging binary reflection with runtime module resolution and type protocol trampolines.
 
-- [ ] Automatic Binary Reflector Hook in Module Waterfall: intercept `.so`/`.pyd` imports in `modules.lua` (Tier 4.5) to automatically reflect and load native C-extensions via `capi_proxy` before falling back to `libpython3`
-- [ ] PyTypeObject & Object Protocol Emulation in `capi_proxy.c`: implement `tp_getattro`, `tp_call`, `tp_as_mapping` (subscripts, 3D slice tuples), `tp_as_number`, and `tp_descr_get` so native C-types (e.g. `ndarray`, `ImagingCore`) can be manipulated without CPython
-- [ ] Native Stream & Buffer Interoperability: implement Python C-stream protocol (`read`, `seek`, `tell`) and PEP 3118 buffer protocol directly inside `capi_proxy` for zero-copy `io.BytesIO` passing to C codecs
-- [ ] Direct Image Codec FFI Shims: standalone pure FFI bindings for `libpng`, `libjpeg-turbo`, and uncompressed pixel buffer manipulations (MER / channel packing) bypassing Pillow entirely
+- [x] Automatic Binary Reflector Hook in Module Waterfall: intercept `.so`/`.pyd` imports in `modules.lua` (Tier 4.5) to automatically reflect and load native C-extensions via `capi_proxy` before falling back to `libpython3`
+- [x] PyTypeObject & Object Protocol Emulation in `capi_proxy.c`: implement `tp_getattro`, `tp_call`, `tp_as_mapping` (subscripts, 3D slice tuples), `tp_as_number`, and `tp_descr_get` so native C-types (e.g. `ndarray`, `ImagingCore`) can be manipulated without CPython
+- [x] Native Stream & Buffer Interoperability: implement Python C-stream protocol (`read`, `seek`, `tell`) and PEP 3118 buffer protocol directly inside `capi_proxy` for zero-copy `io.BytesIO` passing to C codecs
+- [x] Direct Image Codec FFI Shims: standalone pure FFI bindings for `libpng`, `libjpeg-turbo`, and uncompressed pixel buffer manipulations (MER / channel packing) bypassing Pillow entirely
 
 ## Phase 28 — Modular C Native Library Architecture & Core Runtime Expansion
 
 Restructure and mature Luthon's native C library (`src/luthon/native/`) from a single proxy file into a clean, modular multi-file architecture designed for ongoing growth and comprehensive CPython ABI emulation.
 
-- [ ] Multi-File Modular C Architecture: decompose `capi_proxy.c` into domain-specific translation units under `src/luthon/native/` (`core/object.c`, `core/types.c`, `protocols/mapping.c`, `protocols/sequence.c`, `protocols/buffer.c`, `io/stream.c`, `modules/loader.c`, `include/luthon_capi.h`)
-- [ ] Unified CMake/Ninja & Fast C Build System: introduce modular build configuration in `build_capi.py` supporting incremental compilation, static/shared outputs (`libluthon_capi.so` / `.a`), and multi-platform compilation flags (-O3, LTO, -fvisibility=hidden)
-- [ ] Comprehensive Type Metaclass & Slot Dispatch: implement complete `PyType_Ready`, `tp_richcompare`, `tp_iter`/`tp_iternext`, and dynamic heap-type allocation (`PyType_FromSpec`) across decomposed subsystems
-- [ ] Native Extension Unit Test Harness & Header Verification: add C-level unit tests and ABI header compliance tests verifying third-party binary compatibility against standard CPython ABI headers
+- [x] Multi-File Modular C Architecture: decompose `capi_proxy.c` into domain-specific translation units under `src/luthon/native/` (`core/object.c`, `core/types.c`, `protocols/mapping.c`, `protocols/sequence.c`, `protocols/buffer.c`, `io/stream.c`, `modules/loader.c`, `include/luthon_capi.h`)
+- [x] Unified CMake/Ninja & Fast C Build System: introduce modular build configuration in `build_capi.py` supporting incremental compilation, static/shared outputs (`libluthon_capi.so` / `.a`), and multi-platform compilation flags (-O3, LTO, -fvisibility=hidden)
+- [x] Comprehensive Type Metaclass & Slot Dispatch: implement complete `PyType_Ready`, `tp_richcompare`, `tp_iter`/`tp_iternext`, and dynamic heap-type allocation (`PyType_FromSpec`) across decomposed subsystems
+- [x] Native Extension Unit Test Harness & Header Verification: add C-level unit tests and ABI header compliance tests verifying third-party binary compatibility against standard CPython ABI headers
 
 ## How to update
 
