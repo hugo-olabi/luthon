@@ -27,6 +27,12 @@ class ModuleLoader:
         luthon_site = str(get_default_site_packages())
         if luthon_site not in paths:
             paths.append(luthon_site)
+        # Add vendor paths
+        vendor_path = os.path.join(os.path.dirname(__file__), "vendor")
+        if vendor_path not in paths:
+            paths.append(vendor_path)
+        if "./vendor" not in paths:
+            paths.append("./vendor")
         self.search_paths = paths
         self.cache: Dict[str, object] = {}
         self._deps: Dict[str, tuple] = {}

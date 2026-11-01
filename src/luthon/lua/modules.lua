@@ -28,6 +28,8 @@ local search_paths = {
   ".",
   "./lua",
   "./src/luthon/lua",
+  "./src/luthon/vendor",
+  "./vendor",
   "./src/luthon/lua/native",
   "./.luthon_env/lib/luthon/site-packages",
   "/usr/local/lib/python3.13/dist-packages",
