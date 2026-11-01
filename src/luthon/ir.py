@@ -71,6 +71,7 @@ class IRLowerer:
         self._label_counter = 0
         self._fn_counter = {}
         self._break_stack = []
+        self._continue_stack = []
         self._imported_modules = set()
 
     def _new_tmp(self):
@@ -210,6 +211,7 @@ class IRLowerer:
             body_lbl = self._new_label("whilebody")
             end_lbl = self._new_label("whileend")
             self._break_stack.append(end_lbl)
+            self._continue_stack.append(cond_lbl)
             self._emit("JUMP", [cond_lbl])
             self._cur_block = self._new_block(cond_lbl)
             cond = self.lower_expr(node.test)
@@ -220,6 +222,8 @@ class IRLowerer:
             self._emit("JUMP", [cond_lbl])
             if self._break_stack:
                 self._break_stack.pop()
+            if self._continue_stack:
+                self._continue_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.For):
             iter_tmp = self._new_tmp()
@@ -228,6 +232,7 @@ class IRLowerer:
             body_lbl = self._new_label("forbody")
             end_lbl = self._new_label("forend")
             self._break_stack.append(end_lbl)
+            self._continue_stack.append(cond_lbl)
             self._emit("JUMP", [cond_lbl])
             self._cur_block = self._new_block(cond_lbl)
             nxt = self._new_tmp()
@@ -250,6 +255,8 @@ class IRLowerer:
             self._emit("JUMP", [cond_lbl])
             if self._break_stack:
                 self._break_stack.pop()
+            if self._continue_stack:
+                self._continue_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, ast.FunctionDef):
             fn_sym = node.name
@@ -364,6 +371,7 @@ class IRLowerer:
             mod = node.module or ""
             for alias in node.names:
                 name = alias.asname or alias.name
+                self._imported_modules.add(name)
                 self._emit("IMPORT_FROM", [name, mod, alias.name])
         elif isinstance(node, ast.Pass):
             pass
@@ -633,6 +641,9 @@ class IRLowerer:
         elif isinstance(node, ast.Break):
             if self._break_stack:
                 self._emit("JUMP", [self._break_stack[-1]])
+        elif isinstance(node, ast.Continue):
+            if self._continue_stack:
+                self._emit("JUMP", [self._continue_stack[-1]])
         elif isinstance(node, ast.Yield):
             val_tmp = self.lower_expr(node.value) if node.value else None
             args = [val_tmp] if val_tmp else []

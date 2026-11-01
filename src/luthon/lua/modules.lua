@@ -155,7 +155,10 @@ end
 local pybridge_module = nil
 function M.load_via_cpython(name)
   if not pybridge_module then
-    local ok, pb = pcall(require, "src/luthon/lua/pybridge")
+    local ok, pb = pcall(require, "luthon.lua.pybridge")
+    if not ok or not pb then
+      ok, pb = pcall(require, "src/luthon/lua/pybridge")
+    end
     if ok and pb and pb.is_available() then
       pybridge_module = pb
     end

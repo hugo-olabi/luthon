@@ -1657,6 +1657,10 @@ json.decode = function(s)
   return parse_value()
 end
 json.loads = json.decode
+json.load = function(fp)
+  local c = fp:read("*a")
+  return json.decode(c)
+end
 
 -- site
 site = {}
@@ -2383,8 +2387,12 @@ end
 local _luthon_modules_mod = nil
 local function _get_modules_mod()
   if not _luthon_modules_mod then
-    local ok, m = pcall(require, "src/luthon/lua/modules")
-    if ok then _luthon_modules_mod = m end
+    local ok, m = pcall(require, "luthon.lua.modules")
+    if ok and m then _luthon_modules_mod = m end
+    if not _luthon_modules_mod then
+      local ok2, m2 = pcall(require, "src/luthon/lua/modules")
+      if ok2 and m2 then _luthon_modules_mod = m2 end
+    end
   end
   return _luthon_modules_mod
 end
