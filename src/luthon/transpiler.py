@@ -627,7 +627,16 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
     if optimize:
         from .optimizer import optimize as opt_pass
         opt_pass(module)
+    else:
+        # Automatically run register allocation if a function's variable count threatens LuaJIT limits
+        from .optimizer import allocate_registers_function
+        for fn in module.functions:
+            total_vars = len(getattr(fn, "locals", [])) + len(getattr(fn, "tmps", []))
+            if total_vars > 80:
+                allocate_registers_function(fn)
+    has_module_entry = any(getattr(f, "is_entry_point", False) for f in module.functions)
+    entry_call = "_luthon_module_entry()" if has_module_entry else "main()"
     if sourcemap:
         lua, sm = generate_with_sourcemap(module, filename=filename)
-        return STDLIB_LUA + chr(10) + lua + chr(10) + "main()", sm
-    return STDLIB_LUA + chr(10) + generate(module) + chr(10) + "main()"
+        return STDLIB_LUA + chr(10) + lua + chr(10) + entry_call, sm
+    return STDLIB_LUA + chr(10) + generate(module) + chr(10) + entry_call

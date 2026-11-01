@@ -815,6 +815,43 @@ _G["exec"] = _G["exec"] or function(...) end
 __name__ = __name__ or "__main__"
 os.path = os.path or {}
 os.path.join = function(...) local a={...}; return table.concat(a, "/") end
+os.path.dirname = os.path.dirname or function(p)
+  p = tostring(p or "")
+  local dir = p:match("^(.*)/[^/]*$")
+  if dir == "" then return "/" end
+  return dir or "."
+end
+os.path.basename = os.path.basename or function(p)
+  p = tostring(p or "")
+  return p:match("^.*/([^/]*)$") or p
+end
+os.path.splitext = os.path.splitext or function(p)
+  p = tostring(p or "")
+  local base, ext = p:match("^(.*)(%.[^./\\]*)$")
+  if base then return setmetatable({base, ext}, _list_mt) end
+  return setmetatable({p, ""}, _list_mt)
+end
+os.path.abspath = os.path.abspath or function(p)
+  p = tostring(p or "")
+  if p:sub(1, 1) == "/" then return p end
+  local cwd = "."
+  local ok, res = pcall(function()
+    ffi.cdef[[ char *getcwd(char *buf, size_t size); ]]
+    local buf = ffi.new("char[1024]")
+    local ptr = ffi.C.getcwd(buf, 1024)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end)
+  if ok and res then cwd = res end
+  if p == "" or p == "." then return cwd end
+  return cwd .. "/" .. p
+end
+os.path.getsize = os.path.getsize or function(p)
+  local f = io.open(p, "rb")
+  if not f then return 0 end
+  local sz = f:seek("end")
+  f:close()
+  return sz or 0
+end
 math.pi = 3.141592653589793
 math.e = 2.718281828459045
 math.sin = math.sin
@@ -831,6 +868,40 @@ math.sqrt = math.sqrt
 os.getenv = os.getenv or function(k) return nil end
 os.makedirs = os.makedirs or function(p) end
 os.listdir = os.listdir or function(p) return {} end
+os.walk = os.walk or function(top)
+  local results = setmetatable({}, _list_mt)
+  local p = io.popen("find \"" .. top .. "\" 2>/dev/null")
+  if not p then return results end
+  local dirs_map = {}
+  local files_map = {}
+  local all_dirs = {}
+  for line in p:lines() do
+    local ok = os.execute("test -d \"" .. line .. "\"")
+    local is_dir = (ok == true or ok == 0)
+    if is_dir then
+      table.insert(all_dirs, line)
+      dirs_map[line] = setmetatable({}, _list_mt)
+      files_map[line] = setmetatable({}, _list_mt)
+    else
+      local parent = line:match("^(.*)/[^/]+$") or top
+      local name = line:match("^.*/([^/]+)$") or line
+      if not files_map[parent] then files_map[parent] = setmetatable({}, _list_mt) end
+      table.insert(files_map[parent], name)
+    end
+  end
+  p:close()
+  for _, d in ipairs(all_dirs) do
+    if d ~= top then
+      local parent = d:match("^(.*)/[^/]+$") or top
+      local name = d:match("^.*/([^/]+)$") or d
+      if dirs_map[parent] then table.insert(dirs_map[parent], name) end
+    end
+  end
+  for _, d in ipairs(all_dirs) do
+    table.insert(results, setmetatable({d, dirs_map[d] or setmetatable({}, _list_mt), files_map[d] or setmetatable({}, _list_mt)}, _list_mt))
+  end
+  return results
+end
 
 sys = {argv = {}, path = setmetatable({}, _list_mt), meta_path = setmetatable({}, _list_mt), version = "3.14", version_info = setmetatable({3, 14, 0, "final", 0}, _list_mt), implementation = {name = "cpython", version = setmetatable({3, 14, 0, "final", 0}, _list_mt)}, modules = setmetatable({}, {__index = function(t, k) return _luthon_import(k) end})}
 __import__ = function(name) return _luthon_import(name) end
@@ -1559,6 +1630,43 @@ site.addsitedir = function(dir) end
 
 os.path = os.path or {}
 os.path.join = function(...) local a={...}; return table.concat(a, "/") end
+os.path.dirname = function(p)
+  p = tostring(p or "")
+  local dir = p:match("^(.*)/[^/]*$")
+  if dir == "" then return "/" end
+  return dir or "."
+end
+os.path.basename = function(p)
+  p = tostring(p or "")
+  return p:match("^.*/([^/]*)$") or p
+end
+os.path.splitext = function(p)
+  p = tostring(p or "")
+  local base, ext = p:match("^(.*)(%.[^./\\]*)$")
+  if base then return setmetatable({base, ext}, _list_mt) end
+  return setmetatable({p, ""}, _list_mt)
+end
+os.path.abspath = function(p)
+  p = tostring(p or "")
+  if p:sub(1, 1) == "/" then return p end
+  local cwd = "."
+  local ok, res = pcall(function()
+    ffi.cdef[[ char *getcwd(char *buf, size_t size); ]]
+    local buf = ffi.new("char[1024]")
+    local ptr = ffi.C.getcwd(buf, 1024)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end)
+  if ok and res then cwd = res end
+  if p == "" or p == "." then return cwd end
+  return cwd .. "/" .. p
+end
+os.path.getsize = function(p)
+  local f = io.open(p, "rb")
+  if not f then return 0 end
+  local sz = f:seek("end")
+  f:close()
+  return sz or 0
+end
 os.path.exists = function(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
 os.path.isfile = os.path.exists
 os.path.isdir = function(p) return false end

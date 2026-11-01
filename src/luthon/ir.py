@@ -35,6 +35,7 @@ class Function:
     cellvars: List[str] = field(default_factory=list)
     upvalues: List[str] = field(default_factory=list)
     nonlocals: List[str] = field(default_factory=list)
+    is_entry_point: bool = False
 
 
 @dataclass
@@ -98,7 +99,7 @@ class IRLowerer:
 
     def lower_module(self, node, scope=None):
         # module-level instructions go into a synthetic function? Keep as module instrs/blocks
-        fn = Function(name="main")
+        fn = Function(name="main", is_entry_point=True)
         self._cur_fn = fn
         b = Block(label="entry")
         fn.blocks.append(b)

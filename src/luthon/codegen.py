@@ -77,6 +77,9 @@ def _emit(ins):
     if o == "END":
         return "end"
     if o == "TRY_BEGIN":
+        scoped_vars = [str(a) for a in ins.args] if ins.args else []
+        if scoped_vars:
+            return "do\nlocal ok, err = pcall(function()\n  local " + ", ".join(scoped_vars)
         return "do\nlocal ok, err = pcall(function()"
     if o == "END_TRY":
         return "end)\nif not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
@@ -175,6 +178,8 @@ def generate(module, sourcemap=None):
                 out.append(prefix + '["' + meth + '"] = function(' + ", ".join(fn.params) + ")")
             else:
                 out.append(prefix + "." + meth + " = function(" + ", ".join(fn.params) + ")")
+        elif fn.name == "main" and getattr(fn, "is_entry_point", False):
+            out.append("local function _luthon_module_entry(" + ", ".join(fn.params) + ")")
         elif fn.name == "main":
             out.append("local function " + fn.name + "(" + ", ".join(fn.params) + ")")
         else:
@@ -189,7 +194,52 @@ def generate(module, sourcemap=None):
             locs = []
         else:
             locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set and l not in param_set]
-        tmps = [t for t in getattr(fn, "tmps", []) if t not in locs and t not in param_set and t not in _classes]
+        # Find tmps that belong exclusively to a try block so they can be declared
+        # inside the pcall closure instead of outer locals, preventing LuaJIT 60-upvalue limit errors.
+        try_stack = []
+        try_map = {}
+        outside_tmps = set()
+        for b in fn.blocks:
+            for ins in b.instrs:
+                if ins.op == "TRY_BEGIN":
+                    s = set()
+                    try_stack.append(s)
+                    try_map[id(ins)] = (ins, s)
+                elif ins.op == "END_TRY":
+                    if try_stack:
+                        try_stack.pop()
+                else:
+                    ins_tmps = set()
+                    if ins.result and (ins.result.startswith("_t") or ins.result.startswith("_r")):
+                        ins_tmps.add(ins.result)
+                    if ins.op == "STORE" and isinstance(ins.args[0], str) and (ins.args[0].startswith("_t") or ins.args[0].startswith("_r")):
+                        ins_tmps.add(ins.args[0])
+                    for a in ins.args:
+                        if isinstance(a, str) and (a.startswith("_t") or a.startswith("_r")):
+                            ins_tmps.add(a)
+                        elif isinstance(a, (list, tuple)):
+                            for item in a:
+                                if isinstance(item, str) and (item.startswith("_t") or item.startswith("_r")):
+                                    ins_tmps.add(item)
+                    if try_stack:
+                        for s in try_stack:
+                            s.update(ins_tmps)
+                    else:
+                        outside_tmps.update(ins_tmps)
+
+        counts = {}
+        for _, (_, s) in try_map.items():
+            s.difference_update(outside_tmps)
+            for t in s:
+                counts[t] = counts.get(t, 0) + 1
+
+        try_exclusive_all = set()
+        for _, (ins, s) in try_map.items():
+            exclusive = [t for t in sorted(s) if counts[t] == 1]
+            ins.args = exclusive
+            try_exclusive_all.update(exclusive)
+
+        tmps = [t for t in getattr(fn, "tmps", []) if t not in locs and t not in param_set and t not in _classes and t not in try_exclusive_all]
         # Declare tmps as locals only when the count is small enough to avoid LuaJIT's 200-local limit.
         # Recursive functions (fib, binarytrees) need local tmps; large non-recursive main() can use globals.
         if len(locs) + len(tmps) <= 150:

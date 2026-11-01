@@ -142,6 +142,11 @@ local function _emit(ins)
     end
     return args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
   elseif o == "TRY_BEGIN" then
+    local scoped = {}
+    for _, a in ipairs(args or {}) do table.insert(scoped, tostring(a)) end
+    if #scoped > 0 then
+      return "do\nlocal ok, err = pcall(function()\n  local " .. table.concat(scoped, ", ")
+    end
     return "do\nlocal ok, err = pcall(function()"
   elseif o == "END_TRY" then
     return "end)\nif not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
@@ -296,11 +301,67 @@ function M.generate(module, skip_prelude, sourcemap)
         table.insert(locs, l)
       end
     end
+    -- Find tmps exclusive to try blocks
+    local try_stack = {}
+    local try_map = {}
+    local outside_tmps = {}
+    for _, b in ipairs(fn.blocks or {}) do
+      for _, ins in ipairs(b.instrs or {}) do
+        if ins.op == "TRY_BEGIN" then
+          local s = {}
+          table.insert(try_stack, s)
+          try_map[ins] = s
+        elseif ins.op == "END_TRY" then
+          if #try_stack > 0 then table.remove(try_stack) end
+        else
+          local ins_tmps = {}
+          if ins.result and (ins.result:sub(1, 2) == "_t" or ins.result:sub(1, 2) == "_r") then
+            ins_tmps[ins.result] = true
+          end
+          if ins.op == "STORE" and type(ins.args[1]) == "string" and (ins.args[1]:sub(1, 2) == "_t" or ins.args[1]:sub(1, 2) == "_r") then
+            ins_tmps[ins.args[1]] = true
+          end
+          for _, a in ipairs(ins.args or {}) do
+            if type(a) == "string" and (a:sub(1, 2) == "_t" or a:sub(1, 2) == "_r") then
+              ins_tmps[a] = true
+            end
+          end
+          if #try_stack > 0 then
+            for _, s in ipairs(try_stack) do
+              for t in pairs(ins_tmps) do s[t] = true end
+            end
+          else
+            for t in pairs(ins_tmps) do outside_tmps[t] = true end
+          end
+        end
+      end
+    end
+
+    local counts = {}
+    for _, s in pairs(try_map) do
+      for t in pairs(outside_tmps) do s[t] = nil end
+      for t in pairs(s) do counts[t] = (counts[t] or 0) + 1 end
+    end
+
+    local try_exclusive_all = {}
+    for ins, s in pairs(try_map) do
+      local exclusive = {}
+      for t in pairs(s) do
+        if counts[t] == 1 then
+          table.insert(exclusive, t)
+          try_exclusive_all[t] = true
+        end
+      end
+      table.sort(exclusive)
+      ins.args = exclusive
+    end
+
     local tmps = {}
     for _, t in ipairs(fn.tmps or {}) do
       local found = false
       for _, l in ipairs(locs) do if l == t then found = true break end end
       for _, p in ipairs(fn.params or {}) do if p == t then found = true break end end
+      if try_exclusive_all[t] then found = true end
       if not found then table.insert(tmps, t) end
     end
 
