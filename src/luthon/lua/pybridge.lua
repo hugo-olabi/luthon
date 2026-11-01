@@ -90,6 +90,8 @@ local libpy = nil
 local none_ptr = nil
 
 local candidate_libs = {
+  "libpython3.14.so.1.0",
+  "libpython3.14.so",
   "libpython3.13.so.1.0",
   "libpython3.13.so",
   "libpython3.12.so.1.0",
