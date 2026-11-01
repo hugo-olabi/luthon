@@ -35,6 +35,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 23 — Standalone Embedded Executable Packaging (Luthon Static Bundle) | [Done] | 4/4 |
 | Phase 24 — SIMD Vectorized Numeric Arrays & OpenBLAS Integration | [Done] | 4/4 |
 | Phase 25 — Real-World Ecosystem Compatibility & Showcase Verification | [Done] | 5/5 |
+| Phase 26 — High-Throughput Asset & Serialization Performance | [Planned] | 0/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -289,6 +290,15 @@ Harden compiler, codegen, runtime stdlib, and module loader against real-world t
 - [x] Stdlib Builtins & Metamethod Expansion: implement `isinstance` in runtime preludes and register `super`, `getattr`, `hasattr`, `setattr`, `delattr`, and `isinstance` in builtin symbol sets
 - [x] Robust Typing & Subscript Protocol: make `__luthon_get` gracefully tolerate subscripting non-table objects such as runtime generic types (`Union[...]`, `tuple[...]`)
 - [x] Showcase Verification & Package Precompilation: retranspile site-packages and verify all showcase examples in `examples/` and `tests/test_examples.py` pass cleanly under LuaJIT
+
+## Phase 26 — High-Throughput Asset & Serialization Performance
+
+Maximize runtime throughput on asset, data-transformation, and I/O heavy workloads.
+
+- [ ] Native SIMD/FFI JSON Decoder: integrate fast C-FFI JSON parser (`simdjson`/`cJSON`) with automatic large-payload fallback to bypass Lua character iteration overhead
+- [ ] Native Base64 Streaming Decoder: bind OpenSSL `EVP_DecodeBlock` or dedicated unrolled SIMD buffer unpacker for zero-allocation binary stream decoding
+- [ ] Lazy PyBridge Initialization: defer `libpython` loading and module initialization until first attribute or method access on imported proxies
+- [ ] Direct LuaJIT Standalone Driver: enable direct `luajit` execution without Python wrapper process startup overhead for instant invocation (<10ms)
 
 ## How to update
 
