@@ -986,8 +986,24 @@ math.fabs = math.abs
 math.sqrt = math.sqrt
 
 os.getenv = os.getenv or function(k) return nil end
-os.makedirs = os.makedirs or function(p) end
-os.listdir = os.listdir or function(p) return {} end
+os.makedirs = os.makedirs or function(p)
+  p = tostring(p or "")
+  if p ~= "" then os.execute("mkdir -p \"" .. p .. "\"") end
+end
+os.listdir = os.listdir or function(p)
+  p = tostring(p or ".")
+  local results = setmetatable({}, _list_mt)
+  local cmd = "ls -1 -a \"" .. p .. "\" 2>/dev/null"
+  local pipe = io.popen(cmd)
+  if not pipe then return results end
+  for line in pipe:lines() do
+    if line ~= "." and line ~= ".." and line ~= "" then
+      table.insert(results, line)
+    end
+  end
+  pipe:close()
+  return results
+end
 os.walk = os.walk or function(top)
   local results = setmetatable({}, _list_mt)
   local p = io.popen("find \"" .. top .. "\" 2>/dev/null")
@@ -1028,6 +1044,10 @@ __import__ = function(name) return _luthon_import(name) end
 
 json = {}
 json.encode = nil
+json.load = function(fp)
+  local c = fp:read("*a")
+  return json.loads(c)
+end
 json.dumps = function(x)
   if type(x) == "table" then
     local parts = {}
@@ -1387,6 +1407,9 @@ end
 -- base64
 base64 = {}
 local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local b64map = {}
+for i = 1, #b64chars do b64map[b64chars:sub(i, i)] = i - 1 end
+
 base64.b64encode = function(data)
   local result = {}
   local pad = 0
@@ -1406,7 +1429,9 @@ base64.b64encode = function(data)
   end
   return table.concat(result)
 end
+
 base64.b64decode = function(data)
+  data = tostring(data or ""):gsub("%s+", "")
   local result = {}
   local i = 1
   while i <= #data do
@@ -1414,13 +1439,13 @@ base64.b64decode = function(data)
     local vals = {}
     for j = 1, 4 do
       local c = chars:sub(j, j)
-      if c == "=" then vals[j] = nil
-      else vals[j] = b64chars:find(c, 1, true) - 1 end
+      if c == "=" or c == "" then vals[j] = nil
+      else vals[j] = b64map[c] end
     end
     if vals[1] and vals[2] then
       local n = vals[1] * 262144 + vals[2] * 4096 + (vals[3] or 0) * 64 + (vals[4] or 0)
       result[#result+1] = string.char(math.floor(n / 65536))
-      if vals[3] ~= nil then result[#result+1] = string.char(math.floor((n % 65536) / 256)) end
+      if vals[3] ~= nil then result[#result+1] = string.char(math.floor((n % 65536) / 256) % 256) end
       if vals[4] ~= nil then result[#result+1] = string.char(n % 256) end
     end
     i = i + 4
@@ -1436,6 +1461,26 @@ io.StringIO = function(initial)
   function s:getvalue() return self._buf end
   function s:seek(whence, offset) offset = offset or 0; if whence == "set" then self._pos = offset + 1 elseif whence == "cur" then self._pos = self._pos + offset elseif whence == "end" then self._pos = #self._buf + 1 + offset end; return self._pos - 1 end
   return s
+end
+
+io.BytesIO = function(initial)
+  initial = tostring(initial or "")
+  local ok, py_bridge = pcall(require, "src/luthon/lua/pybridge")
+  if ok and py_bridge and py_bridge.get_lib then
+    local ok_lib, libpy = pcall(py_bridge.get_lib)
+    if ok_lib and libpy and libpy.PyBytes_FromStringAndSize then
+      local ok_mod, mm = pcall(require, "src/luthon/lua/modules")
+      if ok_mod and mm and mm.load then
+        local pio = mm.load("io")
+        if pio and pio.BytesIO then
+          local b = libpy.PyBytes_FromStringAndSize(initial, #initial)
+          local proxy = py_bridge.make_proxy(b)
+          return pio.BytesIO(proxy)
+        end
+      end
+    end
+  end
+  return io.StringIO(initial)
 end
 
 -- struct (minimal)
@@ -1810,11 +1855,34 @@ os.path.getsize = function(p)
 end
 os.path.exists = function(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
 os.path.isfile = os.path.exists
-os.path.isdir = function(p) return false end
+os.path.isdir = function(p)
+  p = tostring(p or "")
+  if p == "" then return false end
+  local ok = os.execute("test -d \"" .. p .. "\"")
+  return ok == true or ok == 0
+end
 os.rmdir = os.remove or function(p) end
 
--- open builtin (Python's open -> io.open)
-open = io.open
+-- open builtin (Python's open -> io.open with __enter__ / __exit__)
+local _orig_io_open = io.open
+local _file_mt = getmetatable(io.stdout)
+if _file_mt then
+  _file_mt.__enter__ = function(self) return self end
+  _file_mt.__exit__ = function(self) self:close() end
+end
+
+open = function(filename, mode, ...)
+  mode = mode or "r"
+  local f = _orig_io_open(filename, mode)
+  if f then
+    local mt = getmetatable(f)
+    if mt then
+      mt.__enter__ = mt.__enter__ or function(self) return self end
+      mt.__exit__ = mt.__exit__ or function(self) self:close() end
+    end
+  end
+  return f
+end
 
 -- tempfile
 tempfile = {}
