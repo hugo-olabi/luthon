@@ -9,3 +9,6 @@ test_file.txt
 .idea/
 .vscode/
 src/luthon.egg-info/
+*.so
+*.dylib
+*.dll
