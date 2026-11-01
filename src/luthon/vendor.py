@@ -102,7 +102,14 @@ class PackageVendor:
                     # __init__.py -> __init__.lua or init.lua
                     out_name = "__init__.lua" if stem == "__init__" else f"{stem}.lua"
                     dest_f = target_sub / out_name
-                    self._transpile_single_file(src_f, dest_f, stats)
+
+                    # Compute python package name for relative import resolution
+                    rel_parts = list(rel_root.parts) if rel_root.parts else []
+                    if stem == "__init__":
+                        current_pkg = ".".join([pkg_name] + rel_parts)
+                    else:
+                        current_pkg = ".".join([pkg_name] + rel_parts)
+                    self._transpile_single_file(src_f, dest_f, stats, package=current_pkg)
 
         self._generate_package_manifest(dest_pkg_dir, pkg_name, stats)
         return stats
@@ -143,6 +150,7 @@ class PackageVendor:
         src_py: Path,
         dest_lua: Path,
         stats: TranspileStats,
+        package: str = "",
     ) -> bool:
         """Transpiles a single Python file to Lua using Luthon IR pipeline."""
         from .transpiler import transpile_ir
@@ -157,6 +165,7 @@ class PackageVendor:
                 optimize=self.optimize,
                 sourcemap=self.sourcemap,
                 filename=str(src_py),
+                package=package,
             )
 
             # Ensure parent directory exists

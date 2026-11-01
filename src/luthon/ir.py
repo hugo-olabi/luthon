@@ -62,9 +62,10 @@ def _safe_var(name: str) -> str:
 
 
 class IRLowerer:
-    def __init__(self):
+    def __init__(self, package: str = ""):
         self._tmp = 0
         self.module = Module(name="<module>")
+        self.package = package or ""
         self._cur_fn: Optional[Function] = None
         self._cur_block: Optional[Block] = None
         self._cur_node: Optional[ast.AST] = None
@@ -373,6 +374,18 @@ class IRLowerer:
                 self._emit("IMPORT", [name, alias.name])
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
+            level = getattr(node, "level", 0) or 0
+            if level > 0 and self.package:
+                pkg_parts = self.package.split(".")
+                if level <= len(pkg_parts):
+                    base = pkg_parts[:len(pkg_parts) - (level - 1)]
+                    if mod:
+                        base.append(mod)
+                    mod = ".".join(base)
+                elif mod:
+                    mod = f"{self.package}.{mod}"
+            elif level > 0 and not mod:
+                mod = self.package
             for alias in node.names:
                 name = alias.asname or alias.name
                 self._imported_modules.add(name)
