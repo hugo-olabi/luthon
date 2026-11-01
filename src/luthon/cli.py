@@ -41,7 +41,7 @@ def compile_file(
             sm_path = (output_path.with_suffix(".lua.map") if output_path else input_path.with_suffix(".lua.map"))
             sm_path.write_text(json.dumps(sm.to_dict(), indent=2))
         else:
-            lua = transpile_ir(src, optimize=optimize)
+            lua = transpile_ir(src, optimize=optimize, filename=str(input_path))
     else:
         lua = transpile(src)
 
@@ -87,7 +87,13 @@ def run_file(
         if script_args:
             cmd.extend(script_args)
 
-        proc = subprocess.run(cmd)
+        env = os.environ.copy()
+        pkg_src = str(Path(__file__).parent.parent)
+        current_lua_path = env.get("LUA_PATH", ";;")
+        extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+        env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
+
+        proc = subprocess.run(cmd, env=env)
         return proc.returncode
     finally:
         try:

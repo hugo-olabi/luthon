@@ -121,6 +121,7 @@ function IRLowerer.new()
   self._cur_block = nil
   self._label_counter = 0
   self._break_stack = {}
+  self._continue_stack = {}
   return self
 end
 
@@ -301,6 +302,7 @@ function IRLowerer:_lower_stmt_impl(node)
     local body_lbl = self:_new_label("whilebody")
     local end_lbl = self:_new_label("whileend")
     table.insert(self._break_stack, end_lbl)
+    table.insert(self._continue_stack, cond_lbl)
     self:_emit("JUMP", {cond_lbl})
     self._cur_block = self:_new_block(cond_lbl)
     local cond = self:lower_expr(node.test)
@@ -308,6 +310,8 @@ function IRLowerer:_lower_stmt_impl(node)
     self._cur_block = self:_new_block(body_lbl)
     for _, s in ipairs(node.body or {}) do self:lower_stmt(s) end
     self:_emit("JUMP", {cond_lbl})
+    if #self._break_stack > 0 then table.remove(self._break_stack) end
+    if #self._continue_stack > 0 then table.remove(self._continue_stack) end
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "For" then
     local iter_tmp = self:_new_tmp()
@@ -315,6 +319,8 @@ function IRLowerer:_lower_stmt_impl(node)
     local cond_lbl = self:_new_label("forcond")
     local body_lbl = self:_new_label("forbody")
     local end_lbl = self:_new_label("forend")
+    table.insert(self._break_stack, end_lbl)
+    table.insert(self._continue_stack, cond_lbl)
     self:_emit("JUMP", {cond_lbl})
     self._cur_block = self:_new_block(cond_lbl)
     local nxt = self:_new_tmp()
@@ -327,6 +333,8 @@ function IRLowerer:_lower_stmt_impl(node)
     self._cur_block = self:_new_block(body_lbl)
     for _, s in ipairs(node.body or {}) do self:lower_stmt(s) end
     self:_emit("JUMP", {cond_lbl})
+    if #self._break_stack > 0 then table.remove(self._break_stack) end
+    if #self._continue_stack > 0 then table.remove(self._continue_stack) end
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "FunctionDef" then
     local fn = Function.new(node.name, {})
@@ -579,6 +587,10 @@ function IRLowerer:_lower_stmt_impl(node)
   elseif t == "Break" then
     if #self._break_stack > 0 then
       self:_emit("JUMP", {self._break_stack[#self._break_stack]})
+    end
+  elseif t == "Continue" then
+    if #self._continue_stack > 0 then
+      self:_emit("JUMP", {self._continue_stack[#self._continue_stack]})
     end
   elseif t == "Global" then
     -- global statement: no runtime code needed in Lua (all module-level vars are global)
