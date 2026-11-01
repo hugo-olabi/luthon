@@ -70,6 +70,19 @@ class PackageVendor:
                 dest_lua = self.target_dir / f"{pkg_name}.lua"
                 self._transpile_single_file(source_path, dest_lua, stats)
                 return stats
+            elif source_path.suffix in (".so", ".pyd"):
+                from .reflect import BinaryReflector
+                pkg_name = package_name or source_path.stem
+                reflector = BinaryReflector()
+                dest_so = self.target_dir / source_path.name
+                shutil.copyfile(source_path, dest_so)
+                meta = reflector.reflect_binary(dest_so, module_name=pkg_name)
+                lua_trampoline = reflector.generate_lua_trampoline(meta)
+                dest_lua = self.target_dir / f"{pkg_name}.lua"
+                dest_lua.write_text(lua_trampoline, encoding="utf-8")
+                stats.total_files += 1
+                stats.succeeded_files += 1
+                return stats
             else:
                 raise ValueError(f"Unsupported file type: {source_path}")
 
@@ -117,6 +130,23 @@ class PackageVendor:
                             init_alias.write_text(dest_f.read_text(encoding="utf-8"), encoding="utf-8")
                         except Exception:
                             pass
+                elif f.endswith(".so") or f.endswith(".pyd"):
+                    # Precompiled C extension inside package
+                    from .reflect import BinaryReflector
+                    src_f = Path(root) / f
+                    dest_so = target_sub / f
+                    shutil.copyfile(src_f, dest_so)
+                    sub_mod_name = f.split(".")[0]
+                    try:
+                        reflector = BinaryReflector()
+                        meta = reflector.reflect_binary(dest_so, module_name=sub_mod_name)
+                        trampoline = reflector.generate_lua_trampoline(meta)
+                        (target_sub / f"{sub_mod_name}.lua").write_text(trampoline, encoding="utf-8")
+                        stats.total_files += 1
+                        stats.succeeded_files += 1
+                    except Exception as e:
+                        stats.failed_files += 1
+                        stats.errors[str(src_f)] = str(e)
 
         self._generate_package_manifest(dest_pkg_dir, pkg_name, stats)
         return stats

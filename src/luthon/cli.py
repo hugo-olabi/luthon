@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Direct execution check: if first argument is a .py file or an existing file (not a known command or option flag)
     # e.g.: `luthon ./main.py` or `luthon script.py arg1 arg2`
-    known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "build", "vendor", "-h", "--help"}
+    known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "build", "vendor", "reflect", "-h", "--help"}
     if raw_argv and raw_argv[0] not in known_commands and not raw_argv[0].startswith("-"):
         candidate = Path(raw_argv[0])
         if candidate.suffix == ".py" or candidate.is_file():
@@ -211,6 +211,12 @@ def main(argv: list[str] | None = None) -> int:
     ven.add_argument("--name", default=None, help="Override package name")
     ven.add_argument("--clean", action="store_true", help="Clean destination directory before transpiling")
     ven.add_argument("--no-optimize", action="store_true", help="Disable IR optimizations during conversion")
+
+    # reflect command: `luthon reflect <binary.so> [-o <target_dir>]`
+    ref = sub.add_parser("reflect", help="Reflect precompiled Python C-extension binary (.so/.pyd) and emit LuaJIT FFI binding")
+    ref.add_argument("binary", help="Path to precompiled .so or .pyd binary")
+    ref.add_argument("-o", "--target", default=None, help="Output directory or output .lua file path")
+    ref.add_argument("--name", default=None, help="Override module name")
 
     args, extra = parser.parse_known_args(raw_argv)
 
@@ -309,6 +315,25 @@ def main(argv: list[str] | None = None) -> int:
             for path, err in stats.errors.items():
                 print(f"    - {path}: {err}")
             return 1
+        return 0
+
+    if args.command == "reflect":
+        from .reflect import BinaryReflector
+        bin_path = Path(args.binary).resolve()
+        reflector = BinaryReflector()
+        meta = reflector.reflect_binary(bin_path, module_name=args.name)
+        trampoline = reflector.generate_lua_trampoline(meta)
+
+        target = Path(args.target) if args.target else Path(".")
+        if target.is_dir():
+            out_file = target / f"{meta.name}.lua"
+        else:
+            out_file = target
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(trampoline, encoding="utf-8")
+        print(f"[+] Reflected {meta.name} ({len(meta.methods)} methods) -> {out_file}")
+        for m in meta.methods:
+            print(f"    - {m.name}: {m.doc or 'no docstring'}")
         return 0
 
     if args.command == "analyze":
