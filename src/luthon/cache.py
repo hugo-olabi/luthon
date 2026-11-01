@@ -7,6 +7,26 @@ from pathlib import Path
 
 LUTHON_VERSION = "0.1.0"
 
+_CACHED_COMPILER_HASH = None
+
+
+def _compiler_hash():
+    """Hash all source files in the luthon package to automatically invalidate cache on compiler changes."""
+    global _CACHED_COMPILER_HASH
+    if _CACHED_COMPILER_HASH is not None:
+        return _CACHED_COMPILER_HASH
+    pkg_dir = Path(__file__).parent
+    h = hashlib.sha256()
+    try:
+        for p in sorted(pkg_dir.rglob("*.py")):
+            h.update(p.read_bytes())
+        for p in sorted(pkg_dir.rglob("*.lua")):
+            h.update(p.read_bytes())
+        _CACHED_COMPILER_HASH = h.hexdigest()[:16]
+    except Exception:
+        _CACHED_COMPILER_HASH = LUTHON_VERSION
+    return _CACHED_COMPILER_HASH
+
 
 def _path_hash(path):
     return hashlib.sha256(str(path).encode()).hexdigest()[:16]
@@ -39,7 +59,7 @@ class CompilationCache:
             meta = json.loads(meta_path.read_text())
         except (json.JSONDecodeError, OSError):
             return None
-        if meta.get("version") != LUTHON_VERSION:
+        if meta.get("version") != LUTHON_VERSION or meta.get("compiler_hash") != _compiler_hash():
             return None
         # fast check: stat
         try:
@@ -91,6 +111,7 @@ class CompilationCache:
             return
         meta = {
             "version": LUTHON_VERSION,
+            "compiler_hash": _compiler_hash(),
             "mtime": getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
             "size": st.st_size,
             "content_hash": _content_hash(path),

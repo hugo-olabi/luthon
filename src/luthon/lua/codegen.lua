@@ -116,6 +116,11 @@ local function _emit(ins)
       return "do return " .. args[1] .. " end"
     end
     return "do return end"
+  elseif o == "TRY_RETURN" then
+    local ret_val = args[1] or "nil"
+    return "_luthon_ret_val = " .. ret_val .. "; _luthon_has_ret = true; do return end"
+  elseif o == "TRY_UNWIND" then
+    return "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end"
   elseif o == "JUMP" then
     return "goto " .. args[1]
   elseif o == "BRANCH" then
@@ -172,7 +177,10 @@ local function _emit(ins)
     end
     return ins.result .. " = setmetatable({}, _list_mt)"
   elseif o == "MAKE_TUPLE" then
-    return ins.result .. " = {" .. table.concat(args, ", ") .. "}"
+    if #args > 0 then
+      return ins.result .. " = setmetatable({" .. table.concat(args, ", ") .. "}, _tuple_mt)"
+    end
+    return ins.result .. " = setmetatable({}, _tuple_mt)"
   elseif o == "MAKE_DICT" then
     local lines = {ins.result .. " = setmetatable({}, _dict_mt)"}
     for _, it in ipairs(args) do

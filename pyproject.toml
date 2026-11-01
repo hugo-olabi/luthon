@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "luthon"
 version = "0.1.0"
-description = "Luthon - a Python project"
+description = "Luthon - a high-performance Python to LuaJIT transpiler"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Luthon Authors" }]
+authors = [{ name = "Hugo Gabriel Olabi" }]
 keywords = ["luthon"]
 classifiers = [
     "Development Status :: 3 - Alpha",

@@ -637,10 +637,17 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
     has_module_entry = any(getattr(f, "is_entry_point", False) for f in module.functions)
     entry_call = "_luthon_module_entry()" if has_module_entry else "main()"
     file_prefix = ""
+    from pathlib import Path
+    try:
+        import luthon
+        luthon_root = str(Path(luthon.__file__).parent.parent)
+        file_prefix += f'package.path = package.path .. ";{luthon_root}/?.lua;{luthon_root}/luthon/lua/?.lua;{luthon_root}/?/init.lua"\n'
+    except Exception:
+        pass
     if filename:
         import os
         abs_fn = os.path.abspath(filename)
-        file_prefix = f'__file__ = __file__ or "{abs_fn}"\n'
+        file_prefix += f'__file__ = __file__ or "{abs_fn}"\n'
     if sourcemap:
         lua, sm = generate_with_sourcemap(module, filename=filename)
         return STDLIB_LUA + chr(10) + file_prefix + lua + chr(10) + entry_call, sm
