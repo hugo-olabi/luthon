@@ -80,6 +80,7 @@ def run_file(
             if script_args:
                 cmd.extend(script_args)
             env = os.environ.copy()
+            env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
             pkg_src = str(Path(__file__).parent.parent)
             current_lua_path = env.get("LUA_PATH", ";;")
             extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
@@ -110,6 +111,7 @@ def run_file(
             cmd.extend(script_args)
 
         env = os.environ.copy()
+        env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
         pkg_src = str(Path(__file__).parent.parent)
         current_lua_path = env.get("LUA_PATH", ";;")
         extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"

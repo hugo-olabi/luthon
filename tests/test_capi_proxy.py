@@ -131,6 +131,27 @@ __attribute__((visibility("default"))) PyObject* PyInit_simple_ext(void) { retur
             content = out_lua.read_text(encoding="utf-8")
             self.assertIn("compute", content)
 
+    def test_pybridge_fallback_nyi_generation(self):
+        """Verify that fallback PyBridge access generates a <filename>.luthon-nyi file."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            py_file = tmp / "dummy_script.py"
+            py_file.write_text("""
+import decimal
+x = decimal.Decimal(42)
+""", encoding="utf-8")
+
+            # Execute via Luthon CLI run
+            ret = cli_main(["run", str(py_file)])
+            self.assertEqual(ret, 0)
+
+            # Check that dummy_script.py.luthon-nyi was generated
+            nyi_file = tmp / "dummy_script.py.luthon-nyi"
+            self.assertTrue(nyi_file.exists(), f"Expected NYI file {nyi_file} was not generated")
+            report = nyi_file.read_text(encoding="utf-8")
+            self.assertIn("Luthon Fallback NYI Feature Report", report)
+            self.assertIn("decimal", report)
+
 
 if __name__ == "__main__":
     unittest.main()
