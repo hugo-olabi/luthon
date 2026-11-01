@@ -41,7 +41,7 @@ def compile_file(
             sm_path = (output_path.with_suffix(".lua.map") if output_path else input_path.with_suffix(".lua.map"))
             sm_path.write_text(json.dumps(sm.to_dict(), indent=2))
         else:
-            lua = transpile_ir(src, optimize=optimize)
+            lua = transpile_ir(src, optimize=optimize, filename=str(input_path))
     else:
         lua = transpile(src)
 

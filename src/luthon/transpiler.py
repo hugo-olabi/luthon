@@ -636,7 +636,12 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
                 allocate_registers_function(fn)
     has_module_entry = any(getattr(f, "is_entry_point", False) for f in module.functions)
     entry_call = "_luthon_module_entry()" if has_module_entry else "main()"
+    file_prefix = ""
+    if filename:
+        import os
+        abs_fn = os.path.abspath(filename)
+        file_prefix = f'__file__ = __file__ or "{abs_fn}"\n'
     if sourcemap:
         lua, sm = generate_with_sourcemap(module, filename=filename)
-        return STDLIB_LUA + chr(10) + lua + chr(10) + entry_call, sm
-    return STDLIB_LUA + chr(10) + generate(module) + chr(10) + entry_call
+        return STDLIB_LUA + chr(10) + file_prefix + lua + chr(10) + entry_call, sm
+    return STDLIB_LUA + chr(10) + file_prefix + generate(module) + chr(10) + entry_call

@@ -67,7 +67,12 @@ ffi.cdef[[
   extern PyTypeObject PyDict_Type;
   extern PyTypeObject PyTuple_Type;
   extern PyTypeObject PyBool_Type;
+  extern PyTypeObject PyBytes_Type;
   extern PyObject _Py_NoneStruct;
+
+  PyObject* PyBytes_FromStringAndSize(const char *v, Py_ssize_t len);
+  char* PyBytes_AsString(PyObject *op);
+  Py_ssize_t PyBytes_Size(PyObject *op);
 
   PyTypeObject* PyObject_Type(PyObject *o);
   int PyType_IsSubtype(PyTypeObject *a, PyTypeObject *b);
@@ -198,6 +203,16 @@ end
 PyProxy.__call = function(self, ...)
   pybridge.get_lib()
   local args = {...}
+  -- If self is a bound method and the first argument is identical to its __self__, drop it
+  local self_obj = libpy.PyObject_GetAttrString(self._py, "__self__")
+  if self_obj ~= nil then
+    if #args > 0 and type(args[1]) == "table" and args[1]._py == self_obj then
+      table.remove(args, 1)
+    end
+    decref(self_obj)
+  else
+    libpy.PyErr_Clear()
+  end
   -- If calling exec() with only 1 argument from LuaJIT, CPython's PyEval_GetGlobals()
   -- fails because there is no Python execution frame on the C call stack.
   -- Provide default empty globals dict if calling exec with 1 argument.
