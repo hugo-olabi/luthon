@@ -26,6 +26,7 @@ extern "C" {
 #endif
 
 typedef intptr_t Py_ssize_t;
+typedef intptr_t Py_hash_t;
 #define PY_SSIZE_T_MAX ((Py_ssize_t)(((size_t)-1) >> 1))
 
 /* Tagged union classification */
@@ -79,6 +80,13 @@ typedef struct PyModuleDef {
 } PyModuleDef;
 
 /* PEP 3118 Buffer Protocol */
+
+/* Complex number matching CPython */
+typedef struct Py_complex {
+    double real;
+    double imag;
+} Py_complex;
+
 typedef struct bufferinfo {
     void *buf;
     PyObject *obj;
@@ -269,6 +277,27 @@ extern EXPORT PyTypeObject PySlice_Type;
 extern EXPORT PyTypeObject PyStream_Type;
 extern EXPORT PyTypeObject PyCapsule_Type;
 
+extern EXPORT PyTypeObject PyBaseObject_Type;
+extern EXPORT PyTypeObject PyComplex_Type;
+extern EXPORT PyTypeObject PyCFunction_Type;
+extern EXPORT PyTypeObject PyDictProxy_Type;
+extern EXPORT PyTypeObject PyGetSetDescr_Type;
+extern EXPORT PyTypeObject PyMemberDescr_Type;
+extern EXPORT PyTypeObject PyMethodDescr_Type;
+extern EXPORT PyTypeObject PyMemoryView_Type;
+extern EXPORT PyTypeObject PySet_Type;
+extern EXPORT PyTypeObject PyFrozenSet_Type;
+
+/* Singletons */
+extern EXPORT PyObject _Py_NotImplementedStruct;
+extern EXPORT PyObject _Py_EllipsisObject;
+#define Py_NotImplemented (&_Py_NotImplementedStruct)
+#define Py_Ellipsis (&_Py_EllipsisObject)
+
+/* Character classification array */
+extern EXPORT const unsigned char _Py_ascii_whitespace[256];
+
+
 /* Global Singletons */
 extern EXPORT PyObject _Py_NoneStruct;
 extern EXPORT PyObject _Py_TrueStruct;
@@ -286,6 +315,22 @@ extern EXPORT PyObject *PyExc_RuntimeError;
 extern EXPORT PyObject *PyExc_SystemError;
 extern EXPORT PyObject *PyExc_TypeError;
 extern EXPORT PyObject *PyExc_ValueError;
+extern EXPORT PyObject *PyExc_AttributeError;
+extern EXPORT PyObject *PyExc_KeyError;
+extern EXPORT PyObject *PyExc_NameError;
+extern EXPORT PyObject *PyExc_NotImplementedError;
+extern EXPORT PyObject *PyExc_RecursionError;
+extern EXPORT PyObject *PyExc_UserWarning;
+extern EXPORT PyObject *PyExc_DeprecationWarning;
+extern EXPORT PyObject *PyExc_FutureWarning;
+extern EXPORT PyObject *PyExc_RuntimeWarning;
+extern EXPORT PyObject *PyExc_FloatingPointError;
+extern EXPORT PyObject *PyExc_IOError;
+extern EXPORT PyObject *PyExc_ImportError;
+extern EXPORT PyObject *PyExc_ImportWarning;
+extern EXPORT PyObject *PyExc_UnicodeDecodeError;
+extern EXPORT PyObject *PyExc_UnicodeEncodeError;
+extern EXPORT PyObject *PyExc_ZeroDivisionError;
 
 #define Py_None  (&_Py_NoneStruct)
 #define Py_True  (&_Py_TrueStruct)
@@ -305,6 +350,10 @@ EXPORT void Py_IncRef(PyObject *o);
 EXPORT void Py_DecRef(PyObject *o);
 EXPORT int PyObject_IsTrue(PyObject *o);
 EXPORT PyObject* PyObject_Type(PyObject *o);
+EXPORT PyObject* PyObject_GetIter(PyObject *o);
+EXPORT PyObject* PyObject_SelfIter(PyObject *o);
+EXPORT PyObject* PyObject_Str(PyObject *o);
+EXPORT const char* PyUnicode_AsUTF8(PyObject *o);
 
 /* Primitive Constructors & Accessors */
 EXPORT PyObject* PyLong_FromLongLong(long long v);

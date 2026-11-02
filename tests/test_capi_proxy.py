@@ -408,6 +408,33 @@ print("HEAP_OBJECT_LIFETIME_PASSED")
         self.assertIn("new", method_names)
         self.assertIn("clear_cache", method_names)
 
+    def test_numpy_multiarray_umath_reflection(self):
+        """Verify NumPy's _multiarray_umath.so loads via C-API proxy with 0 missing symbols."""
+        so_path = Path("/home/hg/.local/lib/python3.14/site-packages/numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so")
+        if not so_path.exists():
+            self.skipTest(f"NumPy binary not found at {so_path}")
+
+        script = f"""
+local ffi = require("ffi")
+ffi.cdef[[
+  void* dlopen(const char *filename, int flag);
+  char* dlerror(void);
+]]
+local RTLD_NOW = 2
+local RTLD_GLOBAL = 256
+local h_capi = ffi.C.dlopen("{self.capi_lib}", bit.bor(RTLD_NOW, RTLD_GLOBAL))
+assert(h_capi ~= nil, "failed to load libluthon_capi.so")
+
+local h_numpy = ffi.C.dlopen("{so_path}", bit.bor(RTLD_NOW, RTLD_GLOBAL))
+if h_numpy == nil then
+  error("dlerror: " .. ffi.string(ffi.C.dlerror()))
+end
+print("NUMPY_CAPI_REFLECTION_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("NUMPY_CAPI_REFLECTION_PASSED", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

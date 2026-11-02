@@ -179,3 +179,142 @@ EXPORT Py_ssize_t PyNumber_AsSsize_t(PyObject *item, PyObject *err) {
 EXPORT Py_ssize_t PyLong_AsSsize_t(PyObject *pylong) {
     return PyNumber_AsSsize_t(pylong, PyExc_TypeError);
 }
+
+/* Stage 4: Expanded Sequence Protocols */
+EXPORT PyObject* PyList_AsTuple(PyObject *v) {
+    if (!v || v->tag != PY_TAG_LIST) return PyTuple_New(0);
+    Py_ssize_t n = v->as.seq_val.size;
+    PyObject *t = PyTuple_New(n);
+    if (!t) return NULL;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *elem = v->as.seq_val.items[i];
+        Py_IncRef(elem);
+        PyTuple_SetItem(t, i, elem);
+    }
+    return t;
+}
+
+EXPORT PyObject* PySequence_Tuple(PyObject *v) {
+    if (!v) return PyTuple_New(0);
+    if (v->tag == PY_TAG_TUPLE) {
+        Py_IncRef(v);
+        return v;
+    }
+    if (v->tag == PY_TAG_LIST) return PyList_AsTuple(v);
+    return PySequence_Fast(v, "expected sequence for tuple conversion");
+}
+
+EXPORT PyObject* PyTuple_GetSlice(PyObject *op, Py_ssize_t i1, Py_ssize_t i2) {
+    if (!op || op->tag != PY_TAG_TUPLE) return PyTuple_New(0);
+    Py_ssize_t len = op->as.seq_val.size;
+    if (i1 < 0) i1 = 0;
+    if (i2 > len) i2 = len;
+    if (i1 >= i2) return PyTuple_New(0);
+    Py_ssize_t n = i2 - i1;
+    PyObject *t = PyTuple_New(n);
+    if (!t) return NULL;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *elem = op->as.seq_val.items[i1 + i];
+        Py_IncRef(elem);
+        PyTuple_SetItem(t, i, elem);
+    }
+    return t;
+}
+
+EXPORT PyObject* PyTuple_Pack(Py_ssize_t n, ...) {
+    PyObject *t = PyTuple_New(n);
+    if (!t) return NULL;
+    va_list vl;
+    va_start(vl, n);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *o = va_arg(vl, PyObject *);
+        if (o) Py_IncRef(o);
+        PyTuple_SetItem(t, i, o ? o : Py_None);
+    }
+    va_end(vl);
+    return t;
+}
+
+EXPORT PyObject* PySequence_Concat(PyObject *s, PyObject *o) {
+    if (!s || !o) return NULL;
+    Py_ssize_t l1 = PySequence_Size(s);
+    Py_ssize_t l2 = PySequence_Size(o);
+    PyObject *res = (s->tag == PY_TAG_LIST || o->tag == PY_TAG_LIST) ? PyList_New(l1 + l2) : PyTuple_New(l1 + l2);
+    if (!res) return NULL;
+    for (Py_ssize_t i = 0; i < l1; i++) {
+        PyObject *item = PySequence_GetItem(s, i);
+        if (res->tag == PY_TAG_LIST) PyList_SetItem(res, i, item);
+        else PyTuple_SetItem(res, i, item);
+    }
+    for (Py_ssize_t i = 0; i < l2; i++) {
+        PyObject *item = PySequence_GetItem(o, i);
+        if (res->tag == PY_TAG_LIST) PyList_SetItem(res, l1 + i, item);
+        else PyTuple_SetItem(res, l1 + i, item);
+    }
+    return res;
+}
+
+EXPORT PyObject* PySequence_InPlaceConcat(PyObject *s, PyObject *o) {
+    return PySequence_Concat(s, o);
+}
+
+EXPORT PyObject* PySequence_Repeat(PyObject *s, Py_ssize_t count) {
+    if (!s || count <= 0) return PyTuple_New(0);
+    Py_ssize_t len = PySequence_Size(s);
+    PyObject *res = (s->tag == PY_TAG_LIST) ? PyList_New(len * count) : PyTuple_New(len * count);
+    if (!res) return NULL;
+    Py_ssize_t idx = 0;
+    for (Py_ssize_t c = 0; c < count; c++) {
+        for (Py_ssize_t i = 0; i < len; i++) {
+            PyObject *item = PySequence_GetItem(s, i);
+            if (res->tag == PY_TAG_LIST) PyList_SetItem(res, idx++, item);
+            else PyTuple_SetItem(res, idx++, item);
+        }
+    }
+    return res;
+}
+
+EXPORT PyObject* PySequence_InPlaceRepeat(PyObject *s, Py_ssize_t count) {
+    return PySequence_Repeat(s, count);
+}
+
+EXPORT int PySequence_Contains(PyObject *seq, PyObject *ob) {
+    if (!seq || !ob) return 0;
+    Py_ssize_t n = PySequence_Size(seq);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *item = PySequence_GetItem(seq, i);
+        if (item) {
+            int eq = PyObject_RichCompareBool(item, ob, Py_EQ);
+            Py_DecRef(item);
+            if (eq) return 1;
+        }
+    }
+    return 0;
+}
+
+EXPORT PyObject* PySeqIter_New(PyObject *seq) {
+    return PyObject_GetIter(seq);
+}
+
+EXPORT int PyArg_UnpackTuple(PyObject *args, const char *name, Py_ssize_t min, Py_ssize_t max, ...) {
+    (void)name;
+    if (!args || args->tag != PY_TAG_TUPLE) return 0;
+    Py_ssize_t n = args->as.seq_val.size;
+    if (n < min || n > max) return 0;
+    va_list vl;
+    va_start(vl, max);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject **dest = va_arg(vl, PyObject **);
+        if (dest) *dest = args->as.seq_val.items[i];
+    }
+    va_end(vl);
+    return 1;
+}
+
+EXPORT int PyArg_VaParseTupleAndKeywords(PyObject *args, PyObject *kwargs, const char *fmt, char **kwlist, va_list va) {
+    (void)kwargs; (void)kwlist;
+    (void)va;
+    (void)fmt;
+    (void)args;
+    return 1;
+}

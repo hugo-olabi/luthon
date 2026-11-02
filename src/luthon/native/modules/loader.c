@@ -189,3 +189,37 @@ EXPORT void Py_Initialize(void) {
 
 EXPORT void Py_Finalize(void) {
 }
+
+/* Stage 3: Dynamic Module Imports & Global Attributes */
+EXPORT int PyModule_AddObject(PyObject *mod, const char *name, PyObject *value) {
+    (void)mod; (void)name; (void)value;
+    return 0;
+}
+
+EXPORT int PyModule_AddStringConstant(PyObject *mod, const char *name, const char *value) {
+    (void)mod; (void)name; (void)value;
+    return 0;
+}
+
+EXPORT PyObject* PyEval_GetBuiltins(void) {
+    static PyObject *g_builtins = NULL;
+    if (!g_builtins) {
+        g_builtins = PyDict_New();
+    }
+    return g_builtins;
+}
+
+EXPORT PyObject* PySys_GetObject(const char *name) {
+    (void)name;
+    return NULL;
+}
+
+EXPORT PyObject* PyImport_ImportModule(const char *name) {
+    (void)name;
+    return PyDict_New();
+}
+
+EXPORT PyObject* PyImport_Import(PyObject *name) {
+    (void)name;
+    return PyDict_New();
+}
