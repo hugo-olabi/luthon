@@ -32,14 +32,21 @@ local search_paths = {
   "./vendor",
   "./src/luthon/lua/native",
   "./.luthon_env/lib/luthon/site-packages",
+  "/usr/lib64/python3.14/site-packages",
+  "/usr/lib/python3.14/site-packages",
+  "/usr/lib64/python3.14",
+  "/usr/local/lib64/python3.14/site-packages",
+  "/usr/local/lib/python3.14/site-packages",
   "/usr/local/lib/python3.13/dist-packages",
   "/usr/lib/python3/dist-packages",
   "/usr/lib/python3.13",
 }
 
--- Add Luthon user site-packages (~/.luthon/site-packages)
+-- Add user site-packages (~/.local/lib/python3.14/site-packages and ~/.luthon/site-packages)
 local home = os.getenv("HOME")
 if home then
+  table.insert(search_paths, home .. "/.local/lib/python3.14/site-packages")
+  table.insert(search_paths, home .. "/.local/lib/python3.13/site-packages")
   table.insert(search_paths, home .. "/.luthon/site-packages")
 end
 
@@ -193,6 +200,19 @@ function M.load_binary_extension(name, path)
   if not ok_ffi or not ffi then return nil end
 
   local capi_path = "src/luthon/native/libluthon_capi.so"
+  local home = os.getenv("HOME") or ""
+  local cand_paths = {
+    "src/luthon/native/libluthon_capi.so",
+    "../luthon/src/luthon/native/libluthon_capi.so",
+    os.getenv("LUTHON_CAPI_LIB") or "",
+    home .. "/Projects/luthon/src/luthon/native/libluthon_capi.so"
+  }
+  for _, cp in ipairs(cand_paths) do
+    if cp ~= "" then
+      local f = io.open(cp, "r")
+      if f then f:close(); capi_path = cp; break end
+    end
+  end
 
   -- Ensure C-API proxy symbols are globally exposed
   if not _capi_loaded then

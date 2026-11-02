@@ -977,12 +977,13 @@ function Parser:import_from_stmt()
   end
   local names = {}
   if self:match(TT.OP, "(") then
-    repeat
+    while not self:check(TT.OP, ")") do
       local name = self:expect(TT.NAME).value
       local alias = nil
       if self:match(TT.NAME, "as") then alias = self:expect(TT.NAME).value end
       table.insert(names, {name = name, asname = alias})
-    until not self:match(TT.OP, ",")
+      if not self:match(TT.OP, ",") then break end
+    end
     self:expect(TT.OP, ")")
   else
     repeat
@@ -1500,6 +1501,15 @@ function Parser:atom()
         self:expect(TT.OP, "}")
         return node(NT.Set, {elts = elts, lineno = 0, col_offset = 0})
       end
+    elseif v == "..." or (v == "." and self:check2(TT.OP, ".", TT.OP, ".")) then
+      if v == "." then
+        self:advance()
+        self:expect(TT.OP, ".")
+        self:expect(TT.OP, ".")
+      else
+        self:advance()
+      end
+      return node(NT.Constant, {value = "...", lineno = 0, col_offset = 0})
     else
       error("Unexpected operator in atom: " .. v .. " at line " .. tok.line)
     end

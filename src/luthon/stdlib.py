@@ -901,22 +901,29 @@ local _str_methods = {
   endswith = function(s, suffix)
     return suffix == "" or string.sub(s, -#suffix) == suffix
   end,
-  split = function(s, sep)
+  split = function(s, sep, maxsplit)
     sep = sep or "%s+"
-    local r = {}
+    maxsplit = maxsplit or -1
+    local r = setmetatable({}, _list_mt)
     local pos = 1
     local len = #s
     if sep == "%s+" then
       for w in string.gmatch(s, "%S+") do table.insert(r, w) end
       return r
     end
+    local splits = 0
     while pos <= len do
+      if maxsplit >= 0 and splits >= maxsplit then
+        table.insert(r, string.sub(s, pos))
+        break
+      end
       local s_start, s_end = _lua_raw_str_find(s, sep, pos, true)
       if not s_start then
         table.insert(r, string.sub(s, pos))
         break
       end
       table.insert(r, string.sub(s, pos, s_start - 1))
+      splits = splits + 1
       pos = s_end + 1
     end
     return r
@@ -1981,7 +1988,22 @@ io.BytesIO = function(initial)
           const uint8_t* PyStream_GetBuffer(PyObject *stream, Py_ssize_t *size);
           void Py_DecRef(PyObject *o);
         ]]
-        return ffi.load("src/luthon/native/libluthon_capi.so")
+        local lib_paths = {
+          "src/luthon/native/libluthon_capi.so",
+          "../luthon/src/luthon/native/libluthon_capi.so",
+          (os.getenv("LUTHON_CAPI_LIB") or ""),
+          ((os.getenv("HOME") or "") .. "/Projects/luthon/src/luthon/native/libluthon_capi.so"),
+        }
+        for _, lp in ipairs(lib_paths) do
+          if lp ~= "" then
+            local f = io.open(lp, "r")
+            if f then
+              f:close()
+              return ffi.load(lp)
+            end
+          end
+        end
+        return ffi.load("libluthon_capi.so")
       end)
       if ok_load and capi then
         _cached_capi_stream = capi
@@ -2903,6 +2925,10 @@ function _luthon_import_from(mod_name, item_name)
   if mod_name == "" and __package__ and __package__ ~= "" then
     mod_name = __package__
   end
+  local sub = _luthon_import(mod_name .. "." .. item_name)
+  if sub ~= nil and type(sub) == "table" and next(sub) ~= nil then
+    return sub
+  end
   local m = _luthon_import(mod_name)
   if type(m) == "table" and m[item_name] ~= nil then
     return m[item_name]
@@ -2910,7 +2936,6 @@ function _luthon_import_from(mod_name, item_name)
   if _G[item_name] ~= nil then
     return _G[item_name]
   end
-  local sub = _luthon_import(mod_name .. "." .. item_name)
   if sub ~= nil and sub ~= _G[mod_name] then return sub end
   return (type(m) == "table" and m[item_name]) or _G[item_name]
 end

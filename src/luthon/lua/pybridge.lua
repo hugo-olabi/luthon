@@ -435,6 +435,21 @@ lua_to_py = function(v)
       end
       return tup
     end
+    -- Check if this is an io.BytesIO or stream object with getvalue / read
+    if type(v.getvalue) == "function" then
+      local val = v:getvalue()
+      local io_mod = libpy.PyImport_ImportModule("io")
+      local bio_cls = libpy.PyObject_GetAttrString(io_mod, "BytesIO")
+      local py_bytes = libpy.PyBytes_FromStringAndSize(val, #val)
+      local args = libpy.PyTuple_New(1)
+      libpy.PyTuple_SetItem(args, 0, py_bytes)
+      local py_bio = libpy.PyObject_CallObject(bio_cls, args)
+      decref(args)
+      decref(bio_cls)
+      decref(io_mod)
+      return py_bio
+    end
+
     -- Check if sequential array
     local is_array = true
     local n = #v
@@ -459,7 +474,7 @@ lua_to_py = function(v)
     else
       local dict = libpy.PyDict_New()
       for k, val in pairs(v) do
-        if type(val) ~= "function" and v ~= val then
+        if type(val) ~= "function" and type(val) ~= "userdata" and v ~= val then
           local py_val = lua_to_py(val)
           libpy.PyDict_SetItemString(dict, tostring(k), py_val)
           decref(py_val)
@@ -467,8 +482,8 @@ lua_to_py = function(v)
       end
       return dict
     end
-  elseif type(v) == "function" then
-    -- When a Lua function is passed across the bridge to CPython (e.g. decorators), wrap with None
+  elseif type(v) == "function" or type(v) == "userdata" then
+    -- When a Lua function or opaque userdata is passed across the bridge to CPython, wrap with None
     libpy.Py_IncRef(none_ptr)
     return none_ptr
   elseif type(v) == "cdata" then
