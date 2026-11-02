@@ -1090,6 +1090,8 @@ function make_generator(fn, ...)
 end
 
 function iter(t)
+  if type(t) == "table" and t.__aiter__ then return t:__aiter__() end
+  if type(t) == "table" and t.__iter__ then return t:__iter__() end
   if type(t) == "table" and t.__next__ then return t end
   if type(t) == "function" then return t end
   local i = 0

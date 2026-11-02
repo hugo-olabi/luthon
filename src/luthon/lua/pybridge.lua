@@ -175,6 +175,25 @@ function pybridge.is_available()
   return ok
 end
 
+-- Ensure an active CPython asyncio event loop exists on this thread if needed
+function pybridge.ensure_event_loop()
+  pcall(function()
+    local lib = pybridge.get_lib()
+    if not lib then return end
+    libpy.PyRun_SimpleString([[
+import asyncio
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    try:
+        _luthon_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_luthon_loop)
+    except Exception:
+        pass
+]])
+  end)
+end
+
 local function decref(obj)
   if obj ~= nil then
     libpy.Py_DecRef(ffi.cast("PyObject*", obj))
@@ -569,6 +588,9 @@ pybridge.py_to_lua = py_to_lua
 function pybridge.import(name)
   _record_nyi_feature("module", name)
   pybridge.get_lib()
+  if name == "asyncio" or name == "websockets" then
+    pybridge.ensure_event_loop()
+  end
   local mod = libpy.PyImport_ImportModule(name)
   if mod == nil then
     check_py_error()

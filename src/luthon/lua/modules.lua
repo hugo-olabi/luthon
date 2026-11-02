@@ -61,6 +61,18 @@ local pythonpath = os.getenv("PYTHONPATH")
 if pythonpath then
   for p in pythonpath:gmatch("([^:]+)") do
     table.insert(search_paths, p)
+    table.insert(search_paths, p .. "/luthon/lua/native")
+    table.insert(search_paths, p .. "/luthon/lua")
+  end
+end
+
+-- Add paths from package.path
+if package and package.path then
+  for p in package.path:gmatch("([^;]+)") do
+    local base = p:match("^(.-)/%?[^/]*$")
+    if base and base ~= "" and base ~= "." then
+      table.insert(search_paths, base)
+    end
   end
 end
 
