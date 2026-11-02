@@ -58,7 +58,19 @@ ffi.cdef[[
   void png_write_info(png_structp png_ptr, png_infop info_ptr);
   void png_write_image(png_structp png_ptr, uint8_t **row_pointers);
   void png_write_end(png_structp png_ptr, png_infop info_ptr);
+
+  bool luthon_png_read_mem(const uint8_t *data, size_t size, int *out_w, int *out_h, int *out_channels, uint8_t **out_buf);
+  bool luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
+  void luthon_png_free(void *ptr);
 ]]
+
+local luthon_native = _G._luthon_native_lib
+if not luthon_native then
+  for _, cand in ipairs({"src/luthon/native/libluthon_capi.so", "./libluthon_capi.so", "libluthon_capi.so"}) do
+    local ok, lib = pcall(ffi.load, cand)
+    if ok and lib then luthon_native = lib; break end
+  end
+end
 
 local libpng = nil
 for _, name in ipairs({"libpng16.so.16", "libpng16.so", "libpng.so"}) do
@@ -237,6 +249,32 @@ function Image_mt:save(fp, format, ...)
   local c_file = nil
   local write_cb, flush_cb, get_bytes = nil, nil, nil
 
+  -- Native fast path for memory-based PNG saving
+  if not is_filepath and luthon_native ~= nil then
+    local out_data = ffi.new("uint8_t*[1]")
+    local out_size = ffi.new("size_t[1]")
+    local ok = luthon_native.luthon_png_write_mem(
+      self._buffer,
+      w,
+      h,
+      channels,
+      out_data,
+      out_size
+    )
+    if ok and out_data[0] ~= nil then
+      local n = tonumber(out_size[0])
+      local output_data = ffi.string(out_data[0], n)
+      luthon_native.luthon_png_free(out_data[0])
+      local p_png = ffi.new("png_structp[1]", png_ptr)
+      local p_info = ffi.new("png_infop[1]", info_ptr)
+      libpng.png_destroy_write_struct(p_png, p_info)
+      if type(fp) == "table" and type(fp.write) == "function" then
+        fp:write(output_data)
+      end
+      return true
+    end
+  end
+
   if is_filepath then
     c_file = ffi.C.fopen(fp, "wb")
     if c_file == nil then
@@ -284,6 +322,58 @@ function Image_mt:save(fp, format, ...)
 end
 
 function Image.open(fp)
+  local is_filepath = (type(fp) == "string")
+  local raw_bytes = nil
+
+  -- Native fast path for memory-based PNGs (BytesIO, string) via C streaming
+  if not is_filepath and luthon_native ~= nil then
+    if type(fp) == "table" and type(fp.getvalue) == "function" then
+      raw_bytes = fp:getvalue()
+    elseif type(fp) == "table" and type(fp.read) == "function" then
+      raw_bytes = fp:read()
+    elseif type(fp) == "string" then
+      raw_bytes = fp
+    end
+
+    if raw_bytes and #raw_bytes >= 8 and string.sub(raw_bytes, 1, 8) == "\137PNG\r\n\026\n" then
+      local out_w = ffi.new("int[1]")
+      local out_h = ffi.new("int[1]")
+      local out_channels = ffi.new("int[1]")
+      local out_buf_ptr = ffi.new("uint8_t*[1]")
+
+      local ok = luthon_native.luthon_png_read_mem(
+        ffi.cast("const uint8_t*", raw_bytes),
+        #raw_bytes,
+        out_w,
+        out_h,
+        out_channels,
+        out_buf_ptr
+      )
+
+      if ok and out_buf_ptr[0] ~= nil then
+        local w = tonumber(out_w[0])
+        local h = tonumber(out_h[0])
+        local ch = tonumber(out_channels[0])
+        local total_size = w * h * ch
+
+        -- Copy to Lua managed cdata buffer so it auto-frees cleanly
+        local buf = ffi.new("uint8_t[?]", total_size)
+        ffi.copy(buf, out_buf_ptr[0], total_size)
+        luthon_native.luthon_png_free(out_buf_ptr[0])
+
+        local im = {
+          _buffer = buf,
+          _raw_bytes = raw_bytes,
+          _is_valid = true,
+          size = setmetatable({w, h}, _G._tuple_mt),
+          mode = "RGBA",
+          format = "PNG",
+        }
+        return setmetatable(im, Image_mt)
+      end
+    end
+  end
+
   if not libpng then error("PIL.Image: libpng not available") end
 
   local is_filepath = (type(fp) == "string")

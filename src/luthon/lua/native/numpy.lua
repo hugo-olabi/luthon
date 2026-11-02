@@ -12,6 +12,25 @@
 
 local ffi = require("ffi")
 
+ffi.cdef[[
+  void luthon_img_mer_to_orm_emission(
+    const uint8_t *src_rgba,
+    int w,
+    int h,
+    uint8_t *dst_orm_rgb,
+    uint8_t *dst_em_l,
+    bool *out_has_emission
+  );
+]]
+
+local luthon_native = _G._luthon_native_lib
+if not luthon_native then
+  for _, cand in ipairs({"src/luthon/native/libluthon_capi.so", "./libluthon_capi.so", "libluthon_capi.so"}) do
+    local ok, lib = pcall(ffi.load, cand)
+    if ok and lib then luthon_native = lib; break end
+  end
+end
+
 local np = {}
 
 local ndarray_mt = {}
@@ -153,6 +172,7 @@ ndarray_mt.__index = function(self, key)
         local view = {
           data = self.data + base_offset,
           parent_data = self.data, -- keep reference alive
+          channel_idx = ch,
           shape = {h, w},
           strides = {s0, s1},
           ndim = 2,
@@ -268,6 +288,22 @@ function np.stack(arrays, ...)
   -- Fast-path for 3-channel interleave (e.g. RGB / ORM maps)
   if num_arrays == 3 then
     local a0, a1, a2 = arrays[1], arrays[2], arrays[3]
+    -- Check if this is the common MER -> ORM slice stack: mer[:, :, 0], mer[:, :, 2], mer[:, :, 3]
+    if luthon_native ~= nil and a0.parent_data and a0.parent_data == a1.parent_data and a1.parent_data == a2.parent_data then
+      local parent_raw = a0.parent_data
+      if parent_raw ~= nil and a0.channel_idx == 0 and a1.channel_idx == 2 and a2.channel_idx == 3 then
+        luthon_native.luthon_img_mer_to_orm_emission(parent_raw, w, h, out_data, nil, nil)
+        local res = {
+          data = out_data,
+          shape = {h, w, 3},
+          strides = {w * 3, 3, 1},
+          ndim = 3,
+          dtype = "uint8",
+        }
+        return setmetatable(res, ndarray_mt)
+      end
+    end
+
     local s0_0, s0_1 = a0.strides[1], a0.strides[2]
     local s1_0, s1_1 = a1.strides[1], a1.strides[2]
     local s2_0, s2_1 = a2.strides[1], a2.strides[2]
@@ -344,6 +380,13 @@ function np.any(cond)
       local h, w = cond.shape[1], cond.shape[2]
       local s0, s1 = cond.strides[1], cond.strides[2]
       local src = cond.data
+      -- Fast linear scan for contiguous 2D array
+      if s1 == 1 and s0 == w then
+        for i = 0, h * w - 1 do
+          if src[i] ~= 0 then return true end
+        end
+        return false
+      end
       for y = 0, h - 1 do
         local row = y * s0
         for x = 0, w - 1 do

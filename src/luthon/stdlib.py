@@ -117,6 +117,11 @@ pcall(function()
     LuthonSlice luthon_slice_calc(int64_t length, int64_t start, int64_t stop, int64_t step, bool has_start, bool has_stop, bool has_step);
     int         luthon_fast_memcmp(const void *s1, size_t n1, const void *s2, size_t n2);
     int64_t     luthon_memfind(const void *haystack, size_t h_len, const void *needle, size_t n_len);
+
+    bool        luthon_png_read_mem(const uint8_t *data, size_t size, int *out_w, int *out_h, int *out_channels, uint8_t **out_buf);
+    bool        luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
+    void        luthon_png_free(void *ptr);
+    void        luthon_img_mer_to_orm_emission(const uint8_t *src_rgba, int w, int h, uint8_t *dst_orm_rgb, uint8_t *dst_em_l, bool *out_has_emission);
   ]]
 end)
 
@@ -1289,15 +1294,40 @@ object = object or { __name__ = "object" }
 _G["exec"] = _G["exec"] or function(...) end
 __name__ = __name__ or "__main__"
 os.path = os.path or {}
-os.path.join = function(...) local a={...}; return table.concat(a, "/") end
-os.path.dirname = os.path.dirname or function(p)
+local _PATH_BUF = ffi.new("char[1024]")
+os.path.join = function(...)
+  local n = select("#", ...)
+  if n == 0 then return "" end
+  if _luthon_native_lib ~= nil then
+    local cur = tostring(select(1, ...) or "")
+    for i = 2, n do
+      local part = tostring(select(i, ...) or "")
+      local written = _luthon_native_lib.luthon_path_join(cur, part, _PATH_BUF, 1024)
+      cur = ffi.string(_PATH_BUF, written)
+    end
+    return cur
+  end
+  local a = {...}
+  return table.concat(a, "/")
+end
+
+os.path.dirname = function(p)
   p = tostring(p or "")
+  if _luthon_native_lib ~= nil then
+    local written = _luthon_native_lib.luthon_path_dirname(p, _PATH_BUF, 1024)
+    return ffi.string(_PATH_BUF, written)
+  end
   local dir = p:match("^(.*)/[^/]*$")
   if dir == "" then return "/" end
   return dir or "."
 end
-os.path.basename = os.path.basename or function(p)
+
+os.path.basename = function(p)
   p = tostring(p or "")
+  if _luthon_native_lib ~= nil then
+    local ptr = _luthon_native_lib.luthon_path_basename(p)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end
   return p:match("^.*/([^/]*)$") or p
 end
 os.path.splitext = os.path.splitext or function(p)
@@ -1330,6 +1360,9 @@ end
 os.path.exists = os.path.exists or function(p)
   p = tostring(p or "")
   if p == "" then return false end
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_exists(p)
+  end
   if _LUTHON_STAT_BUF ~= nil then
     return ffi.C.stat(p, _LUTHON_STAT_BUF) == 0
   end
@@ -1349,6 +1382,9 @@ end
 os.path.isdir = os.path.isdir or function(p)
   p = tostring(p or "")
   if p == "" then return false end
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_isdir(p)
+  end
   if _LUTHON_STAT_BUF ~= nil and ffi.C.stat(p, _LUTHON_STAT_BUF) == 0 then
     local bit_ok, bit_mod = pcall(require, "bit")
     if bit_ok and bit_mod then
@@ -2461,38 +2497,40 @@ local function _get_cjson()
   return nil
 end
 
-local function _cjson_node_to_lua(node, ffi_mod)
+local function _cjson_node_to_lua(node, ffi_str_fn)
   if node == nil then return nil end
   local t = node.type
+  if t >= 256 then t = t % 256 end
+
   if t == 16 then -- cJSON_String
-    return ffi_mod.string(node.valuestring)
+    return ffi_str_fn(node.valuestring)
   elseif t == 8 then -- cJSON_Number
     return node.valuedouble
+  elseif t == 64 then -- cJSON_Object
+    local obj = {}
+    local curr = node.child
+    while curr ~= nil do
+      obj[ffi_str_fn(curr.string)] = _cjson_node_to_lua(curr, ffi_str_fn)
+      curr = curr.next
+    end
+    return obj
+  elseif t == 32 then -- cJSON_Array
+    local arr = {}
+    local curr = node.child
+    local idx = 1
+    while curr ~= nil do
+      arr[idx] = _cjson_node_to_lua(curr, ffi_str_fn)
+      idx = idx + 1
+      curr = curr.next
+    end
+    rawset(arr, "_len", idx - 1)
+    return arr
   elseif t == 2 then -- cJSON_True
     return true
   elseif t == 1 then -- cJSON_False
     return false
   elseif t == 4 then -- cJSON_NULL
     return nil
-  elseif t == 32 then -- cJSON_Array
-    local arr = {}
-    local curr = node.child
-    local idx = 1
-    while curr ~= nil do
-      arr[idx] = _cjson_node_to_lua(curr, ffi_mod)
-      idx = idx + 1
-      curr = curr.next
-    end
-    rawset(arr, "_len", idx - 1)
-    return arr
-  elseif t == 64 then -- cJSON_Object
-    local obj = {}
-    local curr = node.child
-    while curr ~= nil do
-      obj[ffi_mod.string(curr.string)] = _cjson_node_to_lua(curr, ffi_mod)
-      curr = curr.next
-    end
-    return obj
   end
   return nil
 end
@@ -2503,7 +2541,8 @@ json.decode = function(s)
   if cj ~= nil then
     local root = cj.lib.cJSON_Parse(s)
     if root ~= nil then
-      local res = _cjson_node_to_lua(root, cj.ffi)
+      local ffi_str_fn = cj.ffi.string
+      local res = _cjson_node_to_lua(root, ffi_str_fn)
       cj.lib.cJSON_Delete(root)
       return res
     end

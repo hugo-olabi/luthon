@@ -85,6 +85,39 @@ EXPORT LuthonSlice luthon_slice_calc(int64_t length, int64_t start, int64_t stop
 EXPORT int luthon_fast_memcmp(const void *s1, size_t n1, const void *s2, size_t n2);
 EXPORT int64_t luthon_memfind(const void *haystack, size_t h_len, const void *needle, size_t n_len);
 
+/* -------------------------------------------------------------------------
+ * 5. Native Image Processing and Memory PNG Streaming
+ * ------------------------------------------------------------------------- */
+
+EXPORT bool luthon_png_read_mem(
+    const uint8_t *data,
+    size_t size,
+    int *out_w,
+    int *out_h,
+    int *out_channels,
+    uint8_t **out_buf
+);
+
+EXPORT bool luthon_png_write_mem(
+    const uint8_t *buf,
+    int w,
+    int h,
+    int channels,
+    uint8_t **out_data,
+    size_t *out_size
+);
+
+EXPORT void luthon_png_free(void *ptr);
+
+EXPORT void luthon_img_mer_to_orm_emission(
+    const uint8_t *src_rgba,
+    int w,
+    int h,
+    uint8_t *dst_orm_rgb,
+    uint8_t *dst_em_l,
+    bool *out_has_emission
+);
+
 #ifdef __cplusplus
 }
 #endif
