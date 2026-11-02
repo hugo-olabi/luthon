@@ -11,7 +11,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Milestone | Subsystem | Focus Area | Status | Target |
 |:---|:---|:---|:---:|:---:|
 | **Phase 29** | Optimization & Codegen | Register Allocation & Local Variable Slot Reuse | [x] | 4/4 |
-| **Phase 30** | Codegen & Runtime | Direct Subscript & Comparison Specialization | [ ] | 0/4 |
+| **Phase 30** | Codegen & Runtime | Direct Subscript & Comparison Specialization | [x] | 4/4 |
 | **Phase 31** | Classical SSA Optimizer | Loop-Invariant Code Motion (LICM) & CSE | [ ] | 0/4 |
 | **Phase 32** | Native C-API Proxy | Full Slot Dispatch (`tp_iternext`, `tp_richcompare`, `tp_hash`) | [ ] | 0/4 |
 | **Phase 33** | C-API & Buffer Protocol | Multi-Dimensional Buffer Protocol (PEP 3118) & GC Lifetime Sync | [ ] | 0/4 |
@@ -35,15 +35,15 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 ## Phase 30 — Direct Subscript & Comparison Specialization (Trace-Friendly Hot Paths)
 *Target: Eliminate runtime dispatch overhead and trace aborts in hot numerical and algorithmic loops.*
 
-- [ ] **Direct Indexing Specialization**:
+- [x] **Direct Indexing Specialization**:
   - In `src/luthon/codegen.py`, identify subscript operations where indices are statically proven to be non-negative integers (`0 <= i < len`).
   - Emit direct 1-based table index access `t[i + 1]` instead of dynamic dispatch via `__luthon_get`.
-- [ ] **Relational Comparison Specialization**:
+- [x] **Relational Comparison Specialization**:
   - Detect comparisons between operands of known numeric types (`int`, `float`) in `cir.py` and `optimizer.py`.
   - Emit native Lua `<` / `>` / `==` / `~=` operators directly instead of calling `_luthon_cmp` and traversing metatables.
-- [ ] **Zero-Copy Slice Views**:
+- [x] **Zero-Copy Slice Views**:
   - Replace full-table element copies in `a[start:stop]` for typed arrays with lightweight slice views or native C `memcpy`.
-- [ ] **Trace Abort Verification**: Run `luajit -jp=v` and `luajit -jp=a` across benchmark suites to verify 0 trace aborts in inner loops.
+- [x] **Trace Abort Verification**: Run `luajit -jp=v` and `luajit -jp=a` across benchmark suites to verify 0 trace aborts in inner loops.
 
 ---
 

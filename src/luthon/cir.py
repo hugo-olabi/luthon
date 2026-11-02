@@ -187,7 +187,7 @@ class TypeInferrer:
 # =============================================================================
 
 def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
-    """Replaces generic BINOP and UNOP instructions with resolved typed magic method annotations."""
+    """Replaces generic BINOP, CMP, and SUBSCR instructions with specialized direct typed operations."""
     changed = False
 
     for block in fn.blocks:
@@ -205,6 +205,33 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                 elif {lt, rt} <= {INT_TYPE, FLOAT_TYPE}:
                     method_name = f"float.__typed_{binop}__"
                     ins.args[0] = method_name
+                    changed = True
+
+            elif ins.op == "CMP" and len(ins.args) >= 3:
+                cmpop = str(ins.args[0]).lower()
+                left_arg, right_arg = ins.args[1], ins.args[2]
+                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (BOOL_TYPE if isinstance(left_arg, bool) else (STR_TYPE if isinstance(left_arg, str) else ANY_TYPE))))
+                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (BOOL_TYPE if isinstance(right_arg, bool) else (STR_TYPE if isinstance(right_arg, str) else ANY_TYPE))))
+
+                # Numeric and boolean scalar comparisons can be directly evaluated in Lua
+                # without traversing Python metatable chains or calling _luthon_cmp
+                if cmpop in ("eq", "ne", "lt", "le", "gt", "ge", "==", "~=", "!=", "<", "<=", ">", ">="):
+                    if {lt, rt} <= {INT_TYPE, FLOAT_TYPE} or (lt == BOOL_TYPE and rt == BOOL_TYPE):
+                        ins.op = "CMP_DIRECT"
+                        changed = True
+
+            elif ins.op == "SUBSCR" and len(ins.args) >= 2:
+                idx_arg = ins.args[1]
+                it = type_map.get(str(idx_arg), INT_TYPE if isinstance(idx_arg, int) else ANY_TYPE)
+                # If the index is a known non-negative constant integer, direct 1-based indexing applies
+                if isinstance(idx_arg, int) and idx_arg >= 0:
+                    ins.op = "SUBSCR_DIRECT"
+                    changed = True
+
+            elif ins.op == "STORE_SUBSCR" and len(ins.args) >= 3:
+                idx_arg = ins.args[1]
+                if isinstance(idx_arg, int) and idx_arg >= 0:
+                    ins.op = "STORE_SUBSCR_DIRECT"
                     changed = True
 
     return changed

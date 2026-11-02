@@ -116,6 +116,23 @@ def constant_fold_function(fn: Function) -> bool:
                 if not folded:
                     const_env.pop(ins.result, None)
                     new_instrs.append(ins)
+            elif op == "SUBSCR" and ins.result and len(ins.args) >= 2:
+                idx_arg = ins.args[1]
+                idx_val = const_env.get(idx_arg, idx_arg) if isinstance(idx_arg, str) else idx_arg
+                if isinstance(idx_val, int) and idx_val >= 0:
+                    ins.op = "SUBSCR_DIRECT"
+                    ins.args[1] = idx_val
+                    changed = True
+                const_env.pop(ins.result, None)
+                new_instrs.append(ins)
+            elif op == "STORE_SUBSCR" and len(ins.args) >= 3:
+                idx_arg = ins.args[1]
+                idx_val = const_env.get(idx_arg, idx_arg) if isinstance(idx_arg, str) else idx_arg
+                if isinstance(idx_val, int) and idx_val >= 0:
+                    ins.op = "STORE_SUBSCR_DIRECT"
+                    ins.args[1] = idx_val
+                    changed = True
+                new_instrs.append(ins)
             else:
                 if ins.result:
                     const_env.pop(ins.result, None)

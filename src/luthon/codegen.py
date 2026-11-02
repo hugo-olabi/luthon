@@ -72,6 +72,10 @@ def _emit(ins):
             return ins.result + " = _luthon_not_in(" + ins.args[1] + ", " + ins.args[2] + ")"
         mapped_op = cmp_op.replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=")
         return ins.result + " = _luthon_cmp('" + mapped_op + "', " + ins.args[1] + ", " + ins.args[2] + ")"
+    if o == "CMP_DIRECT":
+        cmp_op = (ins.args[0] or "")
+        mapped_op = cmp_op.replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=")
+        return ins.result + " = (" + ins.args[1] + " " + mapped_op + " " + ins.args[2] + ")"
     if o == "CALL":
         args = ", ".join(str(a) for a in ins.args[1:])
         if ins.result:
@@ -128,6 +132,10 @@ def _emit(ins):
         return ins.result + " = (" + ins.args[0] + " and " + ins.args[1] + " or " + ins.args[2] + ")"
     if o == "SUBSCR":
         return ins.result + " = __luthon_get(" + ins.args[0] + ", " + ins.args[1] + ")"
+    if o == "SUBSCR_DIRECT":
+        t = ins.args[0]
+        idx = ins.args[1]
+        return f"{ins.result} = (rawget({t}, '_buf') and {t}[{idx}] or {t}[{idx} + 1])"
     if o == "GET_ATTR":
         return ins.result + " = " + ins.args[0] + "." + ins.args[1]
     if o == "SET_ATTR":
@@ -136,6 +144,11 @@ def _emit(ins):
         return ins.result + " = " + ins.args[0]
     if o == "STORE_SUBSCR":
         return "__luthon_set(" + ins.args[0] + ", " + ins.args[1] + ", " + ins.args[2] + ")"
+    if o == "STORE_SUBSCR_DIRECT":
+        t = ins.args[0]
+        idx = ins.args[1]
+        val = ins.args[2]
+        return f"if rawget({t}, '_buf') then {t}[{idx}] = {val} else {t}[{idx} + 1] = {val} end"
     if o == "LIST_REPEAT":
         return ins.result + " = list_repeat(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "LIST_APPEND":

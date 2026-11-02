@@ -492,6 +492,10 @@ function _luthon_slice(obj, lower, upper, step)
     if l > u then return "" end
     return string.sub(obj, l, u)
   elseif type(obj) == "table" then
+    -- High-performance unboxed array slice view via ffi.copy
+    if rawget(obj, "_buf") and rawget(obj, "_len") then
+      return obj:slice(lower, upper, step)
+    end
     local n = #obj
     lower = lower or 0
     if lower < 0 then lower = n + lower end
@@ -503,7 +507,10 @@ function _luthon_slice(obj, lower, upper, step)
     end
     step = step or 1
     local r = {}
-    if step > 0 then
+    if step == 1 and lower <= upper and table.move then
+      -- Vectorized slice copy via table.move (fast native C loop in LuaJIT)
+      table.move(obj, lower, upper, 1, r)
+    elseif step > 0 then
       for i = lower, upper, step do table.insert(r, obj[i]) end
     else
       for i = lower, upper, step do table.insert(r, obj[i]) end
