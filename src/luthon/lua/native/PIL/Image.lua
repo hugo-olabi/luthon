@@ -62,6 +62,7 @@ ffi.cdef[[
   bool luthon_png_read_mem(const uint8_t *data, size_t size, int *out_w, int *out_h, int *out_channels, uint8_t **out_buf);
   bool luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
   void luthon_png_free(void *ptr);
+  void luthon_img_flip_vertical(uint8_t *data, int w, int h, int channels);
 ]]
 
 local luthon_native = _G._luthon_native_lib
@@ -573,4 +574,43 @@ function Image.fromarray(arr, ...)
   return setmetatable(im, Image_mt)
 end
 
+local ImageOps = {}
+function ImageOps.flip(im)
+  if not im or not im._buffer then return im end
+  local w, h = im.size[1], im.size[2]
+  local ch = (im.mode == "RGBA" and 4) or (im.mode == "RGB" and 3) or 1
+  local total = w * h * ch
+  local new_buf = ffi.new("uint8_t[?]", total)
+  ffi.copy(new_buf, im._buffer, total)
+
+  if luthon_native ~= nil and pcall(function() return luthon_native.luthon_img_flip_vertical end) and luthon_native.luthon_img_flip_vertical ~= nil then
+    luthon_native.luthon_img_flip_vertical(new_buf, w, h, ch)
+  else
+    local row_bytes = w * ch
+    local tmp_row = ffi.new("uint8_t[?]", row_bytes)
+    local half_h = math.floor(h / 2)
+    for y = 0, half_h - 1 do
+      local top_p = new_buf + y * row_bytes
+      local bot_p = new_buf + (h - 1 - y) * row_bytes
+      ffi.copy(tmp_row, top_p, row_bytes)
+      ffi.copy(top_p, bot_p, row_bytes)
+      ffi.copy(bot_p, tmp_row, row_bytes)
+    end
+  end
+
+  local flipped = {
+    _buffer = new_buf,
+    size = setmetatable({w, h}, _G._tuple_mt),
+    mode = im.mode,
+    format = im.format,
+  }
+  return setmetatable(flipped, Image_mt)
+end
+
+Image.ImageOps = ImageOps
+_G.PIL = _G.PIL or {}
+_G.PIL.Image = Image
+_G.PIL.ImageOps = ImageOps
+
 return Image
+

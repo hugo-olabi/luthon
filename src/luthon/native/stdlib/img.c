@@ -290,3 +290,38 @@ EXPORT void luthon_img_mer_to_orm_emission(
         *out_has_emission = (emission_accum > 0);
     }
 }
+
+EXPORT void luthon_img_flip_vertical(
+    uint8_t *data,
+    int w,
+    int h,
+    int channels
+) {
+    if (!data || w <= 0 || h <= 1 || channels <= 0) return;
+    size_t row_bytes = (size_t)w * (size_t)channels;
+    uint8_t *top_row = data;
+    uint8_t *bot_row = data + ((size_t)h - 1) * row_bytes;
+
+    uint8_t stack_buf[4096];
+    uint8_t *tmp = stack_buf;
+    bool heap_allocated = false;
+    if (row_bytes > sizeof(stack_buf)) {
+        tmp = (uint8_t *)malloc(row_bytes);
+        if (!tmp) return;
+        heap_allocated = true;
+    }
+
+    size_t half_h = (size_t)h / 2;
+    for (size_t y = 0; y < half_h; y++) {
+        memcpy(tmp, top_row, row_bytes);
+        memcpy(top_row, bot_row, row_bytes);
+        memcpy(bot_row, tmp, row_bytes);
+        top_row += row_bytes;
+        bot_row -= row_bytes;
+    }
+
+    if (heap_allocated) {
+        free(tmp);
+    }
+}
+

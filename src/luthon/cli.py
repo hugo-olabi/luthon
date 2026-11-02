@@ -82,8 +82,9 @@ def run_file(
             env = os.environ.copy()
             env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
             pkg_src = str(Path(__file__).parent.parent)
+            pkg_root = str(Path(__file__).parent.parent.parent)
             current_lua_path = env.get("LUA_PATH", ";;")
-            extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+            extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
             env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
             proc = subprocess.run(cmd, env=env)
             return proc.returncode
@@ -113,8 +114,9 @@ def run_file(
         env = os.environ.copy()
         env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
         pkg_src = str(Path(__file__).parent.parent)
+        pkg_root = str(Path(__file__).parent.parent.parent)
         current_lua_path = env.get("LUA_PATH", ";;")
-        extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+        extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
         env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
 
         proc = subprocess.run(cmd, env=env)

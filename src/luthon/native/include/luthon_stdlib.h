@@ -118,6 +118,13 @@ EXPORT void luthon_img_mer_to_orm_emission(
     bool *out_has_emission
 );
 
+EXPORT void luthon_img_flip_vertical(
+    uint8_t *data,
+    int w,
+    int h,
+    int channels
+);
+
 #ifdef __cplusplus
 }
 #endif
