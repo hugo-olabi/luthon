@@ -75,3 +75,33 @@ EXPORT int PyCapsule_SetContext(PyObject *op, void *context) {
     capsule->context = context;
     return 0;
 }
+
+EXPORT int PyCapsule_SetName(PyObject *op, const char *name) {
+    if (!op || op->tag != PY_TAG_CAPSULE) {
+        PyErr_SetString(PyExc_TypeError, "PyCapsule_SetName called with non-capsule object");
+        return -1;
+    }
+    PyCapsuleObject *capsule = (PyCapsuleObject *)op;
+    capsule->name = name;
+    return 0;
+}
+
+/* Global Capsule Registry for Inter-Module C-API Function Tables */
+typedef struct _CapsuleEntry {
+    char name[128];
+    void *pointer;
+    struct _CapsuleEntry *next;
+} CapsuleEntry;
+
+static CapsuleEntry *g_capsules = NULL;
+
+EXPORT void* PyCapsule_Import(const char *name, int no_block) {
+    (void)no_block;
+    if (!name) return NULL;
+    for (CapsuleEntry *e = g_capsules; e; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            return e->pointer;
+        }
+    }
+    return NULL;
+}

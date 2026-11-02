@@ -562,6 +562,26 @@ function _luthon_cmp(op, a, b)
     if op == "==" or op == "eq" then return na == nb end
     if op == "~=" or op == "ne" then return na ~= nb end
   end
+  if type(a) == "table" then
+    local mta = getmetatable(a)
+    local cls = a.__class__ or (mta and (type(mta.__index) == "table" and mta.__index or mta))
+    if type(cls) == "table" then
+      if (op == "<" or op == "lt") and type(cls.__lt__) == "function" then return cls.__lt__(a, b) end
+      if (op == "<=" or op == "le") and type(cls.__le__) == "function" then return cls.__le__(a, b) end
+      if (op == ">" or op == "gt") and type(cls.__gt__) == "function" then return cls.__gt__(a, b) end
+      if (op == ">=" or op == "ge") and type(cls.__ge__) == "function" then return cls.__ge__(a, b) end
+    end
+  end
+  if type(b) == "table" then
+    local mtb = getmetatable(b)
+    local cls = b.__class__ or (mtb and (type(mtb.__index) == "table" and mtb.__index or mtb))
+    if type(cls) == "table" then
+      if (op == "<" or op == "lt") and type(cls.__gt__) == "function" then return cls.__gt__(b, a) end
+      if (op == "<=" or op == "le") and type(cls.__ge__) == "function" then return cls.__ge__(b, a) end
+      if (op == ">" or op == "gt") and type(cls.__lt__) == "function" then return cls.__lt__(b, a) end
+      if (op == ">=" or op == "ge") and type(cls.__le__) == "function" then return cls.__le__(b, a) end
+    end
+  end
   if op == "<" or op == "lt" then return a < b end
   if op == "<=" or op == "le" then return a <= b end
   if op == ">" or op == "gt" then return a > b end
