@@ -230,7 +230,7 @@ class IRLowerer:
             if self._continue_stack:
                 self._continue_stack.pop()
             self._cur_block = self._new_block(end_lbl)
-        elif isinstance(node, ast.For):
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
             iter_tmp = self._new_tmp()
             self._emit("CALL", ["iter", self.lower_expr(node.iter)], result=iter_tmp)
             cond_lbl = self._new_label("forcond")
@@ -263,7 +263,7 @@ class IRLowerer:
             if self._continue_stack:
                 self._continue_stack.pop()
             self._cur_block = self._new_block(end_lbl)
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             fn_sym = node.name
             count = self._fn_counter.get(node.name, 0) + 1
             self._fn_counter[node.name] = count
@@ -609,16 +609,18 @@ class IRLowerer:
                 self.module.native_structs.append((node.name, struct_cdef, [f["name"] for f in fields]))
 
             self._emit("STORE", [node.name, cls])
-        elif isinstance(node, ast.With):
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
             # with statement: enter context, run body, exit context
             aliases = []
+            is_async = isinstance(node, ast.AsyncWith)
             for i, item in enumerate(node.items):
                 ctx_tmp = self.lower_expr(item.context_expr)
                 mgr_tmp = self._new_tmp()
                 self._emit("LOAD", [ctx_tmp], result=mgr_tmp)
                 aliases.append(mgr_tmp)
                 enter_tmp = self._new_tmp()
-                self._emit("GET_ATTR", [mgr_tmp, "__enter__"], result=enter_tmp)
+                enter_method = "__aenter__" if is_async else "__enter__"
+                self._emit("GET_ATTR", [mgr_tmp, enter_method], result=enter_tmp)
                 enter_lbl = self._new_label("with_enter")
                 end_enter_lbl = self._new_label("with_enter_end")
                 self._emit("BRANCH", [enter_tmp, enter_lbl, end_enter_lbl])
@@ -633,10 +635,11 @@ class IRLowerer:
             # body
             for s in node.body:
                 self.lower_stmt(s)
-            # __exit__ for each context manager (in reverse order)
+            # __exit__ / __aexit__ for each context manager (in reverse order)
             for mgr_tmp in reversed(aliases):
                 exit_tmp = self._new_tmp()
-                self._emit("GET_ATTR", [mgr_tmp, "__exit__"], result=exit_tmp)
+                exit_method = "__aexit__" if is_async else "__exit__"
+                self._emit("GET_ATTR", [mgr_tmp, exit_method], result=exit_tmp)
                 exit_lbl = self._new_label("with_exit")
                 end_exit_lbl = self._new_label("with_exit_end")
                 self._emit("BRANCH", [exit_tmp, exit_lbl, end_exit_lbl])
@@ -1035,6 +1038,11 @@ class IRLowerer:
             args = [val_tmp] if val_tmp else []
             t = self._new_tmp()
             self._emit("CALL", ["coroutine.yield"] + args, result=t)
+            return t
+        if isinstance(node, ast.Await):
+            val_tmp = self.lower_expr(node.value)
+            t = self._new_tmp()
+            self._emit("CALL", ["_luthon_await", val_tmp], result=t)
             return t
         # fallback
         t = self._new_tmp()

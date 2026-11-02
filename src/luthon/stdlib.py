@@ -2872,6 +2872,67 @@ ast.increment_lineno = function(node, n)
   return node
 end
 
+-- uuid builtin module
+uuid = {}
+local _uuid_rnd = math.random
+local function _uuid4()
+  local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+  local res = string.gsub(template, "[xy]", function(c)
+    local v = (c == "x") and _uuid_rnd(0, 0xf) or _uuid_rnd(8, 0xb)
+    return string.format("%x", v)
+  end)
+  local obj = {
+    hex = string.gsub(res, "-", ""),
+    __str__ = function() return res end,
+  }
+  return setmetatable(obj, {
+    __tostring = function() return res end
+  })
+end
+uuid.uuid4 = _uuid4
+uuid.UUID = function(s) return tostring(s) end
+_G.uuid = uuid
+
+-- asyncio lightweight coroutine runner
+asyncio = {}
+asyncio.Future = function()
+  return setmetatable({ _done = false, _result = nil }, {
+    __index = {
+      done = function(self) return self._done end,
+      result = function(self) return self._result end,
+      set_result = function(self, val) self._done = true; self._result = val end,
+    }
+  })
+end
+asyncio.run = function(coro_or_fn)
+  if type(coro_or_fn) == "function" then
+    local co = coroutine.create(coro_or_fn)
+    local ok, res = coroutine.resume(co)
+    if not ok then error(tostring(res), 2) end
+    return res
+  elseif type(coro_or_fn) == "thread" then
+    local ok, res = coroutine.resume(coro_or_fn)
+    if not ok then error(tostring(res), 2) end
+    return res
+  end
+  return coro_or_fn
+end
+asyncio.sleep = function(secs)
+  return coroutine.yield("sleep", secs)
+end
+_G.asyncio = asyncio
+
+function _luthon_await(val)
+  if type(val) == "thread" then
+    local ok, res = coroutine.resume(val)
+    if not ok then error(tostring(res), 2) end
+    return res
+  elseif type(val) == "function" then
+    return val()
+  end
+  return val
+end
+
 -- Runtime import helper functions
 local _luthon_modules_mod = nil
 local function _get_modules_mod()
@@ -2925,13 +2986,20 @@ function _luthon_import_from(mod_name, item_name)
   if mod_name == "" and __package__ and __package__ ~= "" then
     mod_name = __package__
   end
-  local sub = _luthon_import(mod_name .. "." .. item_name)
-  if sub ~= nil and type(sub) == "table" and next(sub) ~= nil then
-    return sub
+  -- 1. Check if the parent module is already loaded in _G or _MODULES
+  local parent = (type(_G[mod_name]) == "table" and _G[mod_name]) or (_MODULES and type(_MODULES[mod_name]) == "table" and _MODULES[mod_name])
+  if parent ~= nil and parent[item_name] ~= nil then
+    return parent[item_name]
   end
+  -- 2. Try importing the parent module first to avoid false sub-module waterfall fallbacks
   local m = _luthon_import(mod_name)
   if type(m) == "table" and m[item_name] ~= nil then
     return m[item_name]
+  end
+  -- 3. If item is not in parent module, check if it is a dotted sub-package/module
+  local sub = _luthon_import(mod_name .. "." .. item_name)
+  if sub ~= nil and type(sub) == "table" and next(sub) ~= nil then
+    return sub
   end
   if _G[item_name] ~= nil then
     return _G[item_name]
