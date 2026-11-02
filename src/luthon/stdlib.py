@@ -77,7 +77,63 @@ pcall(function()
     } stat_t;
     int stat(const char *pathname, stat_t *statbuf);
     int mkdir(const char *pathname, unsigned int mode);
+
+    /* Luthon Native C Stdlib Declarations */
+    typedef struct {
+      int64_t current;
+      int64_t stop;
+      int64_t step;
+      int64_t length;
+    } LuthonRange;
+
+    LuthonRange luthon_range_init(int64_t start, int64_t stop, int64_t step);
+    bool        luthon_range_next(LuthonRange *r, int64_t *out_val);
+    int64_t     luthon_range_len(const LuthonRange *r);
+
+    int64_t     luthon_math_ipow(int64_t base, int64_t exp);
+    void        luthon_math_divmod(int64_t a, int64_t b, int64_t *out_div, int64_t *out_mod);
+
+    size_t      luthon_b64_decoded_size(const char *src, size_t src_len);
+    size_t      luthon_b64_decode(const char *src, size_t src_len, uint8_t *dst);
+    size_t      luthon_b64_encode(const uint8_t *src, size_t src_len, char *dst);
+
+    size_t      luthon_hex_decode(const char *src, size_t src_len, uint8_t *dst);
+    size_t      luthon_hex_encode(const uint8_t *src, size_t src_len, char *dst);
+
+    size_t      luthon_path_join(const char *p1, const char *p2, char *dst, size_t max_len);
+    const char* luthon_path_basename(const char *path);
+    size_t      luthon_path_dirname(const char *path, char *dst, size_t max_len);
+    bool        luthon_path_exists(const char *path);
+    bool        luthon_path_isdir(const char *path);
+    size_t      luthon_path_getsize(const char *path);
+
+    typedef struct {
+      int64_t start;
+      int64_t stop;
+      int64_t step;
+      int64_t length;
+    } LuthonSlice;
+
+    LuthonSlice luthon_slice_calc(int64_t length, int64_t start, int64_t stop, int64_t step, bool has_start, bool has_stop, bool has_step);
+    int         luthon_fast_memcmp(const void *s1, size_t n1, const void *s2, size_t n2);
+    int64_t     luthon_memfind(const void *haystack, size_t h_len, const void *needle, size_t n_len);
   ]]
+end)
+
+local _luthon_native_lib = nil
+pcall(function()
+  local candidates = {
+    "src/luthon/native/libluthon_capi.so",
+    "./libluthon_capi.so",
+    "libluthon_capi.so"
+  }
+  for _, cand in ipairs(candidates) do
+    local ok, lib = pcall(ffi.load, cand)
+    if ok and lib then
+      _luthon_native_lib = lib
+      break
+    end
+  end
 end)
 
 local _LUTHON_STAT_BUF = nil
@@ -609,10 +665,23 @@ end
 function range(a, b, step)
   if b == nil then a, b = 0, a; step = 1 end
   if step == nil then step = 1 end
+  if _luthon_native_lib ~= nil then
+    local r_struct = _luthon_native_lib.luthon_range_init(a, b, step)
+    local n = tonumber(r_struct.length)
+    local r = {}
+    local val_buf = ffi.new("int64_t[1]")
+    local idx = 1
+    while _luthon_native_lib.luthon_range_next(r_struct, val_buf) do
+      r[idx] = tonumber(val_buf[0])
+      idx = idx + 1
+    end
+    rawset(r, "_len", n)
+    return setmetatable(r, _list_mt)
+  end
   local r = {}
   if step > 0 then for i = a, b - 1, step do r[#r+1] = i end
   else for i = a, b + 1, step do r[#r+1] = i end end
-  return r
+  return setmetatable(r, _list_mt)
 end
 function len(t)
   if t == nil then return 0 end
@@ -1823,8 +1892,12 @@ base64.b64encode = function(data)
   local len = #data
   if len == 0 then return "" end
 
-  if _b64_ffi_ok and _b64_bit_ok then
+  if _luthon_native_lib ~= nil then
     local max_out = math.floor((len + 2) / 3) * 4 + 4
+    local buf = ffi.new("char[?]", max_out)
+    local n = _luthon_native_lib.luthon_b64_encode(ffi.cast("const uint8_t*", data), len, buf)
+    return ffi.string(buf, n)
+  elseif _b64_ffi_ok and _b64_bit_ok then
     local buf = _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local out_pos = 0
@@ -1887,8 +1960,12 @@ base64.b64decode = function(data)
   local len = #data
   if len == 0 then return "" end
 
-  if _b64_ffi_ok and _b64_bit_ok then
+  if _luthon_native_lib ~= nil then
     local max_out = math.floor(len * 3 / 4) + 4
+    local buf = ffi.new("uint8_t[?]", max_out)
+    local n = _luthon_native_lib.luthon_b64_decode(data, len, buf)
+    return ffi.string(buf, n)
+  elseif _b64_ffi_ok and _b64_bit_ok then
     local buf = _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local quad_idx = 0

@@ -25,7 +25,7 @@ def get_source_files() -> List[Path]:
     """Collects all modular C source files under src/luthon/native/."""
     native_dir = Path(__file__).parent.resolve()
     sources = []
-    for sub in ["core", "protocols", "io", "modules"]:
+    for sub in ["core", "protocols", "io", "modules", "stdlib"]:
         sub_dir = native_dir / sub
         if sub_dir.exists():
             sources.extend(sorted(sub_dir.glob("*.c")))
