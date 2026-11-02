@@ -22,29 +22,45 @@ EXPORT void Py_IncRef(PyObject *o) {
     if (o) o->ob_refcnt++;
 }
 
+EXPORT void _Py_Dealloc(PyObject *o) {
+    if (!o) return;
+    if (o == &_Py_NoneStruct || o == &_Py_TrueStruct || o == &_Py_FalseStruct) return;
+
+    if (o->ob_type && o->ob_type->tp_dealloc) {
+        o->ob_type->tp_dealloc(o);
+        return;
+    }
+
+    if (o->tag == PY_TAG_STR || o->tag == PY_TAG_BYTES) {
+        free(o->as.str_val.data);
+    } else if (o->tag == PY_TAG_TUPLE || o->tag == PY_TAG_LIST) {
+        if (o->as.seq_val.items) {
+            for (Py_ssize_t i = 0; i < o->as.seq_val.size; i++) {
+                Py_DecRef(o->as.seq_val.items[i]);
+            }
+            free(o->as.seq_val.items);
+        }
+    } else if (o->tag == PY_TAG_SLICE) {
+        Py_DecRef(o->as.slice_val.start);
+        Py_DecRef(o->as.slice_val.stop);
+        Py_DecRef(o->as.slice_val.step);
+    } else if (o->tag == PY_TAG_STREAM) {
+        if (o->as.stream_val.buffer) {
+            free(o->as.stream_val.buffer);
+        }
+    } else if (o->tag == PY_TAG_CAPSULE) {
+        PyCapsuleObject *cap = (PyCapsuleObject *)o;
+        if (cap->destructor) {
+            cap->destructor(o);
+        }
+    }
+    free(o);
+}
+
 EXPORT void Py_DecRef(PyObject *o) {
     if (!o) return;
     if (--o->ob_refcnt <= 0) {
-        if (o == &_Py_NoneStruct || o == &_Py_TrueStruct || o == &_Py_FalseStruct) return;
-        if (o->tag == PY_TAG_STR || o->tag == PY_TAG_BYTES) {
-            free(o->as.str_val.data);
-        } else if (o->tag == PY_TAG_TUPLE || o->tag == PY_TAG_LIST) {
-            if (o->as.seq_val.items) {
-                for (Py_ssize_t i = 0; i < o->as.seq_val.size; i++) {
-                    Py_DecRef(o->as.seq_val.items[i]);
-                }
-                free(o->as.seq_val.items);
-            }
-        } else if (o->tag == PY_TAG_SLICE) {
-            Py_DecRef(o->as.slice_val.start);
-            Py_DecRef(o->as.slice_val.stop);
-            Py_DecRef(o->as.slice_val.step);
-        } else if (o->tag == PY_TAG_STREAM) {
-            if (o->as.stream_val.buffer) {
-                free(o->as.stream_val.buffer);
-            }
-        }
-        free(o);
+        _Py_Dealloc(o);
     }
 }
 
@@ -156,4 +172,67 @@ EXPORT char* PyBytes_AsString(PyObject *o) {
 EXPORT Py_ssize_t PyBytes_Size(PyObject *o) {
     if (!o || o->tag != PY_TAG_BYTES) return 0;
     return o->as.str_val.size;
+}
+
+/* Heap Object Allocation for C-Extensions */
+EXPORT PyObject* _PyObject_New(PyTypeObject *tp) {
+    if (!tp) return NULL;
+    size_t size = tp->tp_basicsize ? (size_t)tp->tp_basicsize : sizeof(PyObject);
+    PyObject *op = (PyObject *)calloc(1, size);
+    if (!op) return PyErr_NoMemory();
+    op->ob_refcnt = 1;
+    op->ob_type = tp;
+    op->tag = PY_TAG_OPAQUE;
+    return op;
+}
+
+EXPORT void PyObject_Free(void *ptr) {
+    if (ptr) free(ptr);
+}
+
+EXPORT int PyObject_Print(PyObject *op, FILE *fp, int flags) {
+    (void)flags;
+    if (!fp) fp = stdout;
+    if (!op) {
+        fprintf(fp, "<NULL>");
+        return 0;
+    }
+    if (op == &_Py_NoneStruct) {
+        fprintf(fp, "None");
+    } else if (op->tag == PY_TAG_INT || op->tag == PY_TAG_BOOL) {
+        fprintf(fp, "%lld", (long long)op->as.i_val);
+    } else if (op->tag == PY_TAG_FLOAT) {
+        fprintf(fp, "%f", op->as.f_val);
+    } else if (op->tag == PY_TAG_STR) {
+        fprintf(fp, "%s", op->as.str_val.data ? op->as.str_val.data : "");
+    } else {
+        fprintf(fp, "<%s object at %p>", (op->ob_type && op->ob_type->tp_name) ? op->ob_type->tp_name : "unknown", (void *)op);
+    }
+    return 0;
+}
+
+EXPORT int PyType_IsSubtype(PyTypeObject *a, PyTypeObject *b) {
+    if (!a || !b) return 0;
+    if (a == b) return 1;
+    for (PyTypeObject *base = a->tp_base; base; base = base->tp_base) {
+        if (base == b) return 1;
+    }
+    return 0;
+}
+
+/* Thread State Stubs for Single-Threaded LuaJIT Runtime */
+EXPORT void* PyEval_SaveThread(void) {
+    return (void *)1;
+}
+
+EXPORT void PyEval_RestoreThread(void *tstate) {
+    (void)tstate;
+}
+
+EXPORT int PyOS_snprintf(char *str, size_t size, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = vsnprintf(str, size, format, args);
+    va_end(args);
+    return ret;
 }

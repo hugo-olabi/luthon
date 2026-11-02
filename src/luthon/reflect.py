@@ -98,19 +98,34 @@ class BinaryReflector:
               int          ml_flags;
               const char  *ml_doc;
           }} PyMethodDef;
-          typedef struct PyModuleDef {{
+          typedef struct PyModuleDef_Base {{
+              long ob_refcnt;
+              void *ob_type;
+              void* (*m_init)(void);
+              long m_index;
+              void* m_copy;
+          }} PyModuleDef_Base;
+          typedef struct PyModuleDef_Standard {{
+              PyModuleDef_Base m_base;
+              const char  *m_name;
+              const char  *m_doc;
+              long         m_size;
+              PyMethodDef *m_methods;
+          }} PyModuleDef_Standard;
+          typedef struct PyModuleDef_Legacy {{
               int          m_base;
               const char  *m_name;
               const char  *m_doc;
               long         m_size;
               PyMethodDef *m_methods;
-          }} PyModuleDef;
+          }} PyModuleDef_Legacy;
           typedef struct _object {{
               long ob_refcnt;
               void *ob_type;
               int tag;
-              int _pad;
-              PyModuleDef *module_def;
+              union {{
+                void *module_def;
+              }} as;
           }} MyPyObject;
 
           PyObject* PyInit_{module_name}(void);
@@ -119,17 +134,37 @@ class BinaryReflector:
         ffi.C.dlopen("{self.capi_path}", 258)
         local ext = ffi.load("{binary_path}")
         local ok, mod_ptr = pcall(function() return ffi.cast("MyPyObject*", ext.PyInit_{module_name}()) end)
-        if not ok or mod_ptr == nil or mod_ptr.module_def == nil then
+        if not ok or mod_ptr == nil or mod_ptr.as.module_def == nil then
             print(string.format('{{"name": "%s", "doc": "", "methods": []}}', "{module_name}"))
             return
         end
-        local mod_def = mod_ptr.module_def
+        local raw_def = mod_ptr.as.module_def
+
+        local m_name = "{module_name}"
+        local m_doc = ""
+        local m_methods = nil
+
+        local std = ffi.cast("PyModuleDef_Standard*", raw_def)
+        local ok_std, std_name = pcall(function() return std.m_name ~= nil and ffi.string(std.m_name) or nil end)
+        if ok_std and std_name ~= nil and #std_name > 0 and std_name:match("^[%a_][%w_]*$") then
+            m_name = std_name
+            m_doc = (std.m_doc ~= nil and ffi.string(std.m_doc) or "")
+            m_methods = std.m_methods
+        else
+            local leg = ffi.cast("PyModuleDef_Legacy*", raw_def)
+            local ok_leg, leg_name = pcall(function() return leg.m_name ~= nil and ffi.string(leg.m_name) or nil end)
+            if ok_leg and leg_name ~= nil and #leg_name > 0 and leg_name:match("^[%a_][%w_]*$") then
+                m_name = leg_name
+                m_doc = (leg.m_doc ~= nil and ffi.string(leg.m_doc) or "")
+                m_methods = leg.m_methods
+            end
+        end
 
         local methods = {{}}
-        if mod_def.m_methods ~= nil then
+        if m_methods ~= nil then
           local i = 0
-          while mod_def.m_methods[i].ml_name ~= nil do
-            local m = mod_def.m_methods[i]
+          while m_methods[i].ml_name ~= nil do
+            local m = m_methods[i]
             table.insert(methods, {{
               name = ffi.string(m.ml_name),
               flags = tonumber(m.ml_flags),
@@ -143,8 +178,6 @@ class BinaryReflector:
         for _, m in ipairs(methods) do
           table.insert(parts, string.format('{{"name": "%s", "flags": %d, "doc": "%s"}}', m.name, m.flags, m.doc:gsub('"', '\\\\"')))
         end
-        local m_name = mod_def.m_name ~= nil and ffi.string(mod_def.m_name) or "{module_name}"
-        local m_doc = mod_def.m_doc ~= nil and ffi.string(mod_def.m_doc) or ""
         print(string.format('{{"name": "%s", "doc": "%s", "methods": [%s]}}',
           m_name,
           m_doc:gsub('"', '\\\\"'),
@@ -230,32 +263,61 @@ class BinaryReflector:
             "      int          ml_flags;",
             "      const char  *ml_doc;",
             "  } PyMethodDef;",
-            "  typedef struct PyModuleDef {",
+            "  typedef struct PyModuleDef_Base {",
+            "      long ob_refcnt;",
+            "      void *ob_type;",
+            "      void* (*m_init)(void);",
+            "      long m_index;",
+            "      void* m_copy;",
+            "  } PyModuleDef_Base;",
+            "  typedef struct PyModuleDef_Standard {",
+            "      PyModuleDef_Base m_base;",
+            "      const char  *m_name;",
+            "      const char  *m_doc;",
+            "      long         m_size;",
+            "      PyMethodDef *m_methods;",
+            "  } PyModuleDef_Standard;",
+            "  typedef struct PyModuleDef_Legacy {",
             "      int          m_base;",
             "      const char  *m_name;",
             "      const char  *m_doc;",
             "      long         m_size;",
             "      PyMethodDef *m_methods;",
-            "  } PyModuleDef;",
+            "  } PyModuleDef_Legacy;",
             "  typedef struct _py_mod_obj {",
             "      long ob_refcnt;",
             "      void *ob_type;",
             "      int tag;",
-            "      int _pad;",
-            "      PyModuleDef *module_def;",
+            "      union {",
+            "        void *module_def;",
+            "      } as;",
             "  } _PyModObj;",
             "]]",
             "",
             "local _typed_mod = ffi.cast('_PyModObj*', _mod_ptr)",
-            "local _mod_def = _typed_mod.module_def",
+            "local _raw_def = _typed_mod.as.module_def",
             "local _methods_map = {}",
-            "if _mod_def ~= nil and _mod_def.m_methods ~= nil then",
-            "  local idx = 0",
-            "  while _mod_def.m_methods[idx].ml_name ~= nil do",
-            "    local name = ffi.string(_mod_def.m_methods[idx].ml_name)",
-            "    local fn_ptr = ffi.cast('PyObject* (*)(PyObject*, PyObject*)', _mod_def.m_methods[idx].ml_meth)",
-            "    _methods_map[name] = fn_ptr",
-            "    idx = idx + 1",
+            "if _raw_def ~= nil then",
+            "  local _m_methods = nil",
+            "  local _std = ffi.cast('PyModuleDef_Standard*', _raw_def)",
+            "  local _ok_std, _name = pcall(function() return _std.m_name ~= nil and ffi.string(_std.m_name) or nil end)",
+            "  if _ok_std and _name ~= nil and #_name > 0 and _name:match('^[%a_][%w_]*$') then",
+            "    _m_methods = _std.m_methods",
+            "  else",
+            "    local _leg = ffi.cast('PyModuleDef_Legacy*', _raw_def)",
+            "    local _ok_leg, _lname = pcall(function() return _leg.m_name ~= nil and ffi.string(_leg.m_name) or nil end)",
+            "    if _ok_leg and _lname ~= nil and #_lname > 0 and _lname:match('^[%a_][%w_]*$') then",
+            "      _m_methods = _leg.m_methods",
+            "    end",
+            "  end",
+            "  if _m_methods ~= nil then",
+            "    local idx = 0",
+            "    while _m_methods[idx].ml_name ~= nil do",
+            "      local name = ffi.string(_m_methods[idx].ml_name)",
+            "      local fn_ptr = ffi.cast('PyObject* (*)(PyObject*, PyObject*)', _m_methods[idx].ml_meth)",
+            "      _methods_map[name] = fn_ptr",
+            "      idx = idx + 1",
+            "    end",
             "  end",
             "end",
             "",

@@ -126,3 +126,67 @@ EXPORT int PyObject_SetItem(PyObject *o, PyObject *key, PyObject *v) {
 EXPORT int PyObject_DelItem(PyObject *o, PyObject *key) {
     return PyObject_SetItem(o, key, NULL);
 }
+
+EXPORT int PyDict_GetItemRef(PyObject *p, PyObject *key, PyObject **result) {
+    if (!p || !result) return -1;
+    *result = NULL;
+    if (key && key->tag == PY_TAG_STR) {
+        PyObject *v = PyDict_GetItemString(p, PyUnicode_AsUTF8(key));
+        if (v) {
+            Py_IncRef(v);
+            *result = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+EXPORT int PySlice_Unpack(PyObject *r, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t *step) {
+    if (!r || r->tag != PY_TAG_SLICE) {
+        PyErr_SetString(PyExc_TypeError, "expected slice object");
+        return -1;
+    }
+    PySliceObject *s = &r->as.slice_val;
+    *start = (s->start && s->start != Py_None) ? (Py_ssize_t)PyLong_AsLongLong(s->start) : 0;
+    *stop  = (s->stop && s->stop != Py_None) ? (Py_ssize_t)PyLong_AsLongLong(s->stop) : PY_SSIZE_T_MAX;
+    *step  = (s->step && s->step != Py_None) ? (Py_ssize_t)PyLong_AsLongLong(s->step) : 1;
+    if (*step == 0) {
+        PyErr_SetString(PyExc_ValueError, "slice step cannot be zero");
+        return -1;
+    }
+    return 0;
+}
+
+EXPORT Py_ssize_t PySlice_AdjustIndices(Py_ssize_t length, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t step) {
+    if (step > 0) {
+        if (*start < 0) {
+            *start += length;
+            if (*start < 0) *start = 0;
+        } else if (*start > length) {
+            *start = length;
+        }
+        if (*stop < 0) {
+            *stop += length;
+            if (*stop < 0) *stop = 0;
+        } else if (*stop > length) {
+            *stop = length;
+        }
+        if (*start >= *stop) return 0;
+        return (*stop - *start + step - 1) / step;
+    } else {
+        if (*start < 0) {
+            *start += length;
+            if (*start < -1) *start = -1;
+        } else if (*start >= length) {
+            *start = length - 1;
+        }
+        if (*stop < 0) {
+            *stop += length;
+            if (*stop < -1) *stop = -1;
+        } else if (*stop >= length) {
+            *stop = length - 1;
+        }
+        if (*stop >= *start) return 0;
+        return (*start - *stop - step - 1) / (-step);
+    }
+}

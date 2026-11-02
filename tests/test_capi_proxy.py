@@ -320,6 +320,94 @@ print("IMAGE_CODECS_TEST_PASSED")
         self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
         self.assertIn("IMAGE_CODECS_TEST_PASSED", res.stdout)
 
+    def test_capsule_protocol(self):
+        """Verify PyCapsule_New, PyCapsule_GetPointer, and PyCapsule_SetContext round-trip."""
+        script = f"""
+local ffi = require("ffi")
+ffi.cdef[[
+  typedef struct _object PyObject;
+  typedef void (*PyCapsule_Destructor)(PyObject *);
+  PyObject* PyCapsule_New(void *pointer, const char *name, PyCapsule_Destructor destructor);
+  int PyCapsule_IsValid(PyObject *op, const char *name);
+  void* PyCapsule_GetPointer(PyObject *op, const char *name);
+  void* PyCapsule_GetContext(PyObject *op);
+  int PyCapsule_SetContext(PyObject *op, void *context);
+  void Py_DecRef(PyObject *o);
+]]
+local capi = ffi.load("{self.capi_lib}")
+local dummy_ptr = ffi.cast("void*", 0x12345678)
+local cap = capi.PyCapsule_New(dummy_ptr, "test._C_API", nil)
+assert(cap ~= nil, "capsule must not be nil")
+assert(capi.PyCapsule_IsValid(cap, "test._C_API") == 1, "capsule must be valid")
+assert(capi.PyCapsule_IsValid(cap, "wrong.name") == 0, "wrong name must be invalid")
+local retrieved = capi.PyCapsule_GetPointer(cap, "test._C_API")
+assert(retrieved == dummy_ptr, "retrieved pointer must match dummy_ptr")
+
+local ctx = ffi.cast("void*", 0x9999)
+assert(capi.PyCapsule_SetContext(cap, ctx) == 0)
+assert(capi.PyCapsule_GetContext(cap) == ctx)
+
+capi.Py_DecRef(cap)
+print("CAPSULE_PROTOCOL_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("CAPSULE_PROTOCOL_PASSED", res.stdout)
+
+    def test_heap_object_allocation_and_lifetime(self):
+        """Verify _PyObject_New allocates custom tp_basicsize and _Py_Dealloc runs."""
+        script = f"""
+local ffi = require("ffi")
+ffi.cdef[[
+  typedef struct _object PyObject;
+  typedef struct _typeobject {{
+      long ob_refcnt;
+      void *ob_type;
+      const char *tp_name;
+      long tp_basicsize;
+      long tp_itemsize;
+      void (*tp_dealloc)(PyObject *);
+  }} PyTypeObject;
+  PyObject* _PyObject_New(PyTypeObject *tp);
+  void _Py_Dealloc(PyObject *op);
+  void Py_DecRef(PyObject *op);
+]]
+local capi = ffi.load("{self.capi_lib}")
+local custom_type = ffi.new("PyTypeObject")
+custom_type.tp_name = "CustomImagingType"
+custom_type.tp_basicsize = 128
+local dealloc_called = false
+custom_type.tp_dealloc = ffi.cast("void(*)(PyObject*)", function(op)
+    dealloc_called = true
+end)
+
+local obj = capi._PyObject_New(custom_type)
+assert(obj ~= nil, "obj must not be nil")
+capi.Py_DecRef(obj)
+assert(dealloc_called == true, "tp_dealloc must be invoked on Py_DecRef")
+print("HEAP_OBJECT_LIFETIME_PASSED")
+"""
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("HEAP_OBJECT_LIFETIME_PASSED", res.stdout)
+
+    def test_pillow_imaging_reflection_inplace(self):
+        """Verify Pillow's native _imaging.so loads and reflects all methods with 0 missing ABI symbols."""
+        so_path = Path("/usr/lib64/python3.14/site-packages/PIL/_imaging.cpython-314-x86_64-linux-gnu.so")
+        if not so_path.exists():
+            self.skipTest(f"PIL _imaging.so not found at {so_path}")
+
+        reflector = BinaryReflector()
+        meta = reflector.reflect_binary(so_path)
+        self.assertEqual(meta.name, "_imaging")
+        self.assertGreaterEqual(len(meta.methods), 50)
+        method_names = {m.name for m in meta.methods}
+        self.assertIn("alpha_composite", method_names)
+        self.assertIn("blend", method_names)
+        self.assertIn("convert", method_names)
+        self.assertIn("new", method_names)
+        self.assertIn("clear_cache", method_names)
+
 
 if __name__ == "__main__":
     unittest.main()

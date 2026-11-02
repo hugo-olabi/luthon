@@ -26,6 +26,7 @@ extern "C" {
 #endif
 
 typedef intptr_t Py_ssize_t;
+#define PY_SSIZE_T_MAX ((Py_ssize_t)(((size_t)-1) >> 1))
 
 /* Tagged union classification */
 typedef enum {
@@ -41,7 +42,8 @@ typedef enum {
     PY_TAG_MODULE,
     PY_TAG_OPAQUE,
     PY_TAG_SLICE,
-    PY_TAG_STREAM
+    PY_TAG_STREAM,
+    PY_TAG_CAPSULE
 } PyTag;
 
 /* Forward declarations */
@@ -58,13 +60,22 @@ typedef struct PyMethodDef {
     const char  *ml_doc;
 } PyMethodDef;
 
+/* PyModuleDef_Base matching CPython 3.x */
+typedef struct PyModuleDef_Base {
+    Py_ssize_t  ob_refcnt;
+    void       *ob_type;
+    void*     (*m_init)(void);
+    Py_ssize_t  m_index;
+    void       *m_copy;
+} PyModuleDef_Base;
+
 /* PyModuleDef */
 typedef struct PyModuleDef {
-    int          m_base;
-    const char  *m_name;
-    const char  *m_doc;
-    Py_ssize_t   m_size;
-    PyMethodDef *m_methods;
+    PyModuleDef_Base m_base;
+    const char      *m_name;
+    const char      *m_doc;
+    Py_ssize_t       m_size;
+    PyMethodDef     *m_methods;
 } PyModuleDef;
 
 /* PEP 3118 Buffer Protocol */
@@ -191,6 +202,18 @@ typedef struct {
     int is_readonly;
 } PyStreamObject;
 
+/* Capsule structure */
+typedef void (*PyCapsule_Destructor)(PyObject *);
+typedef struct {
+    Py_ssize_t ob_refcnt;
+    PyTypeObject *ob_type;
+    PyTag tag;
+    void *pointer;
+    const char *name;
+    void *context;
+    PyCapsule_Destructor destructor;
+} PyCapsuleObject;
+
 /* Tagged union PyObject */
 struct _object {
     Py_ssize_t ob_refcnt;
@@ -244,11 +267,25 @@ extern EXPORT PyTypeObject PyDict_Type;
 extern EXPORT PyTypeObject PyBool_Type;
 extern EXPORT PyTypeObject PySlice_Type;
 extern EXPORT PyTypeObject PyStream_Type;
+extern EXPORT PyTypeObject PyCapsule_Type;
 
 /* Global Singletons */
 extern EXPORT PyObject _Py_NoneStruct;
 extern EXPORT PyObject _Py_TrueStruct;
 extern EXPORT PyObject _Py_FalseStruct;
+
+/* Exception Singletons */
+extern EXPORT PyObject *PyExc_BaseException;
+extern EXPORT PyObject *PyExc_Exception;
+extern EXPORT PyObject *PyExc_BufferError;
+extern EXPORT PyObject *PyExc_IndexError;
+extern EXPORT PyObject *PyExc_MemoryError;
+extern EXPORT PyObject *PyExc_OSError;
+extern EXPORT PyObject *PyExc_OverflowError;
+extern EXPORT PyObject *PyExc_RuntimeError;
+extern EXPORT PyObject *PyExc_SystemError;
+extern EXPORT PyObject *PyExc_TypeError;
+extern EXPORT PyObject *PyExc_ValueError;
 
 #define Py_None  (&_Py_NoneStruct)
 #define Py_True  (&_Py_TrueStruct)
@@ -256,6 +293,14 @@ extern EXPORT PyObject _Py_FalseStruct;
 
 /* Core Object API */
 EXPORT PyObject* alloc_pyobject(PyTag tag, PyTypeObject *type);
+EXPORT PyObject* _PyObject_New(PyTypeObject *tp);
+EXPORT void _Py_Dealloc(PyObject *o);
+EXPORT void PyObject_Free(void *ptr);
+EXPORT int PyObject_Print(PyObject *op, FILE *fp, int flags);
+EXPORT int PyType_IsSubtype(PyTypeObject *a, PyTypeObject *b);
+EXPORT void* PyEval_SaveThread(void);
+EXPORT void PyEval_RestoreThread(void *tstate);
+EXPORT int PyOS_snprintf(char *str, size_t size, const char *format, ...);
 EXPORT void Py_IncRef(PyObject *o);
 EXPORT void Py_DecRef(PyObject *o);
 EXPORT int PyObject_IsTrue(PyObject *o);
@@ -293,18 +338,28 @@ EXPORT Py_ssize_t PyList_Size(PyObject *o);
 EXPORT PyObject* PyList_GetItem(PyObject *o, Py_ssize_t idx);
 EXPORT int PyList_SetItem(PyObject *o, Py_ssize_t idx, PyObject *item);
 EXPORT int PyList_Append(PyObject *op, PyObject *newitem);
+EXPORT int PyList_GetItemRef(PyObject *op, Py_ssize_t index, PyObject **result);
 
 EXPORT Py_ssize_t PySequence_Size(PyObject *s);
 EXPORT PyObject* PySequence_GetItem(PyObject *s, Py_ssize_t i);
 EXPORT int PySequence_SetItem(PyObject *s, Py_ssize_t i, PyObject *o);
+EXPORT int PySequence_Check(PyObject *s);
+EXPORT PyObject* PySequence_Fast(PyObject *o, const char *m);
+EXPORT int PyIndex_Check(PyObject *o);
+EXPORT int PyNumber_Check(PyObject *o);
+EXPORT Py_ssize_t PyNumber_AsSsize_t(PyObject *item, PyObject *err);
+EXPORT Py_ssize_t PyLong_AsSsize_t(PyObject *pylong);
 
 /* Mapping & Subscript Protocol API */
 EXPORT PyObject* PyDict_New(void);
 EXPORT int PyDict_SetItemString(PyObject *dp, const char *key, PyObject *item);
 EXPORT PyObject* PyDict_GetItemString(PyObject *dp, const char *key);
 EXPORT Py_ssize_t PyDict_Size(PyObject *dp);
+EXPORT int PyDict_GetItemRef(PyObject *p, PyObject *key, PyObject **result);
 
 EXPORT PyObject* PySlice_New(PyObject *start, PyObject *stop, PyObject *step);
+EXPORT int PySlice_Unpack(PyObject *r, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t *step);
+EXPORT Py_ssize_t PySlice_AdjustIndices(Py_ssize_t length, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t step);
 EXPORT PyObject* PyObject_GetItem(PyObject *o, PyObject *key);
 EXPORT int PyObject_SetItem(PyObject *o, PyObject *key, PyObject *v);
 EXPORT int PyObject_DelItem(PyObject *o, PyObject *key);
@@ -334,9 +389,21 @@ EXPORT const uint8_t* PyStream_GetBuffer(PyObject *stream, Py_ssize_t *size);
 /* Buffer Protocol API */
 EXPORT int PyObject_GetBuffer(PyObject *obj, Py_buffer *view, int flags);
 EXPORT void PyBuffer_Release(Py_buffer *view);
+EXPORT int PyObject_CheckBuffer(PyObject *obj);
+EXPORT int PyBytes_AsStringAndSize(PyObject *obj, char **s, Py_ssize_t *len);
+EXPORT int _PyBytes_Resize(PyObject **pv, Py_ssize_t newsize);
+EXPORT PyObject* PyUnicode_AsLatin1String(PyObject *unicode);
 
 /* Module & Argument Parsing API */
 EXPORT PyObject* PyModule_Create2(PyModuleDef *def, int apiver);
+EXPORT PyObject* PyModuleDef_Init(PyModuleDef *def);
+EXPORT PyObject* PyModule_GetDict(PyObject *mod);
+EXPORT int PyModule_AddObjectRef(PyObject *mod, const char *name, PyObject *value);
+EXPORT int PyModule_AddIntConstant(PyObject *mod, const char *name, long value);
+EXPORT Py_ssize_t PyObject_Size(PyObject *o);
+EXPORT PyObject* Py_BuildValue(const char *format, ...);
+EXPORT PyObject* PyObject_CallFunction(PyObject *callable, const char *format, ...);
+EXPORT PyObject* PyObject_CallMethod(PyObject *o, const char *name, const char *format, ...);
 EXPORT int PyArg_ParseTuple(PyObject *args, const char *fmt, ...);
 EXPORT int PyArg_ParseTupleAndKeywords(PyObject *args, PyObject *kwargs, const char *fmt, char **kwlist, ...);
 
@@ -344,6 +411,18 @@ EXPORT int PyArg_ParseTupleAndKeywords(PyObject *args, PyObject *kwargs, const c
 EXPORT void PyErr_SetString(PyObject *type, const char *message);
 EXPORT PyObject* PyErr_Occurred(void);
 EXPORT void PyErr_Clear(void);
+EXPORT PyObject* PyErr_Format(PyObject *exception, const char *format, ...);
+EXPORT PyObject* PyErr_NoMemory(void);
+EXPORT PyObject* PyErr_SetFromErrno(PyObject *exc);
+EXPORT int PyErr_ExceptionMatches(PyObject *exc);
+EXPORT void _PyErr_BadInternalCall(const char *filename, int lineno);
+
+/* Capsule API */
+EXPORT PyObject* PyCapsule_New(void *pointer, const char *name, PyCapsule_Destructor destructor);
+EXPORT int PyCapsule_IsValid(PyObject *op, const char *name);
+EXPORT void* PyCapsule_GetPointer(PyObject *op, const char *name);
+EXPORT void* PyCapsule_GetContext(PyObject *op);
+EXPORT int PyCapsule_SetContext(PyObject *op, void *context);
 
 /* Lifecycle API */
 EXPORT int Py_IsInitialized(void);

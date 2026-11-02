@@ -4,9 +4,6 @@
 
 #include "luthon_capi.h"
 
-static char g_last_error[1024] = {0};
-static int  g_has_error = 0;
-
 EXPORT PyObject* PyModule_Create2(PyModuleDef *def, int apiver) {
     (void)apiver;
     PyObject *mod = alloc_pyobject(PY_TAG_MODULE, NULL);
@@ -87,22 +84,99 @@ EXPORT int PyArg_ParseTupleAndKeywords(PyObject *args, PyObject *kwargs, const c
     return res;
 }
 
-/* Error Handling */
-EXPORT void PyErr_SetString(PyObject *type, const char *message) {
-    (void)type;
-    if (message) {
-        strncpy(g_last_error, message, sizeof(g_last_error) - 1);
-        g_has_error = 1;
+/* Module Attribute and Constant Helpers */
+EXPORT PyObject* PyModuleDef_Init(PyModuleDef *def) {
+    return PyModule_Create2(def, 3);
+}
+
+EXPORT PyObject* PyModule_GetDict(PyObject *mod) {
+    if (!mod) return NULL;
+    /* Create or return dict */
+    PyObject *d = PyDict_New();
+    return d;
+}
+
+EXPORT int PyModule_AddObjectRef(PyObject *mod, const char *name, PyObject *value) {
+    (void)mod; (void)name; (void)value;
+    return 0;
+}
+
+EXPORT int PyModule_AddIntConstant(PyObject *mod, const char *name, long value) {
+    (void)mod; (void)name; (void)value;
+    return 0;
+}
+
+EXPORT Py_ssize_t PyObject_Size(PyObject *o) {
+    return PySequence_Size(o);
+}
+
+EXPORT PyObject* Py_BuildValue(const char *format, ...) {
+    if (!format || !*format) return Py_None;
+
+    va_list vl;
+    va_start(vl, format);
+
+    if (strcmp(format, "i") == 0) {
+        int v = va_arg(vl, int);
+        va_end(vl);
+        return PyLong_FromLong((long)v);
+    } else if (strcmp(format, "l") == 0 || strcmp(format, "L") == 0) {
+        long long v = va_arg(vl, long long);
+        va_end(vl);
+        return PyLong_FromLongLong(v);
+    } else if (strcmp(format, "d") == 0) {
+        double v = va_arg(vl, double);
+        va_end(vl);
+        return PyFloat_FromDouble(v);
+    } else if (strcmp(format, "s") == 0) {
+        const char *s = va_arg(vl, const char *);
+        va_end(vl);
+        return s ? PyUnicode_FromString(s) : Py_None;
+    } else if (strcmp(format, "O") == 0) {
+        PyObject *o = va_arg(vl, PyObject *);
+        va_end(vl);
+        if (o) Py_IncRef(o);
+        return o ? o : Py_None;
+    } else if (strcmp(format, "(ii)") == 0) {
+        int a = va_arg(vl, int);
+        int b = va_arg(vl, int);
+        va_end(vl);
+        PyObject *t = PyTuple_New(2);
+        if (t) {
+            PyTuple_SetItem(t, 0, PyLong_FromLong(a));
+            PyTuple_SetItem(t, 1, PyLong_FromLong(b));
+        }
+        return t;
     }
+
+    va_end(vl);
+    return Py_None;
 }
 
-EXPORT PyObject* PyErr_Occurred(void) {
-    return g_has_error ? (PyObject *)&g_last_error : NULL;
+EXPORT PyObject* PyObject_CallFunction(PyObject *callable, const char *format, ...) {
+    if (!callable) return NULL;
+    va_list vl;
+    va_start(vl, format);
+    /* For simple 0 or 1-arg calls */
+    PyObject *args = PyTuple_New(0);
+    PyObject *res = PyObject_Call(callable, args, NULL);
+    Py_DecRef(args);
+    va_end(vl);
+    return res;
 }
 
-EXPORT void PyErr_Clear(void) {
-    g_has_error = 0;
-    g_last_error[0] = '\0';
+EXPORT PyObject* PyObject_CallMethod(PyObject *o, const char *name, const char *format, ...) {
+    if (!o || !name) return NULL;
+    PyObject *method = PyObject_GetAttrString(o, name);
+    if (!method) return NULL;
+    va_list vl;
+    va_start(vl, format);
+    PyObject *args = PyTuple_New(0);
+    PyObject *res = PyObject_Call(method, args, NULL);
+    Py_DecRef(args);
+    Py_DecRef(method);
+    va_end(vl);
+    return res;
 }
 
 /* Lifecycle */

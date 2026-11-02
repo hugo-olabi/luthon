@@ -50,3 +50,45 @@ EXPORT void PyBuffer_Release(Py_buffer *view) {
         view->obj = NULL;
     }
 }
+
+EXPORT int PyObject_CheckBuffer(PyObject *obj) {
+    if (!obj) return 0;
+    if (obj->tag == PY_TAG_BYTES || obj->tag == PY_TAG_STREAM) return 1;
+    if (obj->ob_type && obj->ob_type->tp_as_buffer) return 1;
+    return 0;
+}
+
+EXPORT int PyBytes_AsStringAndSize(PyObject *obj, char **s, Py_ssize_t *len) {
+    if (!obj || obj->tag != PY_TAG_BYTES) {
+        PyErr_SetString(PyExc_TypeError, "expected bytes object");
+        return -1;
+    }
+    if (s) *s = obj->as.str_val.data;
+    if (len) *len = obj->as.str_val.size;
+    return 0;
+}
+
+EXPORT int _PyBytes_Resize(PyObject **pv, Py_ssize_t newsize) {
+    if (!pv || !*pv || (*pv)->tag != PY_TAG_BYTES) {
+        PyErr_SetString(PyExc_TypeError, "expected bytes object");
+        return -1;
+    }
+    PyObject *v = *pv;
+    char *new_data = (char *)realloc(v->as.str_val.data, newsize + 1);
+    if (!new_data && newsize > 0) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    v->as.str_val.data = new_data;
+    v->as.str_val.size = newsize;
+    if (new_data) new_data[newsize] = '\0';
+    return 0;
+}
+
+EXPORT PyObject* PyUnicode_AsLatin1String(PyObject *unicode) {
+    if (!unicode || unicode->tag != PY_TAG_STR) {
+        PyErr_SetString(PyExc_TypeError, "expected str object");
+        return NULL;
+    }
+    return PyBytes_FromStringAndSize(unicode->as.str_val.data, unicode->as.str_val.size);
+}
