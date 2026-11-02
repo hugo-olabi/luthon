@@ -31,6 +31,9 @@ Requirements:
 luthon run script.py [args...]
 # Shorthand:
 luthon script.py [args...]
+
+# Run in pure mode (disables native Lua shims; uses pure Python, C stdlib, and C-API proxy):
+luthon script.py --pure
 ```
 
 ### 2. Transpile Python to Lua
@@ -38,6 +41,9 @@ luthon script.py [args...]
 ```bash
 # Transpile via optimizing IR backend
 luthon transpile input.py -o output.lua
+
+# Transpile with pure mode enabled
+luthon transpile input.py --pure -o output.lua
 
 # Transpile with full optimizations (CPA type inference, constant folding, DCE)
 luthon transpile input.py -O -o output.lua
@@ -114,9 +120,11 @@ source
 | `optimizer.py` | Optimizer | Constant folding, copy propagation, dead-code elimination, register pooling. |
 | `nyi.py` | JIT Diagnostics | Static NYI auditor, loop-invariant allocation hoisting, CData memory anchoring. |
 | `codegen.py` / `codegen.lua` | Code Generation | Emits LuaJIT gotos, labels, FFI structs, and class metatables. |
-| `stdlib.py` / `bootstrap.lua` | Runtime | Complete Lua runtime prelude implementing Python builtins and modules. |
+| `stdlib.py` / `bootstrap.lua` | Runtime | Complete Lua runtime prelude implementing Python builtins, async/await, and modules. |
+| `native/` (`libluthon_capi.so`) | C-API Proxy & Stdlib | Native C implementations for fast codecs, path resolution, memory PNG streaming, and CPython ABI proxy. |
+| `reflect.py` | Binary Reflection | Automatic inspection and LuaJIT FFI binding generator for precompiled C-extensions (`.so` / `.pyd`). |
 | `hpy.lua` | Native Interop | HPy Universal ABI trampoline and zero-copy NumPy array wrapping. |
-| `pybridge.lua` | Native Interop | Lazy CPython FFI bridge for transparent PyObject proxying. |
+| `pybridge.lua` | Native Interop | Lazy CPython FFI bridge for transparent PyObject proxying and NYI fallback reporting. |
 | `bundle.py` | Packager | Amalgamation builder for standalone executable bundles. |
 | `pip.py` | Package Manager | PyPI wheel resolver, universal wheel unpacker, and venv manager. |
 | `benchmarks.py` | Benchmarks | PyPerformance workload runner and performance comparison dashboard. |
@@ -129,6 +137,7 @@ source
 
 - Variables, multi-variable tuple unpacking (`a, b, c = 1, 2, 3`), and annotated assignments
 - Control flow: `if`, `elif`, `else`, `while`, `for` (over sequences, generators, ranges), `break`, `continue`
+- Asynchronous programming: `async def`, `await`, `async with`, `async for`, and native `asyncio.run` coroutine scheduling
 - Functions, default argument values, keyword arguments, nested functions, lambdas
 - Closures and cell boxing for captured variables
 - Classes, dataclasses (`@dataclass`), single and prototype inheritance, method dispatch
@@ -140,15 +149,22 @@ source
 - Vectorized mathematics: 2D `matrix` type with native `@` (`__matmul__`) operator support
 - f-strings, short-circuit boolean `and`/`or`, chained comparisons (`1 < x < 10`)
 - Negative sequence indexing (`s[-1]`) with Python parity
+- Zero-overhead native reflection and C-API proxy for compiled `.so` modules without requiring CPython
 
 ### Standard Library Modules in Lua
 
 | Module | Features Supported |
 | --- | --- |
-| `math` | All standard trigonometric, exponential, and rounding functions with FFI C bindings |
-| `os` / `os.path` | Environment variables, filesystem operations, path manipulation (`join`, `exists`, etc.) |
+| `math` | All standard trigonometric, exponential, power, and rounding functions with FFI C bindings |
+| `os` / `os.path` | Environment variables, filesystem operations, native zero-allocation path manipulation (`join`, `exists`, `basename`, `dirname`, etc.) |
 | `sys` | `argv` argument passing, `path`, `version`, `exit`, `stdout`, `stderr`, `stdin` |
 | `json` | Fast `dumps`, `loads`, `encode`, `decode` supporting nested structures and escapes |
+| `uuid` | RFC 4122 v4 UUID generator (`uuid.uuid4()`) |
+| `asyncio` | Native coroutine event runner (`asyncio.run()`, `asyncio.sleep()`, `asyncio.Future()`) |
+| `PIL` / `Pillow` | Native high-performance image buffers, libpng memory streaming, and `ImageOps.flip` |
+| `numpy` | Vectorized ndarrays, 2D channel views, swizzling, and `np.stack` |
+| `requests` | High-performance HTTP client via libcurl FFI with streaming `.raw` and `.json()` |
+| `websockets` | Native POSIX socket server with RFC 6455 framing and `websockets.serve` async context manager |
 | `re` | `match`, `search`, `sub`, `findall` mapped to Lua pattern matching |
 | `collections` | `deque`, `defaultdict`, `Counter`, `OrderedDict` |
 | `itertools` | `chain`, `product`, `permutations`, `combinations` |
@@ -159,7 +175,7 @@ source
 | `hashlib` | Direct FFI bindings to OpenSSL `libcrypto` (`sha256`, `md5`, `sha1`, `sha512`) |
 | `random` | `seed`, `random`, `randint`, `choice`, `shuffle`, `uniform` |
 | `datetime` | `date`, `time`, `datetime`, `timedelta` |
-| `base64` | `b64encode`, `b64decode` |
+| `base64` | Native SIMD-accelerated `b64encode`, `b64decode` |
 | `struct` | Binary packing and unpacking |
 
 ## Performance and Benchmarks
