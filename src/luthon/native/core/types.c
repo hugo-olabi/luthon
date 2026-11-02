@@ -17,6 +17,16 @@ EXPORT PyTypeObject PyDict_Type  = { 1, &Base_Type, "dict", sizeof(PyObject), 0,
 EXPORT PyTypeObject PyBool_Type  = { 1, &Base_Type, "bool", sizeof(PyObject), 0, NULL };
 EXPORT PyTypeObject PySlice_Type = { 1, &Base_Type, "slice", sizeof(PyObject), 0, NULL };
 EXPORT PyTypeObject PyStream_Type = { 1, &Base_Type, "BytesIO", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyBaseObject_Type = { 1, NULL, "object", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyComplex_Type = { 1, &Base_Type, "complex", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyCFunction_Type = { 1, &Base_Type, "builtin_function_or_method", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyDictProxy_Type = { 1, &Base_Type, "mappingproxy", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyGetSetDescr_Type = { 1, &Base_Type, "getset_descriptor", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyMemberDescr_Type = { 1, &Base_Type, "member_descriptor", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyMethodDescr_Type = { 1, &Base_Type, "method_descriptor", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyMemoryView_Type = { 1, &Base_Type, "memoryview", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PySet_Type = { 1, &Base_Type, "set", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject PyFrozenSet_Type = { 1, &Base_Type, "frozenset", sizeof(PyObject), 0, NULL };
 
 /* PyType_Ready: initializes type slots and inherits missing slots from tp_base */
 EXPORT int PyType_Ready(PyTypeObject *type) {
@@ -155,4 +165,94 @@ EXPORT PyObject* PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwa
 
 EXPORT PyObject* PyObject_CallObject(PyObject *callable, PyObject *args) {
     return PyObject_Call(callable, args, NULL);
+}
+
+/* Method Constructors & Type Flags */
+EXPORT PyObject* PyMethod_New(PyObject *func, PyObject *self) {
+    (void)self;
+    Py_IncRef(func);
+    return func;
+}
+
+EXPORT unsigned long PyType_GetFlags(PyTypeObject *type) {
+    return type ? type->tp_flags : 0;
+}
+
+EXPORT void PyType_Modified(PyTypeObject *type) {
+    (void)type;
+}
+
+EXPORT PyObject* PyType_GenericNew(PyTypeObject *type, PyObject *args, PyObject *kwds) {
+    (void)args; (void)kwds;
+    return _PyObject_New(type);
+}
+
+EXPORT PyObject* Py_GenericAlias(PyObject *origin, PyObject *args) {
+    (void)args;
+    Py_IncRef(origin);
+    return origin;
+}
+
+/* ContextVar Protocol */
+EXPORT PyObject* PyContextVar_New(const char *name, PyObject *default_value) {
+    PyObject *cv = alloc_pyobject(PY_TAG_OPAQUE, &Base_Type);
+    if (cv) cv->as.buf_val.ptr = default_value;
+    (void)name;
+    return cv;
+}
+
+EXPORT int PyContextVar_Get(PyObject *var, PyObject *default_value, PyObject **value) {
+    if (!value) return -1;
+    if (var && var->as.buf_val.ptr) {
+        *value = (PyObject *)var->as.buf_val.ptr;
+        Py_IncRef(*value);
+    } else if (default_value) {
+        *value = default_value;
+        Py_IncRef(*value);
+    } else {
+        *value = NULL;
+    }
+    return 0;
+}
+
+EXPORT PyObject* PyContextVar_Set(PyObject *var, PyObject *value) {
+    if (var) {
+        PyObject *old = (PyObject *)var->as.buf_val.ptr;
+        var->as.buf_val.ptr = value;
+        return old ? old : Py_None;
+    }
+    return Py_None;
+}
+
+/* Threading & Mutex Protocol */
+EXPORT void* PyThreadState_Get(void) {
+    return (void *)0x1000;
+}
+
+EXPORT void* PyInterpreterState_Main(void) {
+    return (void *)0x2000;
+}
+
+EXPORT int PyGILState_Ensure(void) {
+    return 1;
+}
+
+EXPORT void PyGILState_Release(int state) {
+    (void)state;
+}
+
+EXPORT void PyMutex_Lock(uint8_t *m) { (void)m; }
+EXPORT void PyMutex_Unlock(uint8_t *m) { (void)m; }
+
+EXPORT int Py_EnterRecursiveCall(const char *where) { (void)where; return 0; }
+EXPORT void Py_LeaveRecursiveCall(void) {}
+
+EXPORT int PyTraceMalloc_Track(unsigned int domain, uintptr_t ptr, size_t size) {
+    (void)domain; (void)ptr; (void)size;
+    return 0;
+}
+
+EXPORT int PyTraceMalloc_Untrack(unsigned int domain, uintptr_t ptr) {
+    (void)domain; (void)ptr;
+    return 0;
 }

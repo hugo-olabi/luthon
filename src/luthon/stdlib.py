@@ -77,7 +77,68 @@ pcall(function()
     } stat_t;
     int stat(const char *pathname, stat_t *statbuf);
     int mkdir(const char *pathname, unsigned int mode);
+
+    /* Luthon Native C Stdlib Declarations */
+    typedef struct {
+      int64_t current;
+      int64_t stop;
+      int64_t step;
+      int64_t length;
+    } LuthonRange;
+
+    LuthonRange luthon_range_init(int64_t start, int64_t stop, int64_t step);
+    bool        luthon_range_next(LuthonRange *r, int64_t *out_val);
+    int64_t     luthon_range_len(const LuthonRange *r);
+
+    int64_t     luthon_math_ipow(int64_t base, int64_t exp);
+    void        luthon_math_divmod(int64_t a, int64_t b, int64_t *out_div, int64_t *out_mod);
+
+    size_t      luthon_b64_decoded_size(const char *src, size_t src_len);
+    size_t      luthon_b64_decode(const char *src, size_t src_len, uint8_t *dst);
+    size_t      luthon_b64_encode(const uint8_t *src, size_t src_len, char *dst);
+
+    size_t      luthon_hex_decode(const char *src, size_t src_len, uint8_t *dst);
+    size_t      luthon_hex_encode(const uint8_t *src, size_t src_len, char *dst);
+
+    size_t      luthon_path_join(const char *p1, const char *p2, char *dst, size_t max_len);
+    const char* luthon_path_basename(const char *path);
+    size_t      luthon_path_dirname(const char *path, char *dst, size_t max_len);
+    bool        luthon_path_exists(const char *path);
+    bool        luthon_path_isdir(const char *path);
+    size_t      luthon_path_getsize(const char *path);
+
+    typedef struct {
+      int64_t start;
+      int64_t stop;
+      int64_t step;
+      int64_t length;
+    } LuthonSlice;
+
+    LuthonSlice luthon_slice_calc(int64_t length, int64_t start, int64_t stop, int64_t step, bool has_start, bool has_stop, bool has_step);
+    int         luthon_fast_memcmp(const void *s1, size_t n1, const void *s2, size_t n2);
+    int64_t     luthon_memfind(const void *haystack, size_t h_len, const void *needle, size_t n_len);
+
+    bool        luthon_png_read_mem(const uint8_t *data, size_t size, int *out_w, int *out_h, int *out_channels, uint8_t **out_buf);
+    bool        luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
+    void        luthon_png_free(void *ptr);
+    void        luthon_img_mer_to_orm_emission(const uint8_t *src_rgba, int w, int h, uint8_t *dst_orm_rgb, uint8_t *dst_em_l, bool *out_has_emission);
   ]]
+end)
+
+local _luthon_native_lib = nil
+pcall(function()
+  local candidates = {
+    "src/luthon/native/libluthon_capi.so",
+    "./libluthon_capi.so",
+    "libluthon_capi.so"
+  }
+  for _, cand in ipairs(candidates) do
+    local ok, lib = pcall(ffi.load, cand)
+    if ok and lib then
+      _luthon_native_lib = lib
+      break
+    end
+  end
 end)
 
 local _LUTHON_STAT_BUF = nil
@@ -506,6 +567,26 @@ function _luthon_cmp(op, a, b)
     if op == "==" or op == "eq" then return na == nb end
     if op == "~=" or op == "ne" then return na ~= nb end
   end
+  if type(a) == "table" then
+    local mta = getmetatable(a)
+    local cls = a.__class__ or (mta and (type(mta.__index) == "table" and mta.__index or mta))
+    if type(cls) == "table" then
+      if (op == "<" or op == "lt") and type(cls.__lt__) == "function" then return cls.__lt__(a, b) end
+      if (op == "<=" or op == "le") and type(cls.__le__) == "function" then return cls.__le__(a, b) end
+      if (op == ">" or op == "gt") and type(cls.__gt__) == "function" then return cls.__gt__(a, b) end
+      if (op == ">=" or op == "ge") and type(cls.__ge__) == "function" then return cls.__ge__(a, b) end
+    end
+  end
+  if type(b) == "table" then
+    local mtb = getmetatable(b)
+    local cls = b.__class__ or (mtb and (type(mtb.__index) == "table" and mtb.__index or mtb))
+    if type(cls) == "table" then
+      if (op == "<" or op == "lt") and type(cls.__gt__) == "function" then return cls.__gt__(b, a) end
+      if (op == "<=" or op == "le") and type(cls.__ge__) == "function" then return cls.__ge__(b, a) end
+      if (op == ">" or op == "gt") and type(cls.__lt__) == "function" then return cls.__lt__(b, a) end
+      if (op == ">=" or op == "ge") and type(cls.__le__) == "function" then return cls.__le__(b, a) end
+    end
+  end
   if op == "<" or op == "lt" then return a < b end
   if op == "<=" or op == "le" then return a <= b end
   if op == ">" or op == "gt" then return a > b end
@@ -609,10 +690,23 @@ end
 function range(a, b, step)
   if b == nil then a, b = 0, a; step = 1 end
   if step == nil then step = 1 end
+  if _luthon_native_lib ~= nil then
+    local r_struct = _luthon_native_lib.luthon_range_init(a, b, step)
+    local n = tonumber(r_struct.length)
+    local r = {}
+    local val_buf = ffi.new("int64_t[1]")
+    local idx = 1
+    while _luthon_native_lib.luthon_range_next(r_struct, val_buf) do
+      r[idx] = tonumber(val_buf[0])
+      idx = idx + 1
+    end
+    rawset(r, "_len", n)
+    return setmetatable(r, _list_mt)
+  end
   local r = {}
   if step > 0 then for i = a, b - 1, step do r[#r+1] = i end
   else for i = a, b + 1, step do r[#r+1] = i end end
-  return r
+  return setmetatable(r, _list_mt)
 end
 function len(t)
   if t == nil then return 0 end
@@ -1200,15 +1294,40 @@ object = object or { __name__ = "object" }
 _G["exec"] = _G["exec"] or function(...) end
 __name__ = __name__ or "__main__"
 os.path = os.path or {}
-os.path.join = function(...) local a={...}; return table.concat(a, "/") end
-os.path.dirname = os.path.dirname or function(p)
+local _PATH_BUF = ffi.new("char[1024]")
+os.path.join = function(...)
+  local n = select("#", ...)
+  if n == 0 then return "" end
+  if _luthon_native_lib ~= nil then
+    local cur = tostring(select(1, ...) or "")
+    for i = 2, n do
+      local part = tostring(select(i, ...) or "")
+      local written = _luthon_native_lib.luthon_path_join(cur, part, _PATH_BUF, 1024)
+      cur = ffi.string(_PATH_BUF, written)
+    end
+    return cur
+  end
+  local a = {...}
+  return table.concat(a, "/")
+end
+
+os.path.dirname = function(p)
   p = tostring(p or "")
+  if _luthon_native_lib ~= nil then
+    local written = _luthon_native_lib.luthon_path_dirname(p, _PATH_BUF, 1024)
+    return ffi.string(_PATH_BUF, written)
+  end
   local dir = p:match("^(.*)/[^/]*$")
   if dir == "" then return "/" end
   return dir or "."
 end
-os.path.basename = os.path.basename or function(p)
+
+os.path.basename = function(p)
   p = tostring(p or "")
+  if _luthon_native_lib ~= nil then
+    local ptr = _luthon_native_lib.luthon_path_basename(p)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end
   return p:match("^.*/([^/]*)$") or p
 end
 os.path.splitext = os.path.splitext or function(p)
@@ -1241,6 +1360,9 @@ end
 os.path.exists = os.path.exists or function(p)
   p = tostring(p or "")
   if p == "" then return false end
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_exists(p)
+  end
   if _LUTHON_STAT_BUF ~= nil then
     return ffi.C.stat(p, _LUTHON_STAT_BUF) == 0
   end
@@ -1260,6 +1382,9 @@ end
 os.path.isdir = os.path.isdir or function(p)
   p = tostring(p or "")
   if p == "" then return false end
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_isdir(p)
+  end
   if _LUTHON_STAT_BUF ~= nil and ffi.C.stat(p, _LUTHON_STAT_BUF) == 0 then
     local bit_ok, bit_mod = pcall(require, "bit")
     if bit_ok and bit_mod then
@@ -1823,8 +1948,12 @@ base64.b64encode = function(data)
   local len = #data
   if len == 0 then return "" end
 
-  if _b64_ffi_ok and _b64_bit_ok then
+  if _luthon_native_lib ~= nil then
     local max_out = math.floor((len + 2) / 3) * 4 + 4
+    local buf = ffi.new("char[?]", max_out)
+    local n = _luthon_native_lib.luthon_b64_encode(ffi.cast("const uint8_t*", data), len, buf)
+    return ffi.string(buf, n)
+  elseif _b64_ffi_ok and _b64_bit_ok then
     local buf = _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local out_pos = 0
@@ -1887,8 +2016,12 @@ base64.b64decode = function(data)
   local len = #data
   if len == 0 then return "" end
 
-  if _b64_ffi_ok and _b64_bit_ok then
+  if _luthon_native_lib ~= nil then
     local max_out = math.floor(len * 3 / 4) + 4
+    local buf = ffi.new("uint8_t[?]", max_out)
+    local n = _luthon_native_lib.luthon_b64_decode(data, len, buf)
+    return ffi.string(buf, n)
+  elseif _b64_ffi_ok and _b64_bit_ok then
     local buf = _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local quad_idx = 0
@@ -2364,38 +2497,40 @@ local function _get_cjson()
   return nil
 end
 
-local function _cjson_node_to_lua(node, ffi_mod)
+local function _cjson_node_to_lua(node, ffi_str_fn)
   if node == nil then return nil end
   local t = node.type
+  if t >= 256 then t = t % 256 end
+
   if t == 16 then -- cJSON_String
-    return ffi_mod.string(node.valuestring)
+    return ffi_str_fn(node.valuestring)
   elseif t == 8 then -- cJSON_Number
     return node.valuedouble
+  elseif t == 64 then -- cJSON_Object
+    local obj = {}
+    local curr = node.child
+    while curr ~= nil do
+      obj[ffi_str_fn(curr.string)] = _cjson_node_to_lua(curr, ffi_str_fn)
+      curr = curr.next
+    end
+    return obj
+  elseif t == 32 then -- cJSON_Array
+    local arr = {}
+    local curr = node.child
+    local idx = 1
+    while curr ~= nil do
+      arr[idx] = _cjson_node_to_lua(curr, ffi_str_fn)
+      idx = idx + 1
+      curr = curr.next
+    end
+    rawset(arr, "_len", idx - 1)
+    return arr
   elseif t == 2 then -- cJSON_True
     return true
   elseif t == 1 then -- cJSON_False
     return false
   elseif t == 4 then -- cJSON_NULL
     return nil
-  elseif t == 32 then -- cJSON_Array
-    local arr = {}
-    local curr = node.child
-    local idx = 1
-    while curr ~= nil do
-      arr[idx] = _cjson_node_to_lua(curr, ffi_mod)
-      idx = idx + 1
-      curr = curr.next
-    end
-    rawset(arr, "_len", idx - 1)
-    return arr
-  elseif t == 64 then -- cJSON_Object
-    local obj = {}
-    local curr = node.child
-    while curr ~= nil do
-      obj[ffi_mod.string(curr.string)] = _cjson_node_to_lua(curr, ffi_mod)
-      curr = curr.next
-    end
-    return obj
   end
   return nil
 end
@@ -2406,7 +2541,8 @@ json.decode = function(s)
   if cj ~= nil then
     local root = cj.lib.cJSON_Parse(s)
     if root ~= nil then
-      local res = _cjson_node_to_lua(root, cj.ffi)
+      local ffi_str_fn = cj.ffi.string
+      local res = _cjson_node_to_lua(root, ffi_str_fn)
       cj.lib.cJSON_Delete(root)
       return res
     end

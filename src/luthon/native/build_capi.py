@@ -25,7 +25,7 @@ def get_source_files() -> List[Path]:
     """Collects all modular C source files under src/luthon/native/."""
     native_dir = Path(__file__).parent.resolve()
     sources = []
-    for sub in ["core", "protocols", "io", "modules"]:
+    for sub in ["core", "protocols", "io", "modules", "stdlib"]:
         sub_dir = native_dir / sub
         if sub_dir.exists():
             sources.extend(sorted(sub_dir.glob("*.c")))
@@ -71,6 +71,16 @@ def compile_capi_proxy(force: bool = False) -> Path:
         "-fvisibility=default",
     ]
 
+    # Check if libpng is available and add flags
+    ldflags = ["-shared", "-fPIC"]
+    try:
+        png_cflags = subprocess.check_output(["pkg-config", "--cflags", "libpng"], text=True).strip().split()
+        png_libs = subprocess.check_output(["pkg-config", "--libs", "libpng"], text=True).strip().split()
+        cflags.extend(png_cflags)
+        ldflags.extend(png_libs)
+    except Exception:
+        ldflags.append("-lpng")
+
     obj_files = []
     # 1. Compile each translation unit to .o
     for src in sources:
@@ -88,7 +98,7 @@ def compile_capi_proxy(force: bool = False) -> Path:
             raise RuntimeError(f"Failed to compile {src}: {e.stderr}\nCommand: {' '.join(cmd)}")
 
     # 2. Link shared library libluthon_capi.so
-    link_cmd = [cc, "-shared", "-fPIC"] + [str(o) for o in obj_files] + ["-o", str(lib_path)]
+    link_cmd = [cc] + ldflags + [str(o) for o in obj_files] + ["-o", str(lib_path)]
     try:
         subprocess.run(link_cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:

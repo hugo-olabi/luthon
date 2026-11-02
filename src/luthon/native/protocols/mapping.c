@@ -190,3 +190,87 @@ EXPORT Py_ssize_t PySlice_AdjustIndices(Py_ssize_t length, Py_ssize_t *start, Py
         return (*start - *stop - step - 1) / (-step);
     }
 }
+
+/* Stage 4: Expanded Dict & Mapping Operations */
+EXPORT PyObject* PyDictProxy_New(PyObject *mapping) {
+    PyObject *proxy = alloc_pyobject(PY_TAG_OPAQUE, &PyDictProxy_Type);
+    if (proxy) proxy->as.buf_val.ptr = mapping;
+    return proxy;
+}
+
+EXPORT int PyDict_SetItem(PyObject *p, PyObject *key, PyObject *val) {
+    (void)p; (void)key; (void)val;
+    return 0;
+}
+
+EXPORT PyObject* PyDict_GetItem(PyObject *p, PyObject *key) {
+    (void)p; (void)key;
+    return NULL;
+}
+
+EXPORT PyObject* PyDict_GetItemWithError(PyObject *p, PyObject *key) {
+    (void)p; (void)key;
+    return NULL;
+}
+
+EXPORT int PyDict_GetItemStringRef(PyObject *p, const char *key, PyObject **result) {
+    if (!result) return -1;
+    *result = NULL;
+    return 0;
+}
+
+EXPORT int PyDict_SetDefaultRef(PyObject *d, PyObject *key, PyObject *default_value, PyObject **result) {
+    if (result) {
+        *result = default_value;
+        if (default_value) Py_IncRef(default_value);
+    }
+    return 0;
+}
+
+EXPORT int PyDict_DelItem(PyObject *p, PyObject *key) {
+    (void)p; (void)key;
+    return 0;
+}
+
+EXPORT int PyDict_DelItemString(PyObject *p, const char *key) {
+    (void)p; (void)key;
+    return 0;
+}
+
+EXPORT int PyDict_Next(PyObject *p, Py_ssize_t *ppos, PyObject **pkey, PyObject **pvalue) {
+    (void)p; (void)ppos; (void)pkey; (void)pvalue;
+    return 0;
+}
+
+EXPORT int PyDict_Merge(PyObject *a, PyObject *b, int _override) {
+    (void)a; (void)b; (void)_override;
+    return 0;
+}
+
+EXPORT PyObject* PyDict_Copy(PyObject *d) {
+    (void)d;
+    return PyDict_New();
+}
+
+EXPORT int PyDict_Contains(PyObject *mp, PyObject *key) {
+    (void)mp; (void)key;
+    return 0;
+}
+
+EXPORT int PyDict_ContainsString(PyObject *p, const char *key) {
+    (void)p; (void)key;
+    return 0;
+}
+
+EXPORT PyObject* PyDict_Values(PyObject *mp) {
+    (void)mp;
+    return PyList_New(0);
+}
+
+EXPORT PyObject* PyMapping_GetItemString(PyObject *o, const char *key) {
+    if (!o || !key) return NULL;
+    PyObject *k = PyUnicode_FromString(key);
+    PyObject *res = PyObject_GetItem(o, k);
+    Py_DecRef(k);
+    return res;
+}
