@@ -146,14 +146,40 @@ end
 local native_shims = {
   zlib = "src/luthon/lua/native/zlib",
   sqlite3 = "src/luthon/lua/native/sqlite3",
+  numpy = "src/luthon/lua/native/numpy",
+  ["PIL.Image"] = "src/luthon/lua/native/PIL/Image",
+  ["PIL"] = "src/luthon/lua/native/PIL/init",
 }
 
 function M.find_native_shim(name)
-  local path = native_shims[name]
-  if path then
-    local ok, mod = pcall(require, path)
-    if ok and mod then return mod end
+  local rel = native_shims[name]
+  if not rel then return nil end
+
+  local home = os.getenv("HOME") or ""
+  local cand_bases = {
+    ".",
+    "src/luthon/lua",
+    home .. "/Projects/luthon",
+    home .. "/Projects/luthon/.claude/worktrees/native-shims",
+  }
+
+  -- Try direct require first
+  local ok, mod = pcall(require, rel)
+  if ok and mod then return mod end
+
+  for _, base in ipairs(cand_bases) do
+    local fpath = base .. "/" .. rel .. ".lua"
+    local f = io.open(fpath, "r")
+    if f then
+      f:close()
+      local chunk = loadfile(fpath)
+      if chunk then
+        local ok2, res = pcall(chunk)
+        if ok2 and res then return res end
+      end
+    end
   end
+
   return nil
 end
 

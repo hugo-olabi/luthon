@@ -435,6 +435,43 @@ print("NUMPY_CAPI_REFLECTION_PASSED")
         self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
         self.assertIn("NUMPY_CAPI_REFLECTION_PASSED", res.stdout)
 
+    def test_native_numpy_and_pillow_shims(self):
+        """Verify native numpy and PIL.Image shims operate without pybridge CPython fallback."""
+        script = """
+        package.path = "./src/?.lua;./src/luthon/lua/?.lua;./src/luthon/lua/native/?.lua;" .. package.path
+        require("bootstrap")
+        local modules = require("modules")
+        local np = modules.load("numpy")
+        local Image = modules.load("PIL.Image")
+        assert(np, "numpy shim must be loaded")
+        assert(Image, "PIL.Image shim must be loaded")
+
+        local arr = np.array({10, 20, 30})
+        assert(arr.ndim == 1, "arr ndim must be 1")
+        assert(arr.shape[1] == 3, "arr length must be 3")
+
+        local cond = _luthon_cmp(">", arr, 15)
+        assert(np.any(cond) == true, "np.any(arr > 15) must be true")
+
+        local c0 = np.array({1, 2})
+        local c1 = np.array({3, 4})
+        local c2 = np.array({5, 6})
+        c0.shape = {1, 2}; c0.strides = {2, 1}; c0.ndim = 2
+        c1.shape = {1, 2}; c1.strides = {2, 1}; c1.ndim = 2
+        c2.shape = {1, 2}; c2.strides = {2, 1}; c2.ndim = 2
+        local stacked = np.stack({c0, c1, c2}, -1)
+        assert(stacked.ndim == 3, "stacked must be 3D")
+        assert(stacked.shape[3] == 3, "stacked channels must be 3")
+
+        local im = Image.fromarray(stacked, "RGB")
+        assert(im.mode == "RGB", "im mode must be RGB")
+        assert(im.size[1] == 2 and im.size[2] == 1, "im size must be (2, 1)")
+        print("NATIVE_NUMPY_AND_PILLOW_SHIMS_OK")
+        """
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("NATIVE_NUMPY_AND_PILLOW_SHIMS_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
