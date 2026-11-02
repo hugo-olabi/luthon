@@ -257,13 +257,45 @@ def eliminate_dead_code_function(fn: Function) -> bool:
     return changed
 
 
-def allocate_registers_function(fn: Function) -> bool:
-    """Pool virtual temporaries into a bounded set of registers via CFG liveness analysis.
+def allocate_registers_function(fn: Function, max_local_registers: int = 140) -> bool:
+    """Pool virtual temporaries and local variables into a bounded set of registers via CFG liveness analysis.
 
-    Prevents large functions from exceeding LuaJIT's 200 local variable limit (LUAI_MAXVARS).
+    Prevents large functions from exceeding LuaJIT's 200 local variable limit (LUAI_MAXVARS = 200).
+    Guarantees 0 global variable leaks by reusing register slots across disjoint live ranges.
+    If the chromatic number exceeds max_local_registers, extra slots spill into `_spill[...]`.
     """
-    all_tmps = set(fn.tmps)
-    if not all_tmps:
+    # 0. Identify candidate variables for pooling
+    # Parameters, cellvars, upvalues, and nonlocals must retain fixed lexical bindings.
+    protected: Set[str] = set(fn.params or [])
+    protected.update(getattr(fn, "cellvars", []) or [])
+    protected.update(getattr(fn, "upvalues", []) or [])
+    protected.update(getattr(fn, "freevars", []) or [])
+    protected.update(getattr(fn, "nonlocals", []) or [])
+    protected.update({"...", "self", "_exc", "_exc_matched", "_luthon_ret_val", "_luthon_has_ret"})
+
+    # Collect temporaries and eligible locals
+    poolable: Set[str] = set()
+    for t in getattr(fn, "tmps", []):
+        if t not in protected:
+            poolable.add(t)
+
+    # For functions (except entry point / main when module-level globals are used),
+    # local variables can also be pooled if not protected.
+    if not getattr(fn, "is_entry_point", False):
+        for l in getattr(fn, "locals", []):
+            if l not in protected and not l.startswith("__"):
+                poolable.add(l)
+
+    # Also scan instructions for any undeclared _t... or _r... temporaries
+    for b in fn.blocks:
+        for ins in b.instrs:
+            if ins.result and (ins.result.startswith("_t") or ins.result.startswith("_r")) and ins.result not in protected:
+                poolable.add(ins.result)
+            for a in ins.args:
+                if isinstance(a, str) and (a.startswith("_t") or a.startswith("_r")) and a not in protected:
+                    poolable.add(a)
+
+    if not poolable:
         return False
 
     # 1. Build CFG successor graph
@@ -284,6 +316,10 @@ def allocate_registers_function(fn: Function) -> bool:
                 succs[b.label].add(ins.args[1])
                 if idx + 1 < len(fn.blocks):
                     succs[b.label].add(fn.blocks[idx + 1].label)
+            elif ins.op in ("BRANCH_TRUE", "BRANCH_FALSE") and len(ins.args) >= 2:
+                succs[b.label].add(ins.args[1])
+                if idx + 1 < len(fn.blocks):
+                    succs[b.label].add(fn.blocks[idx + 1].label)
         if last.op not in ("JUMP", "RETURN") and idx + 1 < len(fn.blocks):
             succs[b.label].add(fn.blocks[idx + 1].label)
 
@@ -294,20 +330,32 @@ def allocate_registers_function(fn: Function) -> bool:
         defs: Set[str] = set()
         uses: Set[str] = set()
         for ins in b.instrs:
-            for arg in ins.args:
-                if isinstance(arg, str) and arg in all_tmps:
-                    if arg not in defs:
-                        uses.add(arg)
-                elif isinstance(arg, (list, tuple)):
-                    for sub in arg:
-                        if isinstance(sub, str) and sub in all_tmps and sub not in defs:
+            # STORE: args[0] is defined, args[1] is used
+            if ins.op == "STORE" and len(ins.args) >= 2:
+                target, val = ins.args[0], ins.args[1]
+                if isinstance(val, str) and val in poolable and val not in defs:
+                    uses.add(val)
+                elif isinstance(val, (list, tuple)):
+                    for sub in val:
+                        if isinstance(sub, str) and sub in poolable and sub not in defs:
                             uses.add(sub)
-            if ins.result and ins.result in all_tmps:
-                defs.add(ins.result)
+                if isinstance(target, str) and target in poolable:
+                    defs.add(target)
+            else:
+                for arg in ins.args:
+                    if isinstance(arg, str) and arg in poolable:
+                        if arg not in defs:
+                            uses.add(arg)
+                    elif isinstance(arg, (list, tuple)):
+                        for sub in arg:
+                            if isinstance(sub, str) and sub in poolable and sub not in defs:
+                                uses.add(sub)
+                if ins.result and ins.result in poolable:
+                    defs.add(ins.result)
         b_def[b.label] = defs
         b_use[b.label] = uses
 
-    # 3. Fixed-point liveness analysis
+    # 3. Fixed-point backward liveness analysis
     live_in: Dict[str, Set[str]] = {b.label: set() for b in fn.blocks}
     live_out: Dict[str, Set[str]] = {b.label: set() for b in fn.blocks}
     changed = True
@@ -330,52 +378,106 @@ def allocate_registers_function(fn: Function) -> bool:
                 changed = True
 
     # 4. Build interference graph
-    adj: Dict[str, Set[str]] = {t: set() for t in all_tmps}
+    adj: Dict[str, Set[str]] = {t: set() for t in poolable}
     for b in fn.blocks:
         live = set(live_out[b.label])
         for ins in reversed(b.instrs):
-            if ins.result and ins.result in all_tmps:
-                live.discard(ins.result)
-                for other in live:
-                    if other in all_tmps:
-                        adj[ins.result].add(other)
-                        adj[other].add(ins.result)
-            for arg in ins.args:
-                if isinstance(arg, str) and arg in all_tmps:
-                    live.add(arg)
-                elif isinstance(arg, (list, tuple)):
-                    for sub in arg:
-                        if isinstance(sub, str) and sub in all_tmps:
+            if ins.op == "STORE" and len(ins.args) >= 2:
+                target, val = ins.args[0], ins.args[1]
+                if isinstance(target, str) and target in poolable:
+                    live.discard(target)
+                    for other in live:
+                        if other in poolable and other != target:
+                            adj[target].add(other)
+                            adj[other].add(target)
+                if isinstance(val, str) and val in poolable:
+                    live.add(val)
+                elif isinstance(val, (list, tuple)):
+                    for sub in val:
+                        if isinstance(sub, str) and sub in poolable:
                             live.add(sub)
+            else:
+                if ins.result and ins.result in poolable:
+                    live.discard(ins.result)
+                    for other in live:
+                        if other in poolable and other != ins.result:
+                            adj[ins.result].add(other)
+                            adj[other].add(ins.result)
+                for arg in ins.args:
+                    if isinstance(arg, str) and arg in poolable:
+                        live.add(arg)
+                    elif isinstance(arg, (list, tuple)):
+                        for sub in arg:
+                            if isinstance(sub, str) and sub in poolable:
+                                live.add(sub)
 
-    # 5. Greedy graph coloring
+    # 5. Greedy graph coloring (Welsh-Powell degree ordering)
     colors: Dict[str, int] = {}
-    for t in sorted(all_tmps, key=lambda x: (len(adj[x]), x), reverse=True):
+    for t in sorted(poolable, key=lambda x: (len(adj[x]), x), reverse=True):
         neighbor_colors = {colors[nbr] for nbr in adj[t] if nbr in colors}
         color = 1
         while color in neighbor_colors:
             color += 1
         colors[t] = color
 
-    reg_map = {t: f"_r{color}" for t, color in colors.items()}
+    # 6. Map colored variables to physical Lua registers (_r1 .. _rK) or spill slots
+    reg_map: Dict[str, str] = {}
+    has_spill = False
+    for t, color in colors.items():
+        if color <= max_local_registers:
+            reg_map[t] = f"_r{color}"
+        else:
+            has_spill = True
+            spill_idx = color - max_local_registers
+            reg_map[t] = f"_spill[{spill_idx}]"
 
-    # 6. Rewrite instructions to use pooled registers
+    # 7. Rewrite instructions to use pooled registers / spill slots
     for b in fn.blocks:
         for ins in b.instrs:
-            if ins.result and ins.result in reg_map:
-                ins.result = reg_map[ins.result]
-            new_args = []
-            for arg in ins.args:
-                if isinstance(arg, str) and arg in reg_map:
-                    new_args.append(reg_map[arg])
-                elif isinstance(arg, (list, tuple)):
-                    new_args.append([reg_map.get(sub, sub) if isinstance(sub, str) else sub for sub in arg])
-                else:
-                    new_args.append(arg)
-            ins.args = new_args
+            if ins.op == "STORE" and len(ins.args) >= 2:
+                target = ins.args[0]
+                val = ins.args[1]
+                new_target = reg_map.get(target, target) if isinstance(target, str) else target
+                new_val = reg_map.get(val, val) if isinstance(val, str) else val
+                ins.args[0] = new_target
+                ins.args[1] = new_val
+            elif ins.op in ("BINOP", "CMP", "UNOP") and ins.args:
+                # In BINOP/CMP/UNOP, args[0] is the operator name (e.g. "add", "eq", "neg").
+                # It must NOT be rewritten even if it happens to match a variable name!
+                if ins.result and ins.result in reg_map:
+                    ins.result = reg_map[ins.result]
+                new_args = [ins.args[0]]
+                for arg in ins.args[1:]:
+                    if isinstance(arg, str) and arg in reg_map:
+                        new_args.append(reg_map[arg])
+                    elif isinstance(arg, (list, tuple)):
+                        new_args.append([reg_map.get(sub, sub) if isinstance(sub, str) else sub for sub in arg])
+                    else:
+                        new_args.append(arg)
+                ins.args = new_args
+            else:
+                if ins.result and ins.result in reg_map:
+                    ins.result = reg_map[ins.result]
+                new_args = []
+                for arg in ins.args:
+                    if isinstance(arg, str) and arg in reg_map:
+                        new_args.append(reg_map[arg])
+                    elif isinstance(arg, (list, tuple)):
+                        new_args.append([reg_map.get(sub, sub) if isinstance(sub, str) else sub for sub in arg])
+                    else:
+                        new_args.append(arg)
+                ins.args = new_args
 
-    max_c = max(colors.values()) if colors else 0
+    max_c = min(max(colors.values()) if colors else 0, max_local_registers)
     fn.tmps = [f"_r{i}" for i in range(1, max_c + 1)]
+    if has_spill:
+        fn.tmps.append("_spill")
+        # Initialize _spill = {} at entry block if spilled
+        if fn.blocks and fn.blocks[0].instrs:
+            fn.blocks[0].instrs.insert(0, Instr(op="MAKE_TABLE", args=[], result="_spill"))
+
+    # Remove remapped variables from fn.locals so they don't produce redundant local declarations
+    fn.locals = [l for l in getattr(fn, "locals", []) if l not in reg_map]
     return True
 
 

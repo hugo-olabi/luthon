@@ -10,7 +10,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 
 | Milestone | Subsystem | Focus Area | Status | Target |
 |:---|:---|:---|:---:|:---:|
-| **Phase 29** | Optimization & Codegen | Register Allocation & Local Variable Slot Reuse | [ ] | 0/4 |
+| **Phase 29** | Optimization & Codegen | Register Allocation & Local Variable Slot Reuse | [x] | 4/4 |
 | **Phase 30** | Codegen & Runtime | Direct Subscript & Comparison Specialization | [ ] | 0/4 |
 | **Phase 31** | Classical SSA Optimizer | Loop-Invariant Code Motion (LICM) & CSE | [ ] | 0/4 |
 | **Phase 32** | Native C-API Proxy | Full Slot Dispatch (`tp_iternext`, `tp_richcompare`, `tp_hash`) | [ ] | 0/4 |
@@ -25,10 +25,10 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 ## Phase 29 — Register Allocation & Local Variable Slot Reuse (LuaJIT 200-Local Limit Eliminator)
 *Target: Eliminate the fallback to global variables when functions exceed 150 variables by implementing live-range register allocation.*
 
-- [ ] **Liveness Analysis Pass**: Implement backward live-variable analysis in `src/luthon/optimizer.py` computing `live_in` and `live_out` bitsets for every basic block and instruction.
-- [ ] **Chaitin-Briggs Graph Coloring / Linear Scan Allocator**: Map temporary variables (`_t1`, `_t2`, etc.) with disjoint live ranges to a shared pool of physical Lua local register slots.
-- [ ] **Codegen Local Guarantee**: Update `src/luthon/codegen.py` to declare physical register slots as locals, ensuring large non-trivial functions (1,000+ IR instructions) fit well below LuaJIT's 200-local variable ceiling.
-- [ ] **Performance Verification**: Measure bytecode generation and trace compilation on complex functions to verify 0 global variable fallback occurrences.
+- [x] **Liveness Analysis Pass**: Implement backward live-variable analysis in `src/luthon/optimizer.py` computing `live_in` and `live_out` bitsets for every basic block and instruction.
+- [x] **Chaitin-Briggs Graph Coloring / Linear Scan Allocator**: Map temporary variables (`_t1`, `_t2`, etc.) with disjoint live ranges to a shared pool of physical Lua local register slots.
+- [x] **Codegen Local Guarantee**: Update `src/luthon/codegen.py` to declare physical register slots as locals, ensuring large non-trivial functions (1,000+ IR instructions) fit well below LuaJIT's 200-local variable ceiling.
+- [x] **Performance Verification**: Measure bytecode generation and trace compilation on complex functions to verify 0 global variable fallback occurrences.
 
 ---
 

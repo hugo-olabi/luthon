@@ -176,8 +176,13 @@ def generate(module, sourcemap=None):
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
     builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__"}
-    # Hoist module-level locals that are captured as upvalues
+    # Hoist module-level and cross-function locals that are captured as upvalues
     hoisted_set = set()
+    if all_upvalues:
+        hoisted = [uv for uv in sorted(all_upvalues) if uv not in builtins and uv not in classes]
+        if hoisted:
+            out.append("local " + ", ".join(hoisted))
+            hoisted_set = set(hoisted)
     for fn in module.functions:
         if "." in fn.name:
             prefix, meth = fn.name.split(".", 1)
@@ -246,15 +251,25 @@ def generate(module, sourcemap=None):
             ins.args = exclusive
             try_exclusive_all.update(exclusive)
 
+        # Ensure register allocation is applied if variables threaten LuaJIT's 200 local limit
+        total_var_count = len(locs) + len(getattr(fn, "tmps", []))
+        if total_var_count > 100:
+            try:
+                from .optimizer import allocate_registers_function
+                allocate_registers_function(fn)
+                locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set and l not in param_set]
+            except Exception:
+                pass
+
         tmps = [t for t in getattr(fn, "tmps", []) if t not in locs and t not in param_set and t not in _classes and t not in try_exclusive_all]
-        # Declare tmps as locals only when the count is small enough to avoid LuaJIT's 200-local limit.
-        # Recursive functions (fib, binarytrees) need local tmps; large non-recursive main() can use globals.
-        if len(locs) + len(tmps) <= 150:
-            allvars = locs + tmps
-            if allvars:
-                out.append("  local " + ", ".join(allvars))
-        elif locs:
-            out.append("  local " + ", ".join(locs))
+        # Guarantee all variables are declared local to prevent global leaks,
+        # trace aborts, and variable clobbering across re-entrancy.
+        allvars = locs + tmps
+        if allvars:
+            # Chunk declarations in batches if large
+            for chunk_start in range(0, len(allvars), 80):
+                chunk = allvars[chunk_start:chunk_start + 80]
+                out.append("  local " + ", ".join(chunk))
         for b in fn.blocks:
             out.append("  ::" + b.label + "::")
             for ins in b.instrs:

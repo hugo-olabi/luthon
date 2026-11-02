@@ -161,7 +161,7 @@ class IRLowerer:
                 for t in node.targets:
                     if isinstance(t, ast.Name):
                         safe_name = _safe_var(t.id)
-                        if self._cur_fn is not None and t.id in getattr(self._cur_fn, "cellvars", []):
+                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
                             self._emit("CELL_SET", [safe_name, val])
                         else:
                             self._emit("STORE", [safe_name, val])
@@ -272,6 +272,12 @@ class IRLowerer:
             if node.args.vararg:
                 params.append("...")
             fn = Function(name=unique_fn_name, params=params)
+            sc = getattr(node, "_scope", None)
+            if sc is not None:
+                fn.locals = sorted(_safe_var(k) for k in sc.locals.keys())
+                fn.freevars = sorted(_safe_var(k) for k in getattr(sc, "freevars", set()))
+                fn.cellvars = sorted(_safe_var(k) for k in getattr(sc, "cellvars", set()))
+                fn.upvalues = list(fn.freevars)
             # Find nonlocal declarations in function body
             fn_nonlocals = set()
             for stmt in node.body:
@@ -501,8 +507,9 @@ class IRLowerer:
                     fn = Function(name=node.name + "." + stmt.name, params=params)
                     sc = getattr(stmt, "_scope", None)
                     if sc is not None:
-                        fn.freevars = sorted(getattr(sc, "freevars", set()))
-                        fn.cellvars = sorted(getattr(sc, "cellvars", set()))
+                        fn.locals = sorted(_safe_var(k) for k in sc.locals.keys())
+                        fn.freevars = sorted(_safe_var(k) for k in getattr(sc, "freevars", set()))
+                        fn.cellvars = sorted(_safe_var(k) for k in getattr(sc, "cellvars", set()))
                         fn.upvalues = list(fn.freevars)
                     prev_fn = self._cur_fn
                     prev_block = self._cur_block
@@ -787,7 +794,7 @@ class IRLowerer:
             return t
         if isinstance(node, ast.Name):
             safe_name = _safe_var(node.id)
-            if self._cur_fn is not None and node.id in getattr(self._cur_fn, "cellvars", []):
+            if self._cur_fn is not None and (node.id in getattr(self._cur_fn, "cellvars", []) or node.id in getattr(self._cur_fn, "freevars", [])):
                 t = self._new_tmp()
                 self._emit("CELL_GET", [safe_name], result=t)
                 return t

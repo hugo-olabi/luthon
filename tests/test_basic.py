@@ -5,7 +5,7 @@ from luthon.main import main
 
 
 def test_version() -> None:
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.3.0"
 
 
 def test_main_runs(capsys) -> None:
