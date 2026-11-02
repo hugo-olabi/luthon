@@ -265,17 +265,59 @@ function np.stack(arrays, ...)
   local total_bytes = h * w * c
   local out_data = ffi.new("uint8_t[?]", total_bytes)
 
-  -- Copy channels into interleaved format
-  for i = 1, num_arrays do
-    local arr = arrays[i]
-    local ch_idx = i - 1
-    local s0, s1 = arr.strides[1], arr.strides[2]
-    local src = arr.data
+  -- Fast-path for 3-channel interleave (e.g. RGB / ORM maps)
+  if num_arrays == 3 then
+    local a0, a1, a2 = arrays[1], arrays[2], arrays[3]
+    local s0_0, s0_1 = a0.strides[1], a0.strides[2]
+    local s1_0, s1_1 = a1.strides[1], a1.strides[2]
+    local s2_0, s2_1 = a2.strides[1], a2.strides[2]
+    local src0, src1, src2 = a0.data, a1.data, a2.data
     for y = 0, h - 1 do
-      local src_row = y * s0
-      local dst_row = y * (w * c)
+      local r0 = y * s0_0
+      local r1 = y * s1_0
+      local r2 = y * s2_0
+      local dst_row = y * (w * 3)
       for x = 0, w - 1 do
-        out_data[dst_row + x * c + ch_idx] = src[src_row + x * s1]
+        local dst_px = dst_row + x * 3
+        out_data[dst_px]     = src0[r0 + x * s0_1]
+        out_data[dst_px + 1] = src1[r1 + x * s1_1]
+        out_data[dst_px + 2] = src2[r2 + x * s2_1]
+      end
+    end
+  elseif num_arrays == 4 then
+    local a0, a1, a2, a3 = arrays[1], arrays[2], arrays[3], arrays[4]
+    local s0_0, s0_1 = a0.strides[1], a0.strides[2]
+    local s1_0, s1_1 = a1.strides[1], a1.strides[2]
+    local s2_0, s2_1 = a2.strides[1], a2.strides[2]
+    local s3_0, s3_1 = a3.strides[1], a3.strides[2]
+    local src0, src1, src2, src3 = a0.data, a1.data, a2.data, a3.data
+    for y = 0, h - 1 do
+      local r0 = y * s0_0
+      local r1 = y * s1_0
+      local r2 = y * s2_0
+      local r3 = y * s3_0
+      local dst_row = y * (w * 4)
+      for x = 0, w - 1 do
+        local dst_px = dst_row + x * 4
+        out_data[dst_px]     = src0[r0 + x * s0_1]
+        out_data[dst_px + 1] = src1[r1 + x * s1_1]
+        out_data[dst_px + 2] = src2[r2 + x * s2_1]
+        out_data[dst_px + 3] = src3[r3 + x * s3_1]
+      end
+    end
+  else
+    -- General N-channel copy
+    for i = 1, num_arrays do
+      local arr = arrays[i]
+      local ch_idx = i - 1
+      local s0, s1 = arr.strides[1], arr.strides[2]
+      local src = arr.data
+      for y = 0, h - 1 do
+        local src_row = y * s0
+        local dst_row = y * (w * c)
+        for x = 0, w - 1 do
+          out_data[dst_row + x * c + ch_idx] = src[src_row + x * s1]
+        end
       end
     end
   end

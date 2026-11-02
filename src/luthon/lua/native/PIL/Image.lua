@@ -14,6 +14,11 @@ local ffi = require("ffi")
 
 -- Ensure libpng and C standard I/O declarations
 ffi.cdef[[
+  typedef struct FILE FILE;
+  FILE *fopen(const char *filename, const char *mode);
+  int fclose(FILE *stream);
+  size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+
   typedef void* png_structp;
   typedef void* png_infop;
   typedef void (*png_error_ptr)(png_structp, const char*);
@@ -26,6 +31,10 @@ ffi.cdef[[
 
   png_structp png_create_write_struct(const char *user_png_ver, void *error_ptr, png_error_ptr error_fn, png_error_ptr warn_fn);
   void png_destroy_write_struct(png_structp *png_ptr_ptr, png_infop *info_ptr_ptr);
+
+  void png_init_io(png_structp png_ptr, FILE *fp);
+  void png_set_compression_level(png_structp png_ptr, int level);
+  void png_set_filter(png_structp png_ptr, int method, int filters);
 
   void png_set_read_fn(png_structp png_ptr, void *io_ptr, png_rw_ptr read_data_fn);
   void png_set_write_fn(png_structp png_ptr, void *io_ptr, png_rw_ptr write_data_fn, png_flush_ptr output_flush_fn);
@@ -208,7 +217,7 @@ function Image_mt:convert(target_mode)
   error("PIL.Image.convert: unsupported mode conversion " .. tostring(src_mode) .. " -> " .. tostring(target_mode))
 end
 
-function Image_mt:save(fp, format)
+function Image_mt:save(fp, format, ...)
   if not libpng then error("PIL.Image.save: libpng is not loaded") end
 
   local w, h = self.size[1], self.size[2]
@@ -224,8 +233,27 @@ function Image_mt:save(fp, format)
     error("libpng write info struct creation failed")
   end
 
-  local write_cb, flush_cb, get_bytes = make_mem_writer()
-  libpng.png_set_write_fn(png_ptr, nil, write_cb, flush_cb)
+  local is_filepath = (type(fp) == "string")
+  local c_file = nil
+  local write_cb, flush_cb, get_bytes = nil, nil, nil
+
+  if is_filepath then
+    c_file = ffi.C.fopen(fp, "wb")
+    if c_file == nil then
+      local p_png = ffi.new("png_structp[1]", png_ptr)
+      local p_info = ffi.new("png_infop[1]", info_ptr)
+      libpng.png_destroy_write_struct(p_png, p_info)
+      error("Cannot open destination file " .. fp .. " for writing")
+    end
+    libpng.png_init_io(png_ptr, c_file)
+  else
+    write_cb, flush_cb, get_bytes = make_mem_writer()
+    libpng.png_set_write_fn(png_ptr, nil, write_cb, flush_cb)
+  end
+
+  -- Fast compression: Level 1 + Sub Filter gives >10x save speedup
+  libpng.png_set_compression_level(png_ptr, 1)
+  libpng.png_set_filter(png_ptr, 0, 8) -- 8 = PNG_FILTER_SUB
 
   libpng.png_set_IHDR(png_ptr, info_ptr, w, h, 8, color_type, 0, 0, 0)
   libpng.png_write_info(png_ptr, info_ptr)
@@ -241,42 +269,27 @@ function Image_mt:save(fp, format)
   local p_png = ffi.new("png_structp[1]", png_ptr)
   local p_info = ffi.new("png_infop[1]", info_ptr)
   libpng.png_destroy_write_struct(p_png, p_info)
-  write_cb:free()
-  flush_cb:free()
 
-  local output_data = get_bytes()
-
-  if type(fp) == "string" then
-    local f = io.open(fp, "wb")
-    if not f then error("Cannot open destination file " .. fp .. " for writing") end
-    f:write(output_data)
-    f:close()
-  elseif type(fp) == "table" and type(fp.write) == "function" then
-    fp:write(output_data)
+  if is_filepath then
+    ffi.C.fclose(c_file)
+  else
+    write_cb:free()
+    flush_cb:free()
+    local output_data = get_bytes()
+    if type(fp) == "table" and type(fp.write) == "function" then
+      fp:write(output_data)
+    end
   end
   return true
 end
 
 function Image.open(fp)
-  local raw_bytes = nil
-  if type(fp) == "string" then
-    local f = io.open(fp, "rb")
-    if not f then error("FileNotFoundError: " .. fp) end
-    raw_bytes = f:read("*a")
-    f:close()
-  elseif type(fp) == "table" and type(fp.getvalue) == "function" then
-    raw_bytes = fp:getvalue()
-  elseif type(fp) == "table" and type(fp.read) == "function" then
-    raw_bytes = fp:read()
-  else
-    error("Image.open: unsupported argument " .. tostring(fp))
-  end
-
-  if #raw_bytes < 8 or string.sub(raw_bytes, 1, 8) ~= "\137PNG\r\n\026\n" then
-    error("SyntaxError: unsupported or corrupted image format")
-  end
-
   if not libpng then error("PIL.Image: libpng not available") end
+
+  local is_filepath = (type(fp) == "string")
+  local c_file = nil
+  local raw_bytes = nil
+  local read_cb = nil
 
   local png_ptr = libpng.png_create_read_struct("1.6.0", nil, nil, nil)
   if png_ptr == nil then error("libpng read struct failed") end
@@ -287,8 +300,50 @@ function Image.open(fp)
     error("libpng info struct failed")
   end
 
-  local read_cb = make_mem_reader(raw_bytes)
-  libpng.png_set_read_fn(png_ptr, nil, read_cb)
+  if is_filepath then
+    c_file = ffi.C.fopen(fp, "rb")
+    if c_file == nil then
+      local p = ffi.new("png_structp[1]", png_ptr)
+      local pi = ffi.new("png_infop[1]", info_ptr)
+      libpng.png_destroy_read_struct(p, pi, nil)
+      error("FileNotFoundError: " .. fp)
+    end
+    -- Quick 8-byte PNG signature check
+    local header = ffi.new("uint8_t[8]")
+    local nread = ffi.C.fread(header, 1, 8, c_file)
+    if nread < 8 or header[0] ~= 137 or header[1] ~= 80 or header[2] ~= 78 or header[3] ~= 71 then
+      ffi.C.fclose(c_file)
+      local p = ffi.new("png_structp[1]", png_ptr)
+      local pi = ffi.new("png_infop[1]", info_ptr)
+      libpng.png_destroy_read_struct(p, pi, nil)
+      error("SyntaxError: unsupported or corrupted image format")
+    end
+    -- Reset to beginning
+    ffi.C.fclose(c_file)
+    c_file = ffi.C.fopen(fp, "rb")
+    libpng.png_init_io(png_ptr, c_file)
+  else
+    if type(fp) == "table" and type(fp.getvalue) == "function" then
+      raw_bytes = fp:getvalue()
+    elseif type(fp) == "table" and type(fp.read) == "function" then
+      raw_bytes = fp:read()
+    else
+      local p = ffi.new("png_structp[1]", png_ptr)
+      local pi = ffi.new("png_infop[1]", info_ptr)
+      libpng.png_destroy_read_struct(p, pi, nil)
+      error("Image.open: unsupported argument " .. tostring(fp))
+    end
+
+    if #raw_bytes < 8 or string.sub(raw_bytes, 1, 8) ~= "\137PNG\r\n\026\n" then
+      local p = ffi.new("png_structp[1]", png_ptr)
+      local pi = ffi.new("png_infop[1]", info_ptr)
+      libpng.png_destroy_read_struct(p, pi, nil)
+      error("SyntaxError: unsupported or corrupted image format")
+    end
+
+    read_cb = make_mem_reader(raw_bytes)
+    libpng.png_set_read_fn(png_ptr, nil, read_cb)
+  end
 
   libpng.png_read_info(png_ptr, info_ptr)
   local w = tonumber(libpng.png_get_image_width(png_ptr, info_ptr))
@@ -336,11 +391,17 @@ function Image.open(fp)
   local p_png = ffi.new("png_structp[1]", png_ptr)
   local p_info = ffi.new("png_infop[1]", info_ptr)
   libpng.png_destroy_read_struct(p_png, p_info, nil)
-  read_cb:free()
+
+  if is_filepath then
+    ffi.C.fclose(c_file)
+  else
+    read_cb:free()
+  end
 
   local im = {
     _buffer = buf,
     _raw_bytes = raw_bytes,
+    _is_valid = true,
     size = setmetatable({w, h}, _G._tuple_mt),
     mode = mode,
     format = "PNG",
