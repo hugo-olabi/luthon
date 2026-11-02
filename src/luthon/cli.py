@@ -20,14 +20,16 @@ def compile_file(
     no_cache: bool = False,
     cache_dir: str | None = None,
     output_path: Path | None = None,
+    pure: bool = False,
 ) -> tuple[str, Path | None]:
     """Compiles a Python file to Lua using cache and specified pipeline."""
     src = input_path.read_text()
+    cache_key_extra = ":pure" if pure else ""
     cache = None if no_cache else CompilationCache(cache_dir)
     deps = {}
     lua = None
     if cache is not None:
-        lua = cache.lookup(str(input_path), deps)
+        lua = cache.lookup(str(input_path) + cache_key_extra, deps)
         if lua is not None:
             if output_path:
                 output_path.write_text(lua)
@@ -45,8 +47,11 @@ def compile_file(
     else:
         lua = transpile(src)
 
+    if pure:
+        lua = "_G.__LUTHON_PURE__ = true\n" + lua
+
     if cache is not None:
-        cache.store(str(input_path), lua, deps)
+        cache.store(str(input_path) + cache_key_extra, lua, deps)
 
     if output_path:
         output_path.write_text(lua)
@@ -64,12 +69,14 @@ def run_file(
     profile: bool = False,
     dump_traces: bool = False,
     direct_jit: bool = False,
+    pure: bool = False,
 ) -> int:
     """Compiles a Python file and executes it immediately under LuaJIT."""
     # Fast path: direct execution of valid cached Lua artifact
     if direct_jit and not no_cache:
         cache = CompilationCache(cache_dir)
-        cached_lua = cache.get_cached_output_path(str(input_path))
+        cache_key_extra = ":pure" if pure else ""
+        cached_lua = cache.get_cached_output_path(str(input_path) + cache_key_extra)
         if cached_lua is not None:
             cmd = ["luajit"]
             if profile:
@@ -81,10 +88,15 @@ def run_file(
                 cmd.extend(script_args)
             env = os.environ.copy()
             env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
+            if pure:
+                env["LUTHON_PURE"] = "1"
             pkg_src = str(Path(__file__).parent.parent)
             pkg_root = str(Path(__file__).parent.parent.parent)
             current_lua_path = env.get("LUA_PATH", ";;")
-            extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
+            if pure:
+                extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+            else:
+                extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
             env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
             proc = subprocess.run(cmd, env=env)
             return proc.returncode
@@ -100,6 +112,7 @@ def run_file(
             no_cache=no_cache,
             cache_dir=cache_dir,
             output_path=tmp_lua_path,
+            pure=pure,
         )
 
         cmd = ["luajit"]
@@ -113,10 +126,15 @@ def run_file(
 
         env = os.environ.copy()
         env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
+        if pure:
+            env["LUTHON_PURE"] = "1"
         pkg_src = str(Path(__file__).parent.parent)
         pkg_root = str(Path(__file__).parent.parent.parent)
         current_lua_path = env.get("LUA_PATH", ";;")
-        extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
+        if pure:
+            extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
+        else:
+            extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
         env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
 
         proc = subprocess.run(cmd, env=env)
@@ -133,12 +151,14 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
 
     # Direct execution check: if first argument is a .py file or an existing file (not a known command or option flag)
-    # e.g.: `luthon ./main.py` or `luthon script.py arg1 arg2`
+    # e.g.: `luthon ./main.py` or `luthon script.py arg1 arg2` or `luthon script.py --pure`
     known_commands = {"transpile", "analyze", "run", "pip", "install", "venv", "build", "vendor", "reflect", "-h", "--help"}
     if raw_argv and raw_argv[0] not in known_commands and not raw_argv[0].startswith("-"):
         candidate = Path(raw_argv[0])
         if candidate.suffix == ".py" or candidate.is_file():
-            return run_file(input_path=candidate, script_args=raw_argv[1:], direct_jit=True)
+            is_pure = "--pure" in raw_argv[1:]
+            filtered_args = [a for a in raw_argv[1:] if a != "--pure"]
+            return run_file(input_path=candidate, script_args=filtered_args, direct_jit=True, pure=is_pure)
 
     parser = argparse.ArgumentParser(prog="luthon", description="Python -> LuaJIT transpiler & runner")
     sub = parser.add_subparsers(dest="command")
@@ -187,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--direct", "--jit", dest="direct_jit", action="store_true", help="Execute directly via LuaJIT if cached artifact exists")
     r.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     r.add_argument("--cache-dir", default=None, help="Cache directory")
+    r.add_argument("--pure", action="store_true", default=False, help="Disable native Lua shims; use only Luthon stdlib native and C-API proxy / binary reflection")
 
     t = sub.add_parser("transpile", help="Transpile a Python file to Lua")
     t.add_argument("input", help="Input .py file")
@@ -197,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--sourcemap", action="store_true", help="Generate VLQ source map")
     t.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     t.add_argument("--cache-dir", default=None, help="Cache directory")
+    t.add_argument("--pure", action="store_true", default=False, help="Emit pure runtime mode (disables native Lua shims)")
 
     a = sub.add_parser("analyze", help="Run semantic analysis on a Python file")
     a.add_argument("input", help="Input .py file")
@@ -237,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             profile=args.profile,
             dump_traces=args.dump_traces,
             direct_jit=getattr(args, "direct_jit", False),
+            pure=getattr(args, "pure", False),
         )
 
     if args.command == "venv":
@@ -357,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
             no_cache=args.no_cache,
             cache_dir=args.cache_dir,
             output_path=out_path,
+            pure=getattr(args, "pure", False),
         )
         if out_path:
             print(f"Wrote {args.output}")

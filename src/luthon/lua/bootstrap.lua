@@ -2457,6 +2457,27 @@ ast.increment_lineno = function(node, n)
   return node
 end
 
+-- uuid builtin module
+uuid = {}
+local _uuid_rnd = math.random
+local function _uuid4()
+  local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+  local res = string.gsub(template, "[xy]", function(c)
+    local v = (c == "x") and _uuid_rnd(0, 0xf) or _uuid_rnd(8, 0xb)
+    return string.format("%x", v)
+  end)
+  local obj = {
+    hex = string.gsub(res, "-", ""),
+    __str__ = function() return res end,
+  }
+  return setmetatable(obj, {
+    __tostring = function() return res end
+  })
+end
+uuid.uuid4 = _uuid4
+uuid.UUID = function(s) return tostring(s) end
+_G.uuid = uuid
+
 -- Luthon bootstrap prelude
 -- Combined stdlib + IR runtime helpers for self-hosted Luthon.
 -- This file is prepended to every transpiled Lua module.

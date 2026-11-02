@@ -88,7 +88,12 @@ end
 -- Waterfall Resolution: Tier 1 & 2 - Lua Modules
 ------------------------------------------------------------------------------
 
+function M.is_pure_mode()
+  return os.getenv("LUTHON_PURE") == "1" or _G.__LUTHON_PURE__ == true
+end
+
 function M.find_lua_module(name)
+  local pure = M.is_pure_mode()
   local parts = {}
   for part in name:gmatch("([^%.]+)") do
     table.insert(parts, part)
@@ -102,16 +107,20 @@ function M.find_lua_module(name)
 
   local function try_find(part_list)
     for _, base in ipairs(search_paths) do
-      -- Package directory with __init__.lua
-      local pkg_dir = base .. "/" .. table.concat(part_list, "/")
-      local init_path = pkg_dir .. "/__init__.lua"
-      local f = io.open(init_path, "r")
-      if f then f:close(); return init_path end
+      if pure and (base:match("/native$") or base:match("/native/")) then
+        -- Skip native shim directories in pure mode
+      else
+        -- Package directory with __init__.lua
+        local pkg_dir = base .. "/" .. table.concat(part_list, "/")
+        local init_path = pkg_dir .. "/__init__.lua"
+        local f = io.open(init_path, "r")
+        if f then f:close(); return init_path end
 
-      -- Module file: module.lua
-      local cand = base .. "/" .. table.concat(part_list, "/") .. ".lua"
-      local f2 = io.open(cand, "r")
-      if f2 then f2:close(); return cand end
+        -- Module file: module.lua
+        local cand = base .. "/" .. table.concat(part_list, "/") .. ".lua"
+        local f2 = io.open(cand, "r")
+        if f2 then f2:close(); return cand end
+      end
     end
     return nil
   end
@@ -164,6 +173,7 @@ local native_shims = {
 }
 
 function M.find_native_shim(name)
+  if M.is_pure_mode() then return nil end
   local rel = native_shims[name]
   if not rel then return nil end
 
