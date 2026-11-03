@@ -1153,11 +1153,11 @@ function bool(x)
 end
 function round(x, n) n=n or 0; local f=10^n; return math.floor(x*f+0.5)/f end
 function min(...)
-  local raw_args = {...}
-  local a = raw_args[1]
+  local argc = select("#", ...)
+  local a = select(1, ...)
   local key_fn = nil
-  for i = #raw_args, 2, -1 do
-    local arg = raw_args[i]
+  for i = argc, 2, -1 do
+    local arg = select(i, ...)
     if type(arg) == "table" and arg.key ~= nil then
       key_fn = arg.key
       break
@@ -1165,7 +1165,13 @@ function min(...)
   end
 
   if type(a) ~= "table" or a._py then
-    a = raw_args
+    local args_list = {}
+    for i = 1, argc do
+      local arg = select(i, ...)
+      if type(arg) == "table" and arg.key ~= nil and i >= 2 then break end
+      table.insert(args_list, arg)
+    end
+    a = args_list
   elseif type(a) == "table" and #a == 0 then
     -- Table/dict with non-sequential or string keys: collect keys
     local keys = {}
@@ -1188,11 +1194,11 @@ function min(...)
 end
 
 function max(...)
-  local raw_args = {...}
-  local a = raw_args[1]
+  local argc = select("#", ...)
+  local a = select(1, ...)
   local key_fn = nil
-  for i = #raw_args, 2, -1 do
-    local arg = raw_args[i]
+  for i = argc, 2, -1 do
+    local arg = select(i, ...)
     if type(arg) == "table" and arg.key ~= nil then
       key_fn = arg.key
       break
@@ -1200,7 +1206,13 @@ function max(...)
   end
 
   if type(a) ~= "table" or a._py then
-    a = raw_args
+    local args_list = {}
+    for i = 1, argc do
+      local arg = select(i, ...)
+      if type(arg) == "table" and arg.key ~= nil and i >= 2 then break end
+      table.insert(args_list, arg)
+    end
+    a = args_list
   elseif type(a) == "table" and #a == 0 then
     -- Table/dict with non-sequential or string keys: collect keys
     local keys = {}

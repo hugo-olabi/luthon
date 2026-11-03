@@ -169,7 +169,10 @@ local native_shims = {
   sqlite3 = "src/luthon/lua/native/sqlite3",
   numpy = "src/luthon/lua/native/numpy",
   ["PIL.Image"] = "src/luthon/lua/native/PIL/Image",
+  ["PIL.ImageOps"] = "src/luthon/lua/native/PIL/ImageOps",
   ["PIL"] = "src/luthon/lua/native/PIL/init",
+  requests = "src/luthon/lua/native/requests",
+  websockets = "src/luthon/lua/native/websockets",
 }
 
 function M.find_native_shim(name)
