@@ -31,11 +31,96 @@ class MethodSignature:
 
 
 @dataclass
+class DWARFFunction:
+    name: str
+    return_type: str = "PyObject*"
+    parameters: List[Tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class ModuleMetadata:
     name: str
     doc: str = ""
     methods: List[MethodSignature] = field(default_factory=list)
     binary_path: str = ""
+    dwarf_cdef: str = ""
+
+
+class DWARFInspector:
+    """Inspects DWARF debuginfo from compiled ELF binaries (.so) to extract function prototypes (Phase 37)."""
+
+    def __init__(self):
+        import shutil
+        self.readelf = shutil.which("readelf") or "/usr/bin/readelf"
+
+    def inspect_binary(self, binary_path: Path) -> Dict[str, DWARFFunction]:
+        """Extracts C function signatures from DWARF debuginfo in binary_path."""
+        import subprocess
+        functions: Dict[str, DWARFFunction] = {}
+        if not Path(binary_path).exists() or not self.readelf:
+            return functions
+
+        try:
+            res = subprocess.run([self.readelf, "--debug-dump=info", str(binary_path)],
+                                 capture_output=True, text=True, errors="ignore", timeout=10)
+            if res.returncode != 0 or not res.stdout:
+                return functions
+
+            type_map: Dict[str, str] = {}
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if "<" in line and ">" in line and "DW_AT_name" in line:
+                    parts = line.split(":")
+                    if len(parts) >= 2:
+                        name = parts[-1].strip().split("(")[0].strip()
+                        offset_match = re.search(r"<([0-9a-fA-F]+)>", line)
+                        if offset_match and name:
+                            type_map[offset_match.group(1)] = name
+
+            lines = res.stdout.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if "DW_TAG_subprogram" in line:
+                    fn_name = None
+                    ret_type = "PyObject*"
+                    params: List[Tuple[str, str]] = []
+                    i += 1
+                    while i < len(lines) and "DW_TAG_" not in lines[i]:
+                        sub_line = lines[i].strip()
+                        if "DW_AT_name" in sub_line:
+                            parts = sub_line.split(":")
+                            if len(parts) >= 2:
+                                fn_name = parts[-1].strip().split()[-1].strip("():")
+                        elif "DW_AT_type" in sub_line:
+                            type_match = re.search(r"<0x([0-9a-fA-F]+)>", sub_line)
+                            if type_match:
+                                ret_type = type_map.get(type_match.group(1), "PyObject*")
+                        i += 1
+
+                    if fn_name and not fn_name.startswith("__"):
+                        functions[fn_name] = DWARFFunction(name=fn_name, return_type=ret_type, parameters=params)
+                    continue
+                i += 1
+        except Exception:
+            pass
+
+        return functions
+
+    def generate_cdef(self, binary_path: Path, known_methods: Optional[List[str]] = None) -> str:
+        """Generates LuaJIT ffi.cdef function prototypes for binary_path."""
+        fns = self.inspect_binary(binary_path)
+        prototypes = []
+
+        if known_methods:
+            for m in known_methods:
+                if m in fns:
+                    fn = fns[m]
+                    prototypes.append(f"  {fn.return_type} {fn.name}(PyObject *self, PyObject *args);")
+                else:
+                    prototypes.append(f"  PyObject* {m}(PyObject *self, PyObject *args);")
+
+        return "\n".join(prototypes)
 
 
 # C structure definitions matching capi_proxy.c
@@ -90,7 +175,6 @@ class BinaryReflector:
         script = f'''
         local ffi = require("ffi")
         ffi.cdef[[
-          void* dlopen(const char* filename, int flags);
           typedef struct _object PyObject;
           typedef struct PyMethodDef {{
               const char  *ml_name;
@@ -114,6 +198,7 @@ class BinaryReflector:
           }} PyModuleDef_Standard;
           typedef struct PyModuleDef_Legacy {{
               int          m_base;
+              int          _pad;
               const char  *m_name;
               const char  *m_doc;
               long         m_size;
@@ -123,6 +208,7 @@ class BinaryReflector:
               long ob_refcnt;
               void *ob_type;
               int tag;
+              int _pad;
               union {{
                 void *module_def;
               }} as;
@@ -131,7 +217,7 @@ class BinaryReflector:
           PyObject* PyInit_{module_name}(void);
         ]]
 
-        ffi.C.dlopen("{self.capi_path}", 258)
+        pcall(ffi.load, "{self.capi_path}", true)
         local ext = ffi.load("{binary_path}")
         local ok, mod_ptr = pcall(function() return ffi.cast("MyPyObject*", ext.PyInit_{module_name}()) end)
         if not ok or mod_ptr == nil or mod_ptr.as.module_def == nil then
@@ -144,19 +230,19 @@ class BinaryReflector:
         local m_doc = ""
         local m_methods = nil
 
-        local std = ffi.cast("PyModuleDef_Standard*", raw_def)
-        local ok_std, std_name = pcall(function() return std.m_name ~= nil and ffi.string(std.m_name) or nil end)
-        if ok_std and std_name ~= nil and #std_name > 0 and std_name:match("^[%a_][%w_]*$") then
-            m_name = std_name
-            m_doc = (std.m_doc ~= nil and ffi.string(std.m_doc) or "")
-            m_methods = std.m_methods
+        local leg = ffi.cast("PyModuleDef_Legacy*", raw_def)
+        local ok_leg, leg_name = pcall(function() return leg.m_name ~= nil and ffi.string(leg.m_name) or nil end)
+        if ok_leg and leg_name ~= nil and #leg_name > 0 and leg_name:match("^[%a_][%w_]*$") then
+            m_name = leg_name
+            m_doc = (leg.m_doc ~= nil and ffi.string(leg.m_doc) or "")
+            m_methods = leg.m_methods
         else
-            local leg = ffi.cast("PyModuleDef_Legacy*", raw_def)
-            local ok_leg, leg_name = pcall(function() return leg.m_name ~= nil and ffi.string(leg.m_name) or nil end)
-            if ok_leg and leg_name ~= nil and #leg_name > 0 and leg_name:match("^[%a_][%w_]*$") then
-                m_name = leg_name
-                m_doc = (leg.m_doc ~= nil and ffi.string(leg.m_doc) or "")
-                m_methods = leg.m_methods
+            local std = ffi.cast("PyModuleDef_Standard*", raw_def)
+            local ok_std, std_name = pcall(function() return std.m_name ~= nil and ffi.string(std.m_name) or nil end)
+            if ok_std and std_name ~= nil and #std_name > 0 and std_name:match("^[%a_][%w_]*$") then
+                m_name = std_name
+                m_doc = (std.m_doc ~= nil and ffi.string(std.m_doc) or "")
+                m_methods = std.m_methods
             end
         end
 
@@ -212,6 +298,13 @@ class BinaryReflector:
             )
             meta.methods.append(sig)
 
+        # Inspect DWARF debuginfo and generate specific FFI cdefs (Phase 37)
+        try:
+            dwarf = DWARFInspector()
+            meta.dwarf_cdef = dwarf.generate_cdef(binary_path, [m.name for m in meta.methods])
+        except Exception:
+            meta.dwarf_cdef = ""
+
         return meta
 
     def generate_lua_trampoline(self, meta: ModuleMetadata) -> str:
@@ -225,7 +318,6 @@ class BinaryReflector:
             'local ffi = require("ffi")',
             "",
             "ffi.cdef[[",
-            "  void* dlopen(const char* filename, int flags);",
             "  typedef struct _object PyObject;",
             "  typedef long Py_ssize_t;",
             "",
@@ -246,9 +338,13 @@ class BinaryReflector:
             f"  PyObject* PyInit_{meta.name}(void);",
             "]]",
             "",
-            "-- Load Luthon C-API Proxy with RTLD_NOW | RTLD_GLOBAL (258) to satisfy C-extension dependencies",
-            f'pcall(function() ffi.C.dlopen("{self.capi_path}", 258) end)',
-            f'local capi = ffi.load("{self.capi_path}")',
+        ]
+        if meta.dwarf_cdef:
+            lines.extend([f"ffi.cdef[[\n{meta.dwarf_cdef}\n]]", ""])
+        lines.extend([
+            "-- Load Luthon C-API Proxy with RTLD_GLOBAL to satisfy C-extension dependencies",
+            f'local ok_capi, capi = pcall(ffi.load, "{self.capi_path}", true)',
+            f'if not ok_capi then capi = ffi.load("{self.capi_path}") end',
             "",
             "-- Load precompiled extension shared library",
             f'local ext = ffi.load("{meta.binary_path}")',
@@ -279,6 +375,7 @@ class BinaryReflector:
             "  } PyModuleDef_Standard;",
             "  typedef struct PyModuleDef_Legacy {",
             "      int          m_base;",
+            "      int          _pad;",
             "      const char  *m_name;",
             "      const char  *m_doc;",
             "      long         m_size;",
@@ -288,6 +385,7 @@ class BinaryReflector:
             "      long ob_refcnt;",
             "      void *ob_type;",
             "      int tag;",
+            "      int _pad;",
             "      union {",
             "        void *module_def;",
             "      } as;",
@@ -299,15 +397,15 @@ class BinaryReflector:
             "local _methods_map = {}",
             "if _raw_def ~= nil then",
             "  local _m_methods = nil",
-            "  local _std = ffi.cast('PyModuleDef_Standard*', _raw_def)",
-            "  local _ok_std, _name = pcall(function() return _std.m_name ~= nil and ffi.string(_std.m_name) or nil end)",
-            "  if _ok_std and _name ~= nil and #_name > 0 and _name:match('^[%a_][%w_]*$') then",
-            "    _m_methods = _std.m_methods",
+            "  local _leg = ffi.cast('PyModuleDef_Legacy*', _raw_def)",
+            "  local _ok_leg, _lname = pcall(function() return _leg.m_name ~= nil and ffi.string(_leg.m_name) or nil end)",
+            "  if _ok_leg and _lname ~= nil and #_lname > 0 and _lname:match('^[%a_][%w_]*$') then",
+            "    _m_methods = _leg.m_methods",
             "  else",
-            "    local _leg = ffi.cast('PyModuleDef_Legacy*', _raw_def)",
-            "    local _ok_leg, _lname = pcall(function() return _leg.m_name ~= nil and ffi.string(_leg.m_name) or nil end)",
-            "    if _ok_leg and _lname ~= nil and #_lname > 0 and _lname:match('^[%a_][%w_]*$') then",
-            "      _m_methods = _leg.m_methods",
+            "    local _std = ffi.cast('PyModuleDef_Standard*', _raw_def)",
+            "    local _ok_std, _name = pcall(function() return _std.m_name ~= nil and ffi.string(_std.m_name) or nil end)",
+            "    if _ok_std and _name ~= nil and #_name > 0 and _name:match('^[%a_][%w_]*$') then",
+            "      _m_methods = _std.m_methods",
             "    end",
             "  end",
             "  if _m_methods ~= nil then",
@@ -351,7 +449,7 @@ class BinaryReflector:
             "",
             f"local {meta.name} = {{}}",
             "",
-        ]
+        ])
 
         # Register functions
         for m in meta.methods:

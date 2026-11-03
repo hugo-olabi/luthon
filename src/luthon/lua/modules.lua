@@ -310,13 +310,16 @@ function M.load_binary_extension(name, path)
             PyModuleDef *module_def;
         } _PyModObj;
       ]]
-      ffi.C.dlopen(capi_path, 258)
+      pcall(ffi.load, capi_path, true)
     end)
     _capi_loaded = true
   end
 
-  local ok_capi, capi = pcall(ffi.load, capi_path)
-  if not ok_capi or not capi then return nil end
+  local ok_capi, capi = pcall(ffi.load, capi_path, true)
+  if not ok_capi or not capi then
+    ok_capi, capi = pcall(ffi.load, capi_path)
+    if not ok_capi or not capi then return nil end
+  end
 
   local ok_ext, ext = pcall(ffi.load, path)
   if not ok_ext or not ext then return nil end

@@ -75,7 +75,7 @@ EXPORT int PyType_Ready(PyTypeObject *type) {
     return 0;
 }
 
-/* Attribute access */
+/* Attribute access with full Descriptor / Property / Member dispatch (Phase 32) */
 EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name) {
     if (!o || !attr_name) return NULL;
 
@@ -90,7 +90,63 @@ EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name) {
         return res;
     }
 
-    /* 2. Method table lookup on type */
+    /* 2. Custom Descriptor check in tp_dict */
+    if (tp->tp_dict && tp->tp_dict->ob_type && tp->tp_dict->ob_type->tp_as_mapping) {
+        PyObject *descr = PyDict_GetItemString(tp->tp_dict, attr_name);
+        if (descr && descr->ob_type && descr->ob_type->tp_descr_get) {
+            descrgetfunc dget = (descrgetfunc)descr->ob_type->tp_descr_get;
+            return dget(descr, o, (PyObject *)tp);
+        }
+    }
+
+    /* 3. PyGetSetDef table lookup (@property and C-extension getters) */
+    if (tp->tp_getset) {
+        for (PyGetSetDef *g = (PyGetSetDef *)tp->tp_getset; g->name != NULL; g++) {
+            if (strcmp(g->name, attr_name) == 0) {
+                if (g->get) {
+                    return g->get(o, g->closure);
+                } else {
+                    return PyErr_Format(PyExc_AttributeError, "Attribute '%s' is not readable", attr_name);
+                }
+            }
+        }
+    }
+
+    /* 4. PyMemberDef struct offset lookup */
+    if (tp->tp_members) {
+        char *base_addr = (char *)o;
+        for (PyMemberDef *m = (PyMemberDef *)tp->tp_members; m->name != NULL; m++) {
+            if (strcmp(m->name, attr_name) == 0) {
+                void *addr = base_addr + m->offset;
+                switch (m->type) {
+                    case T_SHORT: return PyLong_FromLong(*(short *)addr);
+                    case T_INT: return PyLong_FromLong(*(int *)addr);
+                    case T_LONG: return PyLong_FromLong(*(long *)addr);
+                    case T_LONGLONG: return PyLong_FromLongLong(*(long long *)addr);
+                    case T_PYSSIZET: return PyLong_FromLongLong((long long)*(Py_ssize_t *)addr);
+                    case T_FLOAT: return PyFloat_FromDouble((double)*(float *)addr);
+                    case T_DOUBLE: return PyFloat_FromDouble(*(double *)addr);
+                    case T_STRING: {
+                        char *str = *(char **)addr;
+                        if (str) return PyUnicode_FromString(str);
+                        Py_IncRef(Py_None);
+                        return Py_None;
+                    }
+                    case T_STRING_INPLACE: return PyUnicode_FromString((char *)addr);
+                    case T_BOOL: return PyBool_FromLong(*(char *)addr != 0);
+                    case T_OBJECT: {
+                        PyObject *obj = *(PyObject **)addr;
+                        if (!obj) obj = Py_None;
+                        Py_IncRef(obj);
+                        return obj;
+                    }
+                    default: break;
+                }
+            }
+        }
+    }
+
+    /* 5. Method table lookup on type */
     if (tp->tp_methods) {
         for (PyMethodDef *m = tp->tp_methods; m->ml_name != NULL; m++) {
             if (strcmp(m->ml_name, attr_name) == 0) {
@@ -102,7 +158,7 @@ EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name) {
         }
     }
 
-    /* 3. Module dictionary / method lookup */
+    /* 6. Module dictionary / method lookup */
     if (o->tag == PY_TAG_MODULE && o->as.module_def) {
         PyModuleDef *def = (PyModuleDef *)o->as.module_def;
         if (def->m_methods) {
@@ -116,6 +172,22 @@ EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name) {
         }
     }
 
+    /* 7. tp_base recursion */
+    if (tp->tp_base) {
+        PyTypeObject orig_type = *o->ob_type;
+        o->ob_type = tp->tp_base;
+        PyObject *res = PyObject_GetAttrString(o, attr_name);
+        *o->ob_type = orig_type;
+        if (res) return res;
+    }
+
+    /* 8. Legacy tp_getattr */
+    if (tp->tp_getattr) {
+        typedef PyObject *(*getattrfunc)(PyObject *, const char *);
+        getattrfunc gfn = (getattrfunc)tp->tp_getattr;
+        return gfn(o, attr_name);
+    }
+
     return NULL;
 }
 
@@ -125,11 +197,74 @@ EXPORT int PyObject_SetAttrString(PyObject *o, const char *attr_name, PyObject *
     PyTypeObject *tp = o->ob_type;
     if (!tp) tp = &Base_Type;
 
+    /* 1. Custom tp_setattro handler */
     if (tp->tp_setattro) {
         PyObject *name_obj = PyUnicode_FromString(attr_name);
         int res = tp->tp_setattro(o, name_obj, v);
         Py_DecRef(name_obj);
         return res;
+    }
+
+    /* 2. Custom Descriptor check in tp_dict */
+    if (tp->tp_dict && tp->tp_dict->ob_type && tp->tp_dict->ob_type->tp_as_mapping) {
+        PyObject *descr = PyDict_GetItemString(tp->tp_dict, attr_name);
+        if (descr && descr->ob_type && descr->ob_type->tp_descr_set) {
+            descrsetfunc dset = (descrsetfunc)descr->ob_type->tp_descr_set;
+            return dset(descr, o, v);
+        }
+    }
+
+    /* 3. PyGetSetDef table lookup (@property and C-extension setters) */
+    if (tp->tp_getset) {
+        for (PyGetSetDef *g = (PyGetSetDef *)tp->tp_getset; g->name != NULL; g++) {
+            if (strcmp(g->name, attr_name) == 0) {
+                if (g->set) {
+                    return g->set(o, v, g->closure);
+                } else {
+                    PyErr_SetString(PyExc_AttributeError, "attribute is read-only");
+                    return -1;
+                }
+            }
+        }
+    }
+
+    /* 4. PyMemberDef struct offset lookup */
+    if (tp->tp_members) {
+        char *base_addr = (char *)o;
+        for (PyMemberDef *m = (PyMemberDef *)tp->tp_members; m->name != NULL; m++) {
+            if (strcmp(m->name, attr_name) == 0) {
+                if (m->flags & READONLY) {
+                    PyErr_SetString(PyExc_AttributeError, "attribute is read-only");
+                    return -1;
+                }
+                void *addr = base_addr + m->offset;
+                switch (m->type) {
+                    case T_SHORT: *(short *)addr = (short)PyLong_AsLongLong(v); return 0;
+                    case T_INT: *(int *)addr = (int)PyLong_AsLongLong(v); return 0;
+                    case T_LONG: *(long *)addr = (long)PyLong_AsLongLong(v); return 0;
+                    case T_LONGLONG: *(long long *)addr = PyLong_AsLongLong(v); return 0;
+                    case T_PYSSIZET: *(Py_ssize_t *)addr = (Py_ssize_t)PyLong_AsLongLong(v); return 0;
+                    case T_FLOAT: *(float *)addr = (float)PyFloat_AsDouble(v); return 0;
+                    case T_DOUBLE: *(double *)addr = PyFloat_AsDouble(v); return 0;
+                    case T_BOOL: *(char *)addr = PyObject_IsTrue(v) ? 1 : 0; return 0;
+                    case T_OBJECT: {
+                        PyObject *old = *(PyObject **)addr;
+                        Py_IncRef(v);
+                        *(PyObject **)addr = v;
+                        if (old) Py_DecRef(old);
+                        return 0;
+                    }
+                    default: break;
+                }
+            }
+        }
+    }
+
+    /* 5. Legacy tp_setattr */
+    if (tp->tp_setattr) {
+        typedef int (*setattrfunc)(PyObject *, const char *, PyObject *);
+        setattrfunc sfn = (setattrfunc)tp->tp_setattr;
+        return sfn(o, attr_name, v);
     }
 
     return -1;

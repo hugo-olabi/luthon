@@ -8,12 +8,19 @@
 EXPORT PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op) {
     if (!v || !w) return PyBool_FromLong(0);
 
-    /* 1. Custom tp_richcompare slot */
+    /* 1. Custom tp_richcompare slot on left operand */
     if (v->ob_type && v->ob_type->tp_richcompare) {
-        return v->ob_type->tp_richcompare(v, w, op);
+        PyObject *res = v->ob_type->tp_richcompare(v, w, op);
+        if (res && res != Py_NotImplemented) {
+            return res;
+        }
+        if (res == Py_NotImplemented) {
+            Py_DecRef(res);
+        }
     }
+
+    /* 2. Custom tp_richcompare slot on right operand (reverse operator) */
     if (w->ob_type && w->ob_type->tp_richcompare) {
-        /* Reverse operator for right operand */
         int rev_op = op;
         switch (op) {
             case Py_LT: rev_op = Py_GT; break;
@@ -23,10 +30,16 @@ EXPORT PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op) {
             case Py_GT: rev_op = Py_LT; break;
             case Py_GE: rev_op = Py_LE; break;
         }
-        return w->ob_type->tp_richcompare(w, v, rev_op);
+        PyObject *res = w->ob_type->tp_richcompare(w, v, rev_op);
+        if (res && res != Py_NotImplemented) {
+            return res;
+        }
+        if (res == Py_NotImplemented) {
+            Py_DecRef(res);
+        }
     }
 
-    /* 2. Numeric comparison */
+    /* 3. Numeric comparison */
     if ((v->tag == PY_TAG_INT || v->tag == PY_TAG_FLOAT) &&
         (w->tag == PY_TAG_INT || w->tag == PY_TAG_FLOAT)) {
         double d1 = (v->tag == PY_TAG_INT) ? (double)v->as.i_val : v->as.f_val;
@@ -43,7 +56,23 @@ EXPORT PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op) {
         return PyBool_FromLong(cmp);
     }
 
-    /* 3. Pointer equality fallback */
+    /* 4. String comparison */
+    if (v->tag == PY_TAG_STR && w->tag == PY_TAG_STR) {
+        int c = strcmp(v->as.str_val.data ? v->as.str_val.data : "",
+                       w->as.str_val.data ? w->as.str_val.data : "");
+        int cmp = 0;
+        switch (op) {
+            case Py_LT: cmp = (c < 0); break;
+            case Py_LE: cmp = (c <= 0); break;
+            case Py_EQ: cmp = (c == 0); break;
+            case Py_NE: cmp = (c != 0); break;
+            case Py_GT: cmp = (c > 0); break;
+            case Py_GE: cmp = (c >= 0); break;
+        }
+        return PyBool_FromLong(cmp);
+    }
+
+    /* 5. Pointer equality fallback */
     int eq = (v == w);
     if (op == Py_EQ) return PyBool_FromLong(eq);
     if (op == Py_NE) return PyBool_FromLong(!eq);

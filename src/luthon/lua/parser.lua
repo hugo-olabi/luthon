@@ -766,7 +766,9 @@ function Parser:if_stmt()
   self:match(TT.NEWLINE)
   local body = self:new_suite()
   local orelse = {}
-  while self:check(TT.NAME, "elif") do
+  while true do
+    while self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.COMMENT) do self:advance() end
+    if not self:check(TT.NAME, "elif") then break end
     self:advance()
     local test2 = self:expr()
     self:expect(TT.OP, ":")
@@ -774,6 +776,7 @@ function Parser:if_stmt()
     local body2 = self:new_suite()
     table.insert(orelse, node(NT.If, {test = test2, body = body2, orelse = {}, lineno = 0, col_offset = 0}))
   end
+  while self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.COMMENT) do self:advance() end
   if self:match(TT.NAME, "else") then
     self:expect(TT.OP, ":")
     self:match(TT.NEWLINE)

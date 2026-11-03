@@ -38,6 +38,15 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 26 — High-Throughput Asset & Serialization Performance | [Done] | 4/4 |
 | Phase 27 — Deep C-API Emulation, Native Codecs & Zero-Bridge Pipelines | [Done] | 4/4 |
 | Phase 28 — Modular C Native Library Architecture & Core Runtime Expansion | [Done] | 4/4 |
+| Phase 29 — Register Allocation & Local Variable Slot Reuse | [Done] | 4/4 |
+| Phase 30 — Direct Subscript & Comparison Specialization | [Done] | 4/4 |
+| Phase 31 — Classical SSA Optimizer Passes (LICM, CSE, Algebraic Simplification, DSE) | [Done] | 4/4 |
+| Phase 32 — Native C-API Proxy Full Slot Dispatch (tp_iternext, tp_richcompare, tp_hash, tp_descr_get/set) | [Done] | 4/4 |
+| Phase 33 — Multi-Dimensional Buffer Protocol (PEP 3118) & GC Lifetime Sync | [Done] | 3/3 |
+| Phase 34 — Parametric Container Type Propagation in CIR (cir.py) | [Done] | 4/4 |
+| Phase 35 — Multi-Task Asynchronous Event Loop (asyncio.gather, create_task, sleep) | [Done] | 3/3 |
+| Phase 36 — Modern Python Syntax Parity (ast.Match, Dict Unpacking, Kwargs Splatting) | [Done] | 3/3 |
+| Phase 37 — Autonomous C Header & DWARF Reflection (reflect.py) | [Done] | 3/3 |
 
 ## Phase 0 — Baseline & Audit
 

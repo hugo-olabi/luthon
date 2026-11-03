@@ -27,6 +27,46 @@ class CIRType:
         return self.name
 
 
+@dataclass(frozen=True)
+class ListType(CIRType):
+    item_type: CIRType = field(default_factory=lambda: ANY_TYPE)
+
+    def __init__(self, item_type: Optional[CIRType] = None):
+        object.__setattr__(self, "name", f"list[{item_type or ANY_TYPE}]")
+        object.__setattr__(self, "item_type", item_type or ANY_TYPE)
+
+    def __str__(self) -> str:
+        return f"list[{self.item_type}]"
+
+
+@dataclass(frozen=True)
+class DictType(CIRType):
+    key_type: CIRType = field(default_factory=lambda: ANY_TYPE)
+    value_type: CIRType = field(default_factory=lambda: ANY_TYPE)
+
+    def __init__(self, key_type: Optional[CIRType] = None, value_type: Optional[CIRType] = None):
+        object.__setattr__(self, "name", f"dict[{key_type or ANY_TYPE}, {value_type or ANY_TYPE}]")
+        object.__setattr__(self, "key_type", key_type or ANY_TYPE)
+        object.__setattr__(self, "value_type", value_type or ANY_TYPE)
+
+    def __str__(self) -> str:
+        return f"dict[{self.key_type}, {self.value_type}]"
+
+
+@dataclass(frozen=True)
+class TupleType(CIRType):
+    item_types: Tuple[CIRType, ...] = field(default_factory=tuple)
+
+    def __init__(self, item_types: Tuple[CIRType, ...] = ()):
+        types_str = ", ".join(str(t) for t in item_types)
+        object.__setattr__(self, "name", f"tuple[{types_str}]")
+        object.__setattr__(self, "item_types", tuple(item_types))
+
+    def __str__(self) -> str:
+        types_str = ", ".join(str(t) for t in self.item_types)
+        return f"tuple[{types_str}]"
+
+
 INT_TYPE = CIRType("int")
 FLOAT_TYPE = CIRType("float")
 BOOL_TYPE = CIRType("bool")
@@ -37,22 +77,80 @@ BOTTOM_TYPE = CIRType("bottom")  # Unknown / unassigned
 PRIMITIVE_TYPES = {INT_TYPE, FLOAT_TYPE, BOOL_TYPE, STR_TYPE}
 
 
+def parse_type_annotation(node: Any) -> CIRType:
+    """Parses a Python AST type annotation node into a CIRType."""
+    if node is None:
+        return ANY_TYPE
+
+    if isinstance(node, ast.Name):
+        name = node.id.lower()
+        if name in ("int", "integer"):
+            return INT_TYPE
+        if name in ("float", "double"):
+            return FLOAT_TYPE
+        if name in ("bool", "boolean"):
+            return BOOL_TYPE
+        if name in ("str", "string"):
+            return STR_TYPE
+        if name == "list":
+            return ListType(ANY_TYPE)
+        if name == "dict":
+            return DictType(ANY_TYPE, ANY_TYPE)
+        if name == "tuple":
+            return TupleType(())
+        return ANY_TYPE
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        try:
+            parsed = ast.parse(node.value, mode="eval")
+            return parse_type_annotation(parsed.body)
+        except Exception:
+            return ANY_TYPE
+
+    if isinstance(node, ast.Subscript):
+        base_t = parse_type_annotation(node.value)
+        base_name = getattr(node.value, "id", "").lower()
+        sl = node.slice
+        if base_name in ("list", "sequence", "iterable"):
+            item_t = parse_type_annotation(sl)
+            return ListType(item_t)
+        elif base_name in ("dict", "mapping"):
+            if isinstance(sl, ast.Tuple) and len(sl.elts) == 2:
+                kt = parse_type_annotation(sl.elts[0])
+                vt = parse_type_annotation(sl.elts[1])
+                return DictType(kt, vt)
+            return DictType(ANY_TYPE, ANY_TYPE)
+        elif base_name == "tuple":
+            if isinstance(sl, ast.Tuple):
+                elts = tuple(parse_type_annotation(e) for e in sl.elts)
+                return TupleType(elts)
+            else:
+                return TupleType((parse_type_annotation(sl),))
+        return base_t
+
+    return ANY_TYPE
+
+
 # =============================================================================
 # 2. Constraint-Based Type Inference (CPA)
 # =============================================================================
 
 class TypeInferrer:
-    """Performs monotonic constraint-based type propagation across basic blocks."""
+    """Performs monotonic constraint-based type propagation across basic blocks (Phase 17 & Phase 34)."""
 
     def __init__(self, fn: Function, param_types: Optional[Dict[str, CIRType]] = None):
         self.fn = fn
         self.param_types = param_types or {}
         # Variable name -> Set of possible CIRTypes
         self.type_env: Dict[str, Set[CIRType]] = {}
-        # Initial seeding
+        # Initial seeding: explicit param_types or function signature type annotations
+        fn_annots = getattr(fn, "param_annotations", {}) or {}
         for p in fn.params:
             if p in self.param_types:
                 self.type_env[p] = {self.param_types[p]}
+            elif p in fn_annots:
+                ann_type = parse_type_annotation(fn_annots[p])
+                self.type_env[p] = {ann_type}
             else:
                 self.type_env[p] = {ANY_TYPE}
 
@@ -179,6 +277,78 @@ class TypeInferrer:
         elif op in ("CMP", "SELECT"):
             return {BOOL_TYPE} if op == "CMP" else {self._get_type(ins.args[1] if len(ins.args) > 1 else None)}
 
+        # Parametric Container Operations (Phase 34)
+        elif op == "MAKE_LIST":
+            if ins.args:
+                elem_types = set()
+                for a in ins.args:
+                    elem_types.add(self._get_type(a))
+                if len(elem_types) == 1:
+                    return {ListType(next(iter(elem_types)))}
+                elif elem_types <= {INT_TYPE, FLOAT_TYPE}:
+                    return {ListType(FLOAT_TYPE)}
+            return {ListType(ANY_TYPE)}
+
+        elif op == "MAKE_DICT":
+            return {DictType(ANY_TYPE, ANY_TYPE)}
+
+        elif op == "MAKE_TUPLE":
+            elts = tuple(self._get_type(a) for a in ins.args)
+            return {TupleType(elts)}
+
+        elif op == "LIST_APPEND":
+            if len(ins.args) >= 2:
+                lst_var = str(ins.args[0])
+                elem_t = self._get_type(ins.args[1])
+                curr_types = self.type_env.get(lst_var, set())
+                updated = set()
+                for ct in curr_types:
+                    if isinstance(ct, ListType):
+                        if ct.item_type in (ANY_TYPE, BOTTOM_TYPE):
+                            updated.add(ListType(elem_t))
+                        elif ct.item_type != elem_t:
+                            if {ct.item_type, elem_t} <= {INT_TYPE, FLOAT_TYPE}:
+                                updated.add(ListType(FLOAT_TYPE))
+                            else:
+                                updated.add(ListType(ANY_TYPE))
+                        else:
+                            updated.add(ct)
+                    else:
+                        updated.add(ct)
+                if updated:
+                    self.type_env[lst_var] = updated
+            return set()
+
+        elif op in ("SUBSCR", "SUBSCR_DIRECT"):
+            if len(ins.args) >= 1:
+                cont_t = self._get_type(ins.args[0])
+                if isinstance(cont_t, ListType):
+                    return {cont_t.item_type}
+                elif isinstance(cont_t, DictType):
+                    return {cont_t.value_type}
+                elif isinstance(cont_t, TupleType):
+                    idx = ins.args[1] if len(ins.args) > 1 else None
+                    if isinstance(idx, int) and 0 <= idx < len(cont_t.item_types):
+                        return {cont_t.item_types[idx]}
+                    return set(cont_t.item_types) if cont_t.item_types else {ANY_TYPE}
+            return {ANY_TYPE}
+
+        elif op == "NEXT":
+            if len(ins.args) >= 1:
+                it_t = self._get_type(ins.args[0])
+                if isinstance(it_t, ListType):
+                    return {it_t.item_type}
+                elif isinstance(it_t, TupleType):
+                    return set(it_t.item_types) if it_t.item_types else {ANY_TYPE}
+            return {ANY_TYPE}
+
+        elif op == "CALL":
+            if ins.args:
+                callee = str(ins.args[0])
+                if callee == "iter" and len(ins.args) > 1:
+                    return {self._get_type(ins.args[1])}
+            return {ANY_TYPE}
+
         return {ANY_TYPE}
 
 
@@ -221,16 +391,19 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                         changed = True
 
             elif ins.op == "SUBSCR" and len(ins.args) >= 2:
-                idx_arg = ins.args[1]
+                cont_arg, idx_arg = ins.args[0], ins.args[1]
+                cont_t = type_map.get(str(cont_arg), ANY_TYPE)
                 it = type_map.get(str(idx_arg), INT_TYPE if isinstance(idx_arg, int) else ANY_TYPE)
-                # If the index is a known non-negative constant integer, direct 1-based indexing applies
-                if isinstance(idx_arg, int) and idx_arg >= 0:
+                # If index is known integer and container is homogeneous ListType or constant index
+                if (isinstance(idx_arg, int) and idx_arg >= 0) or (isinstance(cont_t, (ListType, TupleType)) and it == INT_TYPE):
                     ins.op = "SUBSCR_DIRECT"
                     changed = True
 
             elif ins.op == "STORE_SUBSCR" and len(ins.args) >= 3:
-                idx_arg = ins.args[1]
-                if isinstance(idx_arg, int) and idx_arg >= 0:
+                cont_arg, idx_arg = ins.args[0], ins.args[1]
+                cont_t = type_map.get(str(cont_arg), ANY_TYPE)
+                it = type_map.get(str(idx_arg), INT_TYPE if isinstance(idx_arg, int) else ANY_TYPE)
+                if (isinstance(idx_arg, int) and idx_arg >= 0) or (isinstance(cont_t, ListType) and it == INT_TYPE):
                     ins.op = "STORE_SUBSCR_DIRECT"
                     changed = True
 

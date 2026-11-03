@@ -5,9 +5,9 @@
 #include "luthon_capi.h"
 
 /* Standard Singletons */
-EXPORT PyObject _Py_NoneStruct  = { 1000000000, &Base_Type, PY_TAG_NONE };
-EXPORT PyObject _Py_TrueStruct  = { 1000000000, &PyBool_Type, PY_TAG_BOOL, { .i_val = 1 } };
-EXPORT PyObject _Py_FalseStruct = { 1000000000, &PyBool_Type, PY_TAG_BOOL, { .i_val = 0 } };
+EXPORT PyObject _Py_NoneStruct  = { 1000000000, &Base_Type, PY_TAG_NONE, 0, { .i_val = 0 } };
+EXPORT PyObject _Py_TrueStruct  = { 1000000000, &PyBool_Type, PY_TAG_BOOL, 0, { .i_val = 1 } };
+EXPORT PyObject _Py_FalseStruct = { 1000000000, &PyBool_Type, PY_TAG_BOOL, 0, { .i_val = 0 } };
 
 EXPORT PyObject* alloc_pyobject(PyTag tag, PyTypeObject *type) {
     PyObject *o = (PyObject *)calloc(1, sizeof(PyObject));
@@ -238,8 +238,8 @@ EXPORT int PyOS_snprintf(char *str, size_t size, const char *format, ...) {
 }
 
 /* Singletons: NotImplemented & Ellipsis */
-EXPORT PyObject _Py_NotImplementedStruct = { 1000000000, &Base_Type, PY_TAG_OPAQUE };
-EXPORT PyObject _Py_EllipsisObject        = { 1000000000, &Base_Type, PY_TAG_OPAQUE };
+EXPORT PyObject _Py_NotImplementedStruct = { 1000000000, &Base_Type, PY_TAG_OPAQUE, 0, { .i_val = 0 } };
+EXPORT PyObject _Py_EllipsisObject        = { 1000000000, &Base_Type, PY_TAG_OPAQUE, 0, { .i_val = 0 } };
 
 /* ASCII Whitespace Table */
 EXPORT const unsigned char _Py_ascii_whitespace[256] = {
@@ -343,16 +343,66 @@ EXPORT Py_ssize_t PyObject_LengthHint(PyObject *o, Py_ssize_t defaultvalue) {
 
 EXPORT intptr_t PyObject_Hash(PyObject *o) {
     if (!o) return 0;
-    if (o->tag == PY_TAG_INT || o->tag == PY_TAG_BOOL) return (intptr_t)o->as.i_val;
-    if (o->tag == PY_TAG_STR) {
-        intptr_t h = 0;
-        const char *s = o->as.str_val.data;
-        if (s) {
-            while (*s) h = (h * 31) + (unsigned char)(*s++);
-        }
+
+    /* 1. Custom tp_hash slot on custom C-extension classes */
+    if (o->ob_type && o->ob_type->tp_hash) {
+        hashfunc hfn = (hashfunc)o->ob_type->tp_hash;
+        intptr_t h = hfn(o);
+        if (h == -1) h = -2;
         return h;
     }
-    return (intptr_t)o;
+
+    /* 2. Integers and Booleans */
+    if (o->tag == PY_TAG_INT || o->tag == PY_TAG_BOOL) {
+        intptr_t h = (intptr_t)o->as.i_val;
+        if (h == -1) h = -2;
+        return h;
+    }
+
+    /* 3. Floating-point numbers */
+    if (o->tag == PY_TAG_FLOAT) {
+        double d = o->as.f_val;
+        if (d == 0.0) return 0;
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        intptr_t h = (intptr_t)(bits ^ (bits >> 32));
+        if (h == -1) h = -2;
+        return h;
+    }
+
+    /* 4. Strings (polynomial / FNV hash) */
+    if (o->tag == PY_TAG_STR) {
+        intptr_t h = 0x345678;
+        const char *s = o->as.str_val.data;
+        Py_ssize_t len = o->as.str_val.size;
+        for (Py_ssize_t i = 0; i < len; i++) {
+            h = (1000003 * h) ^ (unsigned char)s[i];
+        }
+        h ^= len;
+        if (h == -1) h = -2;
+        return h;
+    }
+
+    /* 5. Tuples */
+    if (o->tag == PY_TAG_TUPLE) {
+        intptr_t mult = 1000003;
+        intptr_t x = 0x345678;
+        Py_ssize_t len = o->as.seq_val.size;
+        for (Py_ssize_t i = 0; i < len; i++) {
+            intptr_t y = PyObject_Hash(o->as.seq_val.items[i]);
+            x = (x ^ y) * mult;
+            mult += (intptr_t)(82520 + 2 * len);
+        }
+        x += 97531;
+        if (x == -1) x = -2;
+        return x;
+    }
+
+    /* 6. Pointer fallback for generic objects */
+    intptr_t h = (intptr_t)o;
+    h = (h >> 4) ^ h;
+    if (h == -1) h = -2;
+    return h;
 }
 
 EXPORT int PyObject_AsFileDescriptor(PyObject *o) {
@@ -410,9 +460,23 @@ EXPORT PyObject* PyObject_SelfIter(PyObject *o) {
 
 EXPORT PyObject* PyObject_GetIter(PyObject *o) {
     if (!o) return NULL;
+
+    /* 1. Custom tp_iter callback */
     if (o->ob_type && o->ob_type->tp_iter) {
         return o->ob_type->tp_iter(o);
     }
+
+    /* 2. Object is already an iterator (has tp_iternext) */
+    if (o->ob_type && o->ob_type->tp_iternext) {
+        Py_IncRef(o);
+        return o;
+    }
+
+    /* 3. Sequence fallback iterator */
+    if (o->tag == PY_TAG_TUPLE || o->tag == PY_TAG_LIST || (o->ob_type && o->ob_type->tp_as_sequence)) {
+        return PySeqIter_New(o);
+    }
+
     Py_IncRef(o);
     return o;
 }

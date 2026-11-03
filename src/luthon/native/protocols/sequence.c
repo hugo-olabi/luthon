@@ -292,8 +292,36 @@ EXPORT int PySequence_Contains(PyObject *seq, PyObject *ob) {
     return 0;
 }
 
+static PyObject* seqiter_next(PyObject *iterator) {
+    PySeqIterObject *it = (PySeqIterObject *)iterator;
+    if (!it || !it->seq) return NULL;
+    PyObject *item = PySequence_GetItem(it->seq, it->it_index);
+    if (!item) return NULL;
+    it->it_index++;
+    return item;
+}
+
+static PyTypeObject SeqIter_Type = {
+    1, NULL, "iterator", sizeof(PySeqIterObject), 0,
+    NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, 0, NULL, NULL, NULL,
+    NULL, 0, NULL, seqiter_next, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, 0, NULL,
+    NULL, NULL, NULL
+};
+
 EXPORT PyObject* PySeqIter_New(PyObject *seq) {
-    return PyObject_GetIter(seq);
+    if (!seq) return NULL;
+    PySeqIterObject *it = (PySeqIterObject *)calloc(1, sizeof(PySeqIterObject));
+    if (!it) return PyErr_NoMemory();
+    it->ob_refcnt = 1;
+    it->ob_type = &SeqIter_Type;
+    it->tag = PY_TAG_OPAQUE;
+    Py_IncRef(seq);
+    it->seq = seq;
+    it->it_index = 0;
+    return (PyObject *)it;
 }
 
 EXPORT int PyArg_UnpackTuple(PyObject *args, const char *name, Py_ssize_t min, Py_ssize_t max, ...) {

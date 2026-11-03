@@ -452,6 +452,49 @@ function _dict_update(target, src)
       target[k] = v
     end
   end
+  return target
+end
+
+function _seq_extend(target, src)
+  if type(target) == "table" and type(src) == "table" then
+    for i = 1, #src do
+      target[#target + 1] = src[i]
+    end
+  end
+  return target
+end
+
+_G.__LUTHON_FN_PARAMS = _G.__LUTHON_FN_PARAMS or {}
+_G._kw_mt = _G._kw_mt or { __luthon_kw = true }
+
+function _luthon_reg_fn(fn, params)
+  if fn and params then
+    _G.__LUTHON_FN_PARAMS[fn] = params
+  end
+  return fn
+end
+
+function _luthon_call_kw(fn, kw_table, ...)
+  local param_names = _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[fn]
+  if param_names then
+    local pos_args = { ... }
+    local call_args = {}
+    local max_idx = #param_names
+    for i = 1, max_idx do
+      local name = param_names[i]
+      if pos_args[i] ~= nil then
+        call_args[i] = pos_args[i]
+      elseif kw_table and kw_table[name] ~= nil then
+        call_args[i] = kw_table[name]
+      end
+    end
+    return fn(unpack(call_args, 1, max_idx))
+  end
+  local args = { ... }
+  if kw_table ~= nil then
+    table.insert(args, kw_table)
+  end
+  return fn(unpack(args))
 end
 
 function __luthon_set(t, i, v)
@@ -3135,51 +3178,192 @@ uuid.uuid4 = _uuid4
 uuid.UUID = function(s) return tostring(s) end
 _G.uuid = uuid
 
--- asyncio lightweight coroutine runner
+-- asyncio cooperative event loop runner & task scheduler (Phase 35)
 asyncio = {}
+
 asyncio.Future = function()
-  return setmetatable({ _done = false, _result = nil }, {
+  return setmetatable({ _done = false, _result = nil, _error = nil }, {
     __index = {
       done = function(self) return self._done end,
-      result = function(self) return self._result end,
+      result = function(self)
+        if self._error then error(self._error, 2) end
+        return self._result
+      end,
       set_result = function(self, val) self._done = true; self._result = val end,
+      set_exception = function(self, exc) self._done = true; self._error = exc end,
     }
   })
 end
-asyncio.run = function(coro_or_fn)
-  local co = type(coro_or_fn) == "thread" and coro_or_fn or coroutine.create(coro_or_fn)
-  local last_res = nil
-  while coroutine.status(co) ~= "dead" do
-    local ok, res = coroutine.resume(co)
-    if not ok then error(tostring(res), 2) end
-    if coroutine.status(co) == "dead" then
-      return res
+
+local _task_mt = {
+  done = function(self) return self._done end,
+  result = function(self)
+    if self._error then error(self._error, 2) end
+    return self._result
+  end,
+  cancel = function(self)
+    self._done = true
+    self._error = "CancelledError"
+  end,
+  set_result = function(self, val)
+    self._done = true
+    self._result = val
+  end,
+  set_exception = function(self, exc)
+    self._done = true
+    self._error = exc
+  end
+}
+_task_mt.__index = _task_mt
+
+asyncio.Task = function(coro)
+  local co = type(coro) == "thread" and coro or coroutine.create(coro)
+  local task = setmetatable({
+    _is_task = true,
+    _co = co,
+    _done = false,
+    _result = nil,
+    _error = nil,
+  }, _task_mt)
+
+  if _G.__LUTHON_ACTIVE_LOOP then
+    _G.__LUTHON_ACTIVE_LOOP:add_task(task)
+  end
+  return task
+end
+
+asyncio.create_task = function(coro)
+  return asyncio.Task(coro)
+end
+
+asyncio.gather = function(...)
+  local n = select("#", ...)
+  local args = { ... }
+  local tasks = {}
+  for i = 1, n do
+    local a = args[i]
+    if type(a) == "table" and a._is_task then
+      table.insert(tasks, a)
+    else
+      table.insert(tasks, asyncio.create_task(a))
     end
-    -- Handle yields like sleep
-    if res == "sleep" then
-      local ffi_ok, ffi_mod = pcall(require, "ffi")
-      local poll_ok = false
-      if ffi_ok and ffi_mod and ffi_mod.C then
-        pcall(function()
-          ffi_mod.cdef[[
-            int poll(void *fds, unsigned long nfds, int timeout);
-          ]]
-        end)
-        local ok_poll = pcall(function() ffi_mod.C.poll(nil, 0, 50) end)
-        if ok_poll then poll_ok = true end
+  end
+
+  local gather_coro = coroutine.create(function()
+    local results = {}
+    for i, t in ipairs(tasks) do
+      while not t:done() do
+        coroutine.yield("await_task", t)
       end
-      if not poll_ok then
-        local t_end = os.clock() + 0.05
+      table.insert(results, t:result())
+    end
+    return setmetatable(results, _list_mt)
+  end)
+
+  return asyncio.create_task(gather_coro)
+end
+
+asyncio.run = function(coro_or_fn)
+  local loop = {
+    _tasks = {},
+    _ready = {},
+    _timers = {},
+    add_task = function(self, t)
+      table.insert(self._tasks, t)
+      table.insert(self._ready, t)
+    end
+  }
+  _G.__LUTHON_ACTIVE_LOOP = loop
+
+  local main_task = (type(coro_or_fn) == "table" and coro_or_fn._is_task) and coro_or_fn or asyncio.create_task(coro_or_fn)
+
+  local ffi_ok, ffi_mod = pcall(require, "ffi")
+  if ffi_ok and ffi_mod and ffi_mod.C then
+    pcall(function()
+      ffi_mod.cdef[[
+        int poll(void *fds, unsigned long nfds, int timeout);
+      ]]
+    end)
+  end
+
+  while not main_task:done() do
+    local now = os.clock()
+    -- 1. Check expired timers
+    local remaining_timers = {}
+    for _, tm in ipairs(loop._timers) do
+      if now >= tm.time then
+        table.insert(loop._ready, tm.task)
+      else
+        table.insert(remaining_timers, tm)
+      end
+    end
+    loop._timers = remaining_timers
+
+    -- 2. Run one round of ready microtasks
+    local current_ready = loop._ready
+    loop._ready = {}
+
+    for _, t in ipairs(current_ready) do
+      if not t:done() and coroutine.status(t._co) ~= "dead" then
+        local ok, tag, arg = coroutine.resume(t._co)
+        if not ok then
+          t._done = true
+          t._error = tostring(tag)
+          if t == main_task then
+            _G.__LUTHON_ACTIVE_LOOP = nil
+            error(tostring(tag), 2)
+          end
+        elseif coroutine.status(t._co) == "dead" then
+          t._done = true
+          t._result = tag
+        else
+          if tag == "sleep" then
+            local dur = tonumber(arg) or 0
+            table.insert(loop._timers, { time = os.clock() + dur, task = t })
+          elseif tag == "await_task" then
+            local awaited = arg
+            if awaited and awaited:done() then
+              table.insert(loop._ready, t)
+            else
+              table.insert(loop._ready, t)
+            end
+          else
+            table.insert(loop._ready, t)
+          end
+        end
+      end
+    end
+
+    -- 3. Sleep or poll if no tasks immediately ready
+    if #loop._ready == 0 and #loop._timers > 0 then
+      local min_wait = 1000
+      local cur_t = os.clock()
+      for _, tm in ipairs(loop._timers) do
+        local diff = math.max(1, math.floor((tm.time - cur_t) * 1000))
+        if diff < min_wait then min_wait = diff end
+      end
+      if min_wait > 50 then min_wait = 50 end
+
+      local polled = false
+      if ffi_ok and ffi_mod and ffi_mod.C and ffi_mod.C.poll then
+        local ok_poll = pcall(function() ffi_mod.C.poll(nil, 0, min_wait) end)
+        if ok_poll then polled = true end
+      end
+      if not polled then
+        local t_end = os.clock() + (min_wait / 1000.0)
         while os.clock() < t_end do end
       end
     end
-    last_res = res
   end
-  return last_res
+
+  _G.__LUTHON_ACTIVE_LOOP = nil
+  return main_task:result()
 end
+
 asyncio.sleep = function(secs)
   return coroutine.yield("sleep", secs)
 end
+
 asyncio.TimeoutError = "TimeoutError"
 asyncio.exceptions = { TimeoutError = "TimeoutError" }
 asyncio.wait_for = function(fut_or_fn, timeout)
@@ -3209,15 +3393,20 @@ end
 _G.asyncio = asyncio
 
 function _luthon_await(val)
-  if type(val) == "thread" then
+  if type(val) == "table" and (val._is_task or (type(val.done) == "function" and type(val.result) == "function")) then
+    while not val:done() do
+      coroutine.yield("await_task", val)
+    end
+    return val:result()
+  elseif type(val) == "thread" then
     while coroutine.status(val) ~= "dead" do
-      local ok, res = coroutine.resume(val)
-      if not ok then error(tostring(res), 2) end
+      local ok, tag, arg = coroutine.resume(val)
+      if not ok then error(tostring(tag), 2) end
       if coroutine.status(val) == "dead" then
-        return res
+        return tag
       end
-      -- Pass yield value up to outer coroutine runner (asyncio.run)
-      coroutine.yield(res)
+      -- Pass yield tag and argument up to event loop runner (asyncio.run)
+      coroutine.yield(tag, arg)
     end
     return nil
   elseif type(val) == "function" then

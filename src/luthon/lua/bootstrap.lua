@@ -297,6 +297,49 @@ function _dict_update(target, src)
       target[k] = v
     end
   end
+  return target
+end
+
+function _seq_extend(target, src)
+  if type(target) == "table" and type(src) == "table" then
+    for i = 1, #src do
+      target[#target + 1] = src[i]
+    end
+  end
+  return target
+end
+
+_G.__LUTHON_FN_PARAMS = _G.__LUTHON_FN_PARAMS or {}
+_G._kw_mt = _G._kw_mt or { __luthon_kw = true }
+
+function _luthon_reg_fn(fn, params)
+  if fn and params then
+    _G.__LUTHON_FN_PARAMS[fn] = params
+  end
+  return fn
+end
+
+function _luthon_call_kw(fn, kw_table, ...)
+  local param_names = _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[fn]
+  if param_names then
+    local pos_args = { ... }
+    local call_args = {}
+    local max_idx = #param_names
+    for i = 1, max_idx do
+      local name = param_names[i]
+      if pos_args[i] ~= nil then
+        call_args[i] = pos_args[i]
+      elseif kw_table and kw_table[name] ~= nil then
+        call_args[i] = kw_table[name]
+      end
+    end
+    return fn(unpack(call_args, 1, max_idx))
+  end
+  local args = { ... }
+  if kw_table ~= nil then
+    table.insert(args, kw_table)
+  end
+  return fn(unpack(args))
 end
 
 function __luthon_set(t, i, v)

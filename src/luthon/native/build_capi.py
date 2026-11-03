@@ -72,7 +72,7 @@ def compile_capi_proxy(force: bool = False) -> Path:
     ]
 
     # Check if libpng is available and add flags
-    ldflags = ["-shared", "-fPIC"]
+    ldflags = []
     try:
         png_cflags = subprocess.check_output(["pkg-config", "--cflags", "libpng"], text=True).strip().split()
         png_libs = subprocess.check_output(["pkg-config", "--libs", "libpng"], text=True).strip().split()
@@ -97,8 +97,8 @@ def compile_capi_proxy(force: bool = False) -> Path:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to compile {src}: {e.stderr}\nCommand: {' '.join(cmd)}")
 
-    # 2. Link shared library libluthon_capi.so
-    link_cmd = [cc] + ldflags + [str(o) for o in obj_files] + ["-o", str(lib_path)]
+    # 2. Link shared library libluthon_capi.so (libraries must follow object files)
+    link_cmd = [cc, "-shared", "-fPIC"] + [str(o) for o in obj_files] + ldflags + ["-lm", "-o", str(lib_path)]
     try:
         subprocess.run(link_cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:

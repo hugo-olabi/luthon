@@ -36,6 +36,8 @@ class Function:
     upvalues: List[str] = field(default_factory=list)
     nonlocals: List[str] = field(default_factory=list)
     is_entry_point: bool = False
+    param_annotations: dict = field(default_factory=dict)
+    param_types: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -284,6 +286,7 @@ class IRLowerer:
             if node.args.vararg:
                 params.append("...")
             fn = Function(name=unique_fn_name, params=params)
+            fn.param_annotations = {_safe_var(a.arg): a.annotation for a in node.args.args if getattr(a, "annotation", None) is not None}
             sc = getattr(node, "_scope", None)
             if sc is not None:
                 fn.locals = sorted(_safe_var(k) for k in sc.locals.keys())
@@ -377,6 +380,10 @@ class IRLowerer:
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
             self._emit("STORE", [_safe_var(fn_sym), unique_fn_name])
+            if params:
+                param_tuple = self._new_tmp()
+                self._emit("MAKE_TUPLE", [f'"{p}"' for p in params if p != "..."], result=param_tuple)
+                self._emit("CALL", ["_luthon_reg_fn", unique_fn_name, param_tuple])
             # Apply decorators (innermost first)
             for dec in reversed(node.decorator_list):
                 dec_tmp = self.lower_expr(dec)
@@ -714,9 +721,114 @@ class IRLowerer:
             self._emit("CALL", ["coroutine.yield", val], result=self._new_tmp())
             self._emit("JUMP", [loop_lbl])
             self._cur_block = self._new_block(end_lbl)
+        elif hasattr(ast, "Match") and isinstance(node, ast.Match):
+            self._lower_match(node)
         else:
             # fallback: record unsupported
             self._emit("NOP", [type(node).__name__])
+
+    def _lower_match(self, node):
+        """Lower ast.Match statement into decision tree with branch tests (Phase 36)."""
+        subj = self.lower_expr(node.subject)
+        end_lbl = self._new_label("matchend")
+
+        for case_idx, case in enumerate(node.cases):
+            next_case_lbl = self._new_label(f"cnext_{case_idx}")
+            body_lbl = self._new_label(f"cbody_{case_idx}")
+
+            # 1. Pattern test
+            self._lower_pattern_test(case.pattern, subj, fail_lbl=next_case_lbl)
+
+            # 2. Guard test if present
+            if case.guard:
+                guard_val = self.lower_expr(case.guard)
+                guard_ok_lbl = self._new_label(f"guard_ok_{case_idx}")
+                self._emit("BRANCH", [guard_val, guard_ok_lbl, next_case_lbl])
+                self._cur_block = self._new_block(guard_ok_lbl)
+
+            # 3. Case body
+            self._emit("JUMP", [body_lbl])
+            self._cur_block = self._new_block(body_lbl)
+            for stmt in case.body:
+                self.lower_stmt(stmt)
+            if not case.body or not isinstance(case.body[-1], (ast.Return, ast.Break, ast.Continue)):
+                self._emit("JUMP", [end_lbl])
+
+            self._cur_block = self._new_block(next_case_lbl)
+
+        self._emit("JUMP", [end_lbl])
+        self._cur_block = self._new_block(end_lbl)
+
+    def _lower_pattern_test(self, pat, subj, fail_lbl):
+        """Recursively lower pattern matching test against subject variable."""
+        if hasattr(ast, "MatchValue") and isinstance(pat, ast.MatchValue):
+            val = self.lower_expr(pat.value)
+            cmp_res = self._new_tmp()
+            self._emit("CMP", ["eq", subj, val], result=cmp_res)
+            ok_lbl = self._new_label("val_ok")
+            self._emit("BRANCH", [cmp_res, ok_lbl, fail_lbl])
+            self._cur_block = self._new_block(ok_lbl)
+
+        elif hasattr(ast, "MatchSingleton") and isinstance(pat, ast.MatchSingleton):
+            val = self._new_tmp()
+            self._emit("CONST", [pat.value], result=val)
+            cmp_res = self._new_tmp()
+            self._emit("CMP", ["is", subj, val], result=cmp_res)
+            ok_lbl = self._new_label("sing_ok")
+            self._emit("BRANCH", [cmp_res, ok_lbl, fail_lbl])
+            self._cur_block = self._new_block(ok_lbl)
+
+        elif hasattr(ast, "MatchAs") and isinstance(pat, ast.MatchAs):
+            if pat.pattern is not None:
+                self._lower_pattern_test(pat.pattern, subj, fail_lbl)
+            if pat.name is not None:
+                self._emit("STORE", [_safe_var(pat.name), subj])
+
+        elif hasattr(ast, "MatchOr") and isinstance(pat, ast.MatchOr):
+            or_match_lbl = self._new_label("or_matched")
+            for sub in pat.patterns[:-1]:
+                sub_fail_lbl = self._new_label("or_fail")
+                self._lower_pattern_test(sub, subj, fail_lbl=sub_fail_lbl)
+                self._emit("JUMP", [or_match_lbl])
+                self._cur_block = self._new_block(sub_fail_lbl)
+            self._lower_pattern_test(pat.patterns[-1], subj, fail_lbl=fail_lbl)
+            self._emit("JUMP", [or_match_lbl])
+            self._cur_block = self._new_block(or_match_lbl)
+
+        elif hasattr(ast, "MatchSequence") and isinstance(pat, ast.MatchSequence):
+            len_fn = self._new_tmp()
+            self._emit("LOAD", ["len"], result=len_fn)
+            len_val = self._new_tmp()
+            self._emit("CALL", [len_fn, subj], result=len_val)
+            exp_len = self._new_tmp()
+            self._emit("CONST", [len(pat.patterns)], result=exp_len)
+            cmp_len = self._new_tmp()
+            self._emit("CMP", ["eq", len_val, exp_len], result=cmp_len)
+            seq_ok_lbl = self._new_label("seq_len_ok")
+            self._emit("BRANCH", [cmp_len, seq_ok_lbl, fail_lbl])
+            self._cur_block = self._new_block(seq_ok_lbl)
+
+            for idx, sub in enumerate(pat.patterns):
+                idx_tmp = self._new_tmp()
+                self._emit("CONST", [idx], result=idx_tmp)
+                elem_tmp = self._new_tmp()
+                self._emit("SUBSCR", [subj, idx_tmp], result=elem_tmp)
+                self._lower_pattern_test(sub, elem_tmp, fail_lbl=fail_lbl)
+
+        elif hasattr(ast, "MatchMapping") and isinstance(pat, ast.MatchMapping):
+            for k, sub in zip(pat.keys, pat.patterns):
+                k_val = self.lower_expr(k)
+                in_res = self._new_tmp()
+                self._emit("CMP", ["in", k_val, subj], result=in_res)
+                map_k_ok = self._new_label("map_k_ok")
+                self._emit("BRANCH", [in_res, map_k_ok, fail_lbl])
+                self._cur_block = self._new_block(map_k_ok)
+
+                val_tmp = self._new_tmp()
+                self._emit("SUBSCR", [subj, k_val], result=val_tmp)
+                self._lower_pattern_test(sub, val_tmp, fail_lbl=fail_lbl)
+            if getattr(pat, "rest", None):
+                self._emit("STORE", [_safe_var(pat.rest), subj])
 
     def _lower_call_keywords(self, node):
         """Lower keyword arguments into a table and return its tmp name, or None."""
@@ -739,14 +851,11 @@ class IRLowerer:
 
     def _emit_call(self, fn, args, kw_table=None):
         """Emit a CALL instruction with positional args and optional keyword table."""
-        all_args = list(args)
-        if kw_table is not None:
-            # Pad positional args with nil up to 5, then append kw table as 6th arg
-            while len(all_args) < 5:
-                all_args.append(None)
-            all_args.append(kw_table)
         t = self._new_tmp()
-        self._emit("CALL", [fn] + all_args, result=t)
+        if kw_table is not None:
+            self._emit("CALL", ["_luthon_call_kw", fn, kw_table] + list(args), result=t)
+        else:
+            self._emit("CALL", [fn] + list(args), result=t)
         return t
 
     def lower_expr(self, node):
@@ -904,15 +1013,41 @@ class IRLowerer:
             self._cur_block = self._new_block(end_lbl)
             return res
         if isinstance(node, ast.List):
-            t = self._new_tmp()
-            els = [self.lower_expr(e) for e in node.elts]
-            self._emit("MAKE_LIST", els, result=t)
-            return t
+            has_starred = any(isinstance(e, ast.Starred) for e in node.elts)
+            if not has_starred:
+                t = self._new_tmp()
+                els = [self.lower_expr(e) for e in node.elts]
+                self._emit("MAKE_LIST", els, result=t)
+                return t
+            res = self._new_tmp()
+            self._emit("MAKE_LIST", [], result=res)
+            for e in node.elts:
+                if isinstance(e, ast.Starred):
+                    seq = self.lower_expr(e.value)
+                    self._emit("CALL", ["_seq_extend", res, seq])
+                else:
+                    val = self.lower_expr(e)
+                    self._emit("LIST_APPEND", [res, val])
+            return res
         if isinstance(node, ast.Tuple):
-            t = self._new_tmp()
-            els = [self.lower_expr(e) for e in node.elts]
-            self._emit("MAKE_TUPLE", els, result=t)
-            return t
+            has_starred = any(isinstance(e, ast.Starred) for e in node.elts)
+            if not has_starred:
+                t = self._new_tmp()
+                els = [self.lower_expr(e) for e in node.elts]
+                self._emit("MAKE_TUPLE", els, result=t)
+                return t
+            list_tmp = self._new_tmp()
+            self._emit("MAKE_LIST", [], result=list_tmp)
+            for e in node.elts:
+                if isinstance(e, ast.Starred):
+                    seq = self.lower_expr(e.value)
+                    self._emit("CALL", ["_seq_extend", list_tmp, seq])
+                else:
+                    val = self.lower_expr(e)
+                    self._emit("LIST_APPEND", [list_tmp, val])
+            res = self._new_tmp()
+            self._emit("CALL", ["tuple", list_tmp], result=res)
+            return res
         if isinstance(node, ast.Set):
             t = self._new_tmp()
             self._emit("MAKE_SET", [], result=t)
@@ -1035,10 +1170,22 @@ class IRLowerer:
             return res
         if isinstance(node, ast.Dict):
             t = self._new_tmp()
-            items = []
+            has_unpack = any(k is None for k in node.keys)
+            if not has_unpack:
+                items = []
+                for k, v in zip(node.keys, node.values):
+                    items.append((self.lower_expr(k), self.lower_expr(v)))
+                self._emit("MAKE_DICT", items, result=t)
+                return t
+            self._emit("MAKE_DICT", [], result=t)
             for k, v in zip(node.keys, node.values):
-                items.append((self.lower_expr(k) if k is not None else None, self.lower_expr(v)))
-            self._emit("MAKE_DICT", items, result=t)
+                if k is None:
+                    dict_val = self.lower_expr(v)
+                    self._emit("CALL", ["_dict_update", t, dict_val])
+                else:
+                    k_tmp = self.lower_expr(k)
+                    v_tmp = self.lower_expr(v)
+                    self._emit("DICT_SET", [t, k_tmp, v_tmp])
             return t
         if isinstance(node, ast.Lambda):
             args = [a.arg for a in node.args.args]

@@ -61,6 +61,61 @@ typedef struct PyMethodDef {
     const char  *ml_doc;
 } PyMethodDef;
 
+/* Descriptors, Properties & GetSet */
+typedef PyObject *(*getter)(PyObject *, void *);
+typedef int (*setter)(PyObject *, PyObject *, void *);
+
+typedef struct PyGetSetDef {
+    const char *name;
+    getter      get;
+    setter      set;
+    const char *doc;
+    void       *closure;
+} PyGetSetDef;
+
+typedef PyObject *(*descrgetfunc)(PyObject *, PyObject *, PyObject *);
+typedef int (*descrsetfunc)(PyObject *, PyObject *, PyObject *);
+typedef intptr_t (*hashfunc)(PyObject *);
+
+/* Struct Member Descriptors */
+typedef struct PyMemberDef {
+    const char *name;
+    int         type;
+    Py_ssize_t  offset;
+    int         flags;
+    const char *doc;
+} PyMemberDef;
+
+#define T_SHORT          0
+#define T_INT            1
+#define T_LONG           2
+#define T_FLOAT          3
+#define T_DOUBLE         4
+#define T_STRING         5
+#define T_OBJECT         6
+#define T_CHAR           7
+#define T_BYTE           8
+#define T_UBYTE          9
+#define T_USHORT         10
+#define T_UINT           11
+#define T_ULONG          12
+#define T_STRING_INPLACE 13
+#define T_BOOL           14
+#define T_LONGLONG       16
+#define T_ULONGLONG      17
+#define T_PYSSIZET       18
+#define READONLY         1
+
+/* Sequence Iterator structure */
+typedef struct {
+    Py_ssize_t ob_refcnt;
+    PyTypeObject *ob_type;
+    PyTag tag;
+    int _pad;
+    PyObject *seq;
+    Py_ssize_t it_index;
+} PySeqIterObject;
+
 /* PyModuleDef_Base matching CPython 3.x */
 typedef struct PyModuleDef_Base {
     Py_ssize_t  ob_refcnt;
@@ -79,7 +134,36 @@ typedef struct PyModuleDef {
     PyMethodDef     *m_methods;
 } PyModuleDef;
 
-/* PEP 3118 Buffer Protocol */
+/* PEP 3118 Buffer Protocol Flags */
+#define PyBUF_SIMPLE         0
+#define PyBUF_WRITABLE       0x0001
+#define PyBUF_FORMAT         0x0004
+#define PyBUF_ND             0x0008
+#define PyBUF_STRIDES        (0x0010 | PyBUF_ND)
+#define PyBUF_C_CONTIGUOUS   (0x0020 | PyBUF_STRIDES)
+#define PyBUF_F_CONTIGUOUS   (0x0040 | PyBUF_STRIDES)
+#define PyBUF_ANY_CONTIGUOUS (0x0080 | PyBUF_STRIDES)
+#define PyBUF_INDIRECT       (0x0100 | PyBUF_STRIDES)
+
+#define PyBUF_FULL           (PyBUF_INDIRECT | PyBUF_WRITABLE | PyBUF_FORMAT)
+#define PyBUF_FULL_RO        (PyBUF_INDIRECT | PyBUF_FORMAT)
+#define PyBUF_RECORDS        (PyBUF_STRIDES | PyBUF_WRITABLE | PyBUF_FORMAT)
+#define PyBUF_RECORDS_RO     (PyBUF_STRIDES | PyBUF_FORMAT)
+#define PyBUF_STRIDED        (PyBUF_STRIDES | PyBUF_WRITABLE)
+#define PyBUF_STRIDED_RO     (PyBUF_STRIDES)
+#define PyBUF_CONTIG         (PyBUF_ND | PyBUF_WRITABLE)
+#define PyBUF_CONTIG_RO      (PyBUF_ND)
+
+struct bufferinfo;
+typedef struct bufferinfo Py_buffer;
+
+typedef int (*getbufferproc)(PyObject *, Py_buffer *, int);
+typedef void (*releasebufferproc)(PyObject *, Py_buffer *);
+
+typedef struct {
+    getbufferproc     bf_getbuffer;
+    releasebufferproc bf_releasebuffer;
+} PyBufferProcs;
 
 /* Complex number matching CPython */
 typedef struct Py_complex {
@@ -227,6 +311,7 @@ struct _object {
     Py_ssize_t ob_refcnt;
     PyTypeObject *ob_type;
     PyTag tag;
+    int buf_locks;
     union {
         int64_t i_val;
         double f_val;
@@ -394,6 +479,7 @@ EXPORT PyObject* PySequence_GetItem(PyObject *s, Py_ssize_t i);
 EXPORT int PySequence_SetItem(PyObject *s, Py_ssize_t i, PyObject *o);
 EXPORT int PySequence_Check(PyObject *s);
 EXPORT PyObject* PySequence_Fast(PyObject *o, const char *m);
+EXPORT PyObject* PySeqIter_New(PyObject *seq);
 EXPORT int PyIndex_Check(PyObject *o);
 EXPORT int PyNumber_Check(PyObject *o);
 EXPORT Py_ssize_t PyNumber_AsSsize_t(PyObject *item, PyObject *err);
@@ -472,6 +558,18 @@ EXPORT int PyCapsule_IsValid(PyObject *op, const char *name);
 EXPORT void* PyCapsule_GetPointer(PyObject *op, const char *name);
 EXPORT void* PyCapsule_GetContext(PyObject *op);
 EXPORT int PyCapsule_SetContext(PyObject *op, void *context);
+
+/* PEP 3118 Multi-Dimensional Buffer Functions (Phase 33) */
+EXPORT int PyBuffer_FillInfo(Py_buffer *view, PyObject *o, void *buf, Py_ssize_t len, int readonly, int flags);
+EXPORT int PyBuffer_FillContiguousStrides(int ndims, Py_ssize_t *shape, Py_ssize_t *strides, int itemsize, char fort);
+EXPORT int PyBuffer_IsContiguous(const Py_buffer *view, char fort);
+EXPORT Py_ssize_t PyBuffer_SizeFromFormat(const char *format);
+
+/* Dual-Ownership GC Synchronization API (Phase 33) */
+EXPORT void luthon_gc_register(void *cdata_ptr, PyObject *py_obj, int is_owned);
+EXPORT void luthon_gc_unregister(void *cdata_ptr);
+EXPORT PyObject* luthon_gc_lookup(void *cdata_ptr);
+EXPORT void luthon_gc_dec_ref(PyObject *py_obj);
 
 /* Lifecycle API */
 EXPORT int Py_IsInitialized(void);

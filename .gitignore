@@ -16,3 +16,4 @@ src/luthon.egg-info/
 *.a
 src/luthon/native/build/
 .claude/worktrees/
+*.luthon-nyi
