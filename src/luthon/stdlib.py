@@ -3178,6 +3178,149 @@ uuid.uuid4 = _uuid4
 uuid.UUID = function(s) return tostring(s) end
 _G.uuid = uuid
 
+-- socket native stdlib module
+local _socket_mod = {
+  AF_INET = 2,
+  AF_INET6 = 10,
+  SOCK_STREAM = 1,
+  SOCK_DGRAM = 2,
+  SOL_SOCKET = 1,
+  SO_REUSEADDR = 2,
+  IPPROTO_TCP = 6,
+}
+
+pcall(function()
+  local ffi = require("ffi")
+  ffi.cdef[[
+    typedef int socket_t;
+    struct in_addr { uint32_t s_addr; };
+    struct sockaddr_in {
+      int16_t sin_family;
+      uint16_t sin_port;
+      struct in_addr sin_addr;
+      char sin_zero[8];
+    };
+    struct sockaddr { uint16_t sa_family; char sa_data[14]; };
+    int socket(int domain, int type, int protocol);
+    int bind(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+    int connect(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+    int listen(int sockfd, int backlog);
+    int accept(int sockfd, struct sockaddr *addr, uint32_t *addrlen);
+    ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+    ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+    int close(int fd);
+    int setsockopt(int sockfd, int level, int optname, const void *optval, uint32_t optlen);
+    uint16_t htons(uint16_t hostshort);
+    uint16_t ntohs(uint16_t netshort);
+    int inet_pton(int af, const char *src, void *dst);
+    const char* inet_ntop(int af, const void *src, char *dst, uint32_t size);
+  ]]
+end)
+
+local Socket_mt = {}
+Socket_mt.__index = Socket_mt
+
+function Socket_mt:setsockopt(level, optname, val)
+  local ffi = require("ffi")
+  local optval = ffi.new("int[1]", val)
+  return ffi.C.setsockopt(self._fd, level, optname, optval, ffi.sizeof("int"))
+end
+
+function Socket_mt:bind(addr_tuple)
+  local ffi = require("ffi")
+  local host = addr_tuple[1] or "0.0.0.0"
+  local port = tonumber(addr_tuple[2]) or 0
+  local addr = ffi.new("struct sockaddr_in")
+  addr.sin_family = self._family or 2
+  addr.sin_port = ffi.C.htons(port)
+  local pton = ffi.C.inet_pton(self._family or 2, host == "" and "0.0.0.0" or host, addr.sin_addr)
+  if pton <= 0 then addr.sin_addr.s_addr = 0 end
+  local res = ffi.C.bind(self._fd, ffi.cast("struct sockaddr*", addr), ffi.sizeof("struct sockaddr_in"))
+  if res < 0 then error("OSError: [Errno 98] Address already in use", 2) end
+  return 0
+end
+
+function Socket_mt:listen(backlog)
+  local ffi = require("ffi")
+  return ffi.C.listen(self._fd, backlog or 128)
+end
+
+function Socket_mt:accept()
+  local ffi = require("ffi")
+  local client_addr = ffi.new("struct sockaddr_in")
+  local addrlen = ffi.new("uint32_t[1]", ffi.sizeof("struct sockaddr_in"))
+  local c_fd = ffi.C.accept(self._fd, ffi.cast("struct sockaddr*", client_addr), addrlen)
+  if c_fd < 0 then error("OSError: accept failed", 2) end
+  local client_sock = setmetatable({ _fd = c_fd, _family = self._family, _type = self._type }, Socket_mt)
+  local port = ffi.C.ntohs(client_addr.sin_port)
+  local ip_buf = ffi.new("char[64]")
+  ffi.C.inet_ntop(self._family or 2, client_addr.sin_addr, ip_buf, 64)
+  local host = ffi.string(ip_buf)
+  return setmetatable({ client_sock, setmetatable({ host, port }, _tuple_mt) }, _tuple_mt)
+end
+
+function Socket_mt:connect(addr_tuple)
+  local ffi = require("ffi")
+  local host = addr_tuple[1] or "127.0.0.1"
+  if host == "localhost" then host = "127.0.0.1" end
+  local port = tonumber(addr_tuple[2]) or 80
+  local addr = ffi.new("struct sockaddr_in")
+  addr.sin_family = self._family or 2
+  addr.sin_port = ffi.C.htons(port)
+  ffi.C.inet_pton(self._family or 2, host, addr.sin_addr)
+  local res = ffi.C.connect(self._fd, ffi.cast("struct sockaddr*", addr), ffi.sizeof("struct sockaddr_in"))
+  if res < 0 then error("ConnectionRefusedError: [Errno 111] Connection refused", 2) end
+  return 0
+end
+
+function Socket_mt:send(data)
+  local ffi = require("ffi")
+  data = tostring(data or "")
+  local n = ffi.C.send(self._fd, data, #data, 0)
+  return tonumber(n)
+end
+
+function Socket_mt:sendall(data)
+  return self:send(data)
+end
+
+function Socket_mt:recv(bufsize)
+  local ffi = require("ffi")
+  bufsize = tonumber(bufsize) or 4096
+  local buf = ffi.new("char[?]", bufsize)
+  local n = ffi.C.recv(self._fd, buf, bufsize, 0)
+  if n <= 0 then return "" end
+  return ffi.string(buf, n)
+end
+
+function Socket_mt:close()
+  local ffi = require("ffi")
+  if self._fd and self._fd >= 0 then
+    ffi.C.close(self._fd)
+    self._fd = -1
+  end
+end
+
+function Socket_mt:__enter__()
+  return self
+end
+
+function Socket_mt:__exit__()
+  self:close()
+end
+
+_socket_mod.socket = function(family, sock_type, proto)
+  local ffi = require("ffi")
+  family = family or 2
+  sock_type = sock_type or 1
+  proto = proto or 0
+  local fd = ffi.C.socket(family, sock_type, proto)
+  if fd < 0 then error("OSError: cannot create socket", 2) end
+  return setmetatable({ _fd = fd, _family = family, _type = sock_type }, Socket_mt)
+end
+
+_G.socket = _socket_mod
+
 -- asyncio cooperative event loop runner & task scheduler (Phase 35)
 asyncio = {}
 
@@ -3298,6 +3441,13 @@ asyncio.run = function(coro_or_fn)
       end
     end
     loop._timers = remaining_timers
+
+    -- Service active network servers (e.g. WebSocket / HTTP servers)
+    if _G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS then
+      for _, srv in ipairs(_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS) do
+        if srv.poll_accept then srv:poll_accept() end
+      end
+    end
 
     -- 2. Run one round of ready microtasks
     local current_ready = loop._ready

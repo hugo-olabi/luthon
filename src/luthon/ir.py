@@ -953,7 +953,7 @@ class IRLowerer:
                 root = node.func.value
                 while isinstance(root, ast.Attribute):
                     root = root.value
-                known_modules = ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table","operator","six","packaging")
+                known_modules = ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table","operator","six","packaging","websockets","asyncio","socket","http","requests","sqlite3","numpy","PIL")
                 is_module = (isinstance(root, ast.Name) and root.id in known_modules) or (hasattr(self, "_imported_modules") and isinstance(root, ast.Name) and root.id in self._imported_modules)
                 if is_module:
                     fn = self.lower_expr(node.func)

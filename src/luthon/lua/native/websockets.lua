@@ -18,42 +18,44 @@ websockets.exceptions = {
 }
 
 -- Socket FFI declarations
-pcall(function()
-  ffi.cdef[[
-    typedef int socket_t;
-    struct in_addr { uint32_t s_addr; };
-    struct sockaddr_in {
-      int16_t sin_family;
-      uint16_t sin_port;
-      struct in_addr sin_addr;
-      char sin_zero[8];
-    };
-    struct sockaddr {
-      uint16_t sa_family;
-      char sa_data[14];
-    };
-
-    int socket(int domain, int type, int protocol);
-    int bind(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
-    int connect(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
-    int listen(int sockfd, int backlog);
-    int accept(int sockfd, struct sockaddr *addr, uint32_t *addrlen);
-    ssize_t send(int sockfd, const void *buf, size_t len, int flags);
-    ssize_t recv(int sockfd, void *buf, size_t len, int flags);
-    int close(int fd);
-    int setsockopt(int sockfd, int level, int optname, const void *optval, uint32_t optlen);
-    int fcntl(int fd, int cmd, ...);
-    uint16_t htons(uint16_t hostshort);
-    int inet_pton(int af, const char *src, void *dst);
-
-    typedef struct pollfd {
-      int   fd;
-      short events;
-      short revents;
-    } pollfd;
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-  ]]
-end)
+pcall(function() ffi.cdef[[ typedef int socket_t; ]] end)
+pcall(function() ffi.cdef[[ struct in_addr { uint32_t s_addr; }; ]] end)
+pcall(function() ffi.cdef[[
+  struct sockaddr_in {
+    int16_t sin_family;
+    uint16_t sin_port;
+    struct in_addr sin_addr;
+    char sin_zero[8];
+  };
+]] end)
+pcall(function() ffi.cdef[[
+  struct sockaddr {
+    uint16_t sa_family;
+    char sa_data[14];
+  };
+]] end)
+pcall(function() ffi.cdef[[
+  typedef struct pollfd {
+    int   fd;
+    short events;
+    short revents;
+  } pollfd;
+]] end)
+pcall(function() ffi.cdef[[
+  int socket(int domain, int type, int protocol);
+  int bind(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+  int connect(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+  int listen(int sockfd, int backlog);
+  int accept(int sockfd, struct sockaddr *addr, uint32_t *addrlen);
+  ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+  ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+  int close(int fd);
+  int setsockopt(int sockfd, int level, int optname, const void *optval, uint32_t optlen);
+  int fcntl(int fd, int cmd, ...);
+  uint16_t htons(uint16_t hostshort);
+  int inet_pton(int af, const char *src, void *dst);
+  int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+]] end)
 
 local AF_INET = 2
 local SOCK_STREAM = 1
@@ -169,22 +171,62 @@ function WebSocketConnection:send(data)
 end
 
 function WebSocketConnection:recv()
-  if #self._in_queue > 0 then
-    return table.remove(self._in_queue, 1)
-  end
-  -- Non-blocking read from socket
-  local buf = ffi.new("char[4096]")
-  local n = ffi.C.recv(self._fd, buf, 4096, 0)
-  if n > 0 then
-    self._buf = self._buf .. ffi.string(buf, n)
-    self:_parse_frames()
+  return coroutine.create(function()
+    while not self._closed do
+      self:_parse_frames()
+      if #self._in_queue > 0 then
+        return table.remove(self._in_queue, 1)
+      end
+
+      if _G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS then
+        for _, srv in ipairs(_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS) do
+          if srv.poll_accept then srv:poll_accept() end
+        end
+      end
+
+      local pfd = ffi.new("struct pollfd[1]")
+      pfd[0].fd = self._fd
+      pfd[0].events = 1 -- POLLIN
+      local r = ffi.C.poll(pfd, 1, 0)
+      if r > 0 then
+        local buf = ffi.new("char[4096]")
+        local n = ffi.C.recv(self._fd, buf, 4096, 0)
+        if n > 0 then
+          self._buf = self._buf .. ffi.string(buf, n)
+          self:_parse_frames()
+          if #self._in_queue > 0 then
+            return table.remove(self._in_queue, 1)
+          end
+        elseif n == 0 then
+          self:close()
+          break
+        end
+      end
+
+      coroutine.yield("sleep", 0.005)
+    end
+
     if #self._in_queue > 0 then
       return table.remove(self._in_queue, 1)
     end
-  elseif n == 0 then
-    self:close()
+    return nil
+  end)
+end
+
+function WebSocketConnection:__aenter__()
+  return self
+end
+
+function WebSocketConnection:__aexit__()
+  self:close()
+end
+
+function WebSocketConnection:__iter__()
+  return function()
+    local msg = self:recv()
+    if msg == nil or self._closed then return nil end
+    return msg
   end
-  return nil
 end
 
 function WebSocketConnection:_parse_frames()
@@ -284,6 +326,9 @@ local Server_mt = {}
 Server_mt.__index = Server_mt
 
 function Server_mt:__aenter__()
+  if self._server_fd and self._server_fd >= 0 then
+    return self
+  end
   -- Bind socket and start listening
   local ok, fd = pcall(function()
     local s = ffi.C.socket(AF_INET, SOCK_STREAM, 0)
@@ -319,46 +364,57 @@ function Server_mt:__aenter__()
   return self
 end
 
-function Server_mt:run_event_loop(future)
-  local client_addrs = ffi.new("struct sockaddr_in")
-  local addrlen = ffi.new("uint32_t[1]", ffi.sizeof("struct sockaddr_in"))
+function Server_mt:poll_accept()
+  if not self._server_fd or self._server_fd < 0 then return end
   local pfd = ffi.new("struct pollfd[1]")
+  pfd[0].fd = self._server_fd
+  pfd[0].events = 1 -- POLLIN
+  local r = ffi.C.poll(pfd, 1, 0)
+  if r > 0 then
+    local client_addrs = ffi.new("struct sockaddr_in")
+    local addrlen = ffi.new("uint32_t[1]", ffi.sizeof("struct sockaddr_in"))
+    local client_fd = ffi.C.accept(self._server_fd, ffi.cast("struct sockaddr*", client_addrs), addrlen)
+    if client_fd >= 0 then
+      local req_buf = ffi.new("char[4096]")
+      local n = ffi.C.recv(client_fd, req_buf, 4096, 0)
+      if n > 0 then
+        local req_str = ffi.string(req_buf, n)
+        local ws_key = req_str:match("[Ss]ec%-[Ww]eb[Ss]ocket%-[Kk]ey:%s*([^\r\n]+)")
+        if ws_key then
+          ws_key = ws_key:match("^%s*(.-)%s*$")
+          local accept_key = compute_accept_key(ws_key)
+          local handshake_resp = "HTTP/1.1 101 Switching Protocols\r\n" ..
+                                 "Upgrade: websocket\r\n" ..
+                                 "Connection: Upgrade\r\n" ..
+                                 "Sec-WebSocket-Accept: " .. accept_key .. "\r\n\r\n"
+          ffi.C.send(client_fd, handshake_resp, #handshake_resp, 0)
 
-  while self._server_fd and self._server_fd >= 0 and (not future or not future:done()) do
-    pfd[0].fd = self._server_fd
-    pfd[0].events = 1 -- POLLIN
-    local r = ffi.C.poll(pfd, 1, 200) -- 200ms poll
-    if r > 0 then
-      local client_fd = ffi.C.accept(self._server_fd, ffi.cast("struct sockaddr*", client_addrs), addrlen)
-      if client_fd >= 0 then
-        -- Read HTTP WebSocket Upgrade Request
-        local req_buf = ffi.new("char[4096]")
-        local n = ffi.C.recv(client_fd, req_buf, 4096, 0)
-        if n > 0 then
-          local req_str = ffi.string(req_buf, n)
-          local ws_key = req_str:match("[Ss]ec%-[Ww]eb[Ss]ocket%-[Kk]ey:%s*([^\r\n]+)")
-          if ws_key then
-            -- Trim trailing whitespace
-            ws_key = ws_key:match("^%s*(.-)%s*$")
-            local accept_key = compute_accept_key(ws_key)
-            local handshake_resp = "HTTP/1.1 101 Switching Protocols\r\n" ..
-                                   "Upgrade: websocket\r\n" ..
-                                   "Connection: Upgrade\r\n" ..
-                                   "Sec-WebSocket-Accept: " .. accept_key .. "\r\n\r\n"
-            ffi.C.send(client_fd, handshake_resp, #handshake_resp, 0)
-
-            local ws = WebSocketConnection.new(client_fd)
-            if self.handler then
-              local ok_h, err_h = pcall(self.handler, ws)
-              if not ok_h then
-                print("WebSocket handler error:", err_h)
+          local ws = WebSocketConnection.new(client_fd)
+          if self.handler then
+            local ok_h, h_res = pcall(self.handler, ws)
+            if ok_h and (type(h_res) == "thread" or (type(h_res) == "table" and h_res._is_task)) then
+              if _G.asyncio and _G.asyncio.create_task then
+                _G.asyncio.create_task(h_res)
               end
             end
-          else
-            ffi.C.close(client_fd)
           end
+        else
+          ffi.C.close(client_fd)
         end
       end
+    end
+  end
+end
+
+function Server_mt:run_event_loop(future)
+  while self._server_fd and self._server_fd >= 0 and (not future or not future:done()) do
+    self:poll_accept()
+    local ok_yield = pcall(function() coroutine.yield("sleep", 0.01) end)
+    if not ok_yield then
+      local pfd = ffi.new("struct pollfd[1]")
+      pfd[0].fd = self._server_fd
+      pfd[0].events = 1
+      ffi.C.poll(pfd, 1, 20)
     end
   end
 end
@@ -388,6 +444,9 @@ end
 
 function websockets.serve(...)
   local args = {...}
+  if #args > 0 and (args[1] == websockets or (type(args[1]) == "table" and args[1].serve == websockets.serve)) then
+    table.remove(args, 1)
+  end
   local handler = args[1]
   local host = nil
   local port = nil
@@ -429,6 +488,7 @@ local Client_mt = {}
 Client_mt.__index = Client_mt
 
 function Client_mt:__aenter__()
+  if self._ws then return self._ws end
   -- Parse uri ws://host:port
   local host, port = self.uri:match("ws://([^:]+):?(%d*)")
   host = (host and host ~= "") and host or "127.0.0.1"
@@ -458,8 +518,23 @@ function Client_mt:__aenter__()
               "Sec-WebSocket-Version: 13\r\n\r\n"
   ffi.C.send(s, req, #req, 0)
 
+  -- Service any active local servers to accept and complete handshake
+  if _G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS then
+    for _, srv in ipairs(_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS) do
+      if srv.poll_accept then srv:poll_accept() end
+    end
+  end
+
   local resp_buf = ffi.new("char[4096]")
   local n = ffi.C.recv(s, resp_buf, 4096, 0)
+  if n <= 0 then
+    local pfd = ffi.new("struct pollfd[1]")
+    pfd[0].fd = s
+    pfd[0].events = 1
+    if ffi.C.poll(pfd, 1, 500) > 0 then
+      n = ffi.C.recv(s, resp_buf, 4096, 0)
+    end
+  end
   if n <= 0 then
     ffi.C.close(s)
     error("WebSocket handshake failed")
@@ -477,7 +552,10 @@ function Client_mt:__aexit__()
   end
 end
 
-function websockets.connect(uri)
+function websockets.connect(uri, ...)
+  if uri == websockets or (type(uri) == "table" and uri.connect == websockets.connect) then
+    uri = select(1, ...)
+  end
   return setmetatable({ uri = uri, _ws = nil }, Client_mt)
 end
 
