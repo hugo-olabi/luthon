@@ -1153,20 +1153,73 @@ function bool(x)
 end
 function round(x, n) n=n or 0; local f=10^n; return math.floor(x*f+0.5)/f end
 function min(...)
-  local a = {...}
-  if #a == 1 and type(a[1]) == "table" and not a[1]._py then a = a[1] end
-  local m = a[1]
+  local raw_args = {...}
+  local a = raw_args[1]
+  local key_fn = nil
+  for i = #raw_args, 2, -1 do
+    local arg = raw_args[i]
+    if type(arg) == "table" and arg.key ~= nil then
+      key_fn = arg.key
+      break
+    end
+  end
+
+  if type(a) ~= "table" or a._py then
+    a = raw_args
+  elseif type(a) == "table" and #a == 0 then
+    -- Table/dict with non-sequential or string keys: collect keys
+    local keys = {}
+    for k in pairs(a) do table.insert(keys, k) end
+    a = keys
+  end
+
+  local best_item = a[1]
+  local best_score = key_fn and key_fn(best_item) or best_item
   local n = #a
-  for i = 2, n do if a[i] < m then m = a[i] end end
-  return m
+  for i = 2, n do
+    local item = a[i]
+    local score = key_fn and key_fn(item) or item
+    if _luthon_cmp("<", score, best_score) then
+      best_item = item
+      best_score = score
+    end
+  end
+  return best_item
 end
+
 function max(...)
-  local a = {...}
-  if #a == 1 and type(a[1]) == "table" and not a[1]._py then a = a[1] end
-  local m = a[1]
+  local raw_args = {...}
+  local a = raw_args[1]
+  local key_fn = nil
+  for i = #raw_args, 2, -1 do
+    local arg = raw_args[i]
+    if type(arg) == "table" and arg.key ~= nil then
+      key_fn = arg.key
+      break
+    end
+  end
+
+  if type(a) ~= "table" or a._py then
+    a = raw_args
+  elseif type(a) == "table" and #a == 0 then
+    -- Table/dict with non-sequential or string keys: collect keys
+    local keys = {}
+    for k in pairs(a) do table.insert(keys, k) end
+    a = keys
+  end
+
+  local best_item = a[1]
+  local best_score = key_fn and key_fn(best_item) or best_item
   local n = #a
-  for i = 2, n do if a[i] > m then m = a[i] end end
-  return m
+  for i = 2, n do
+    local item = a[i]
+    local score = key_fn and key_fn(item) or item
+    if _luthon_cmp(">", score, best_score) then
+      best_item = item
+      best_score = score
+    end
+  end
+  return best_item
 end
 function sum(t) local s=0; local n=#t; for i=1,n do s=s+t[i] end; return s end
 function sorted(t) local r={}; local n=#t; for i=1,n do r[i]=t[i] end; table.sort(r); return r end

@@ -151,11 +151,15 @@ class IRLowerer:
                 val = self.lower_expr(node.value)
                 for i, t in enumerate(node.targets[0].elts):
                     if isinstance(t, ast.Name):
+                        safe_name = _safe_var(t.id)
                         idx_tmp = self._new_tmp()
                         self._emit("CONST", [i], result=idx_tmp)
                         elem_tmp = self._new_tmp()
                         self._emit("SUBSCR", [val, idx_tmp], result=elem_tmp)
-                        self._emit("STORE", [t.id, elem_tmp])
+                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
+                            self._emit("CELL_SET", [safe_name, elem_tmp])
+                        else:
+                            self._emit("STORE", [safe_name, elem_tmp])
             else:
                 val = self.lower_expr(node.value)
                 for t in node.targets:
@@ -244,15 +248,23 @@ class IRLowerer:
             self._emit("NEXT", [iter_tmp], result=nxt)
             self._emit("BRANCH_NONE", [nxt, end_lbl])
             if isinstance(node.target, ast.Name):
-                self._emit("STORE", [node.target.id, nxt])
+                safe_target = _safe_var(node.target.id)
+                if self._cur_fn is not None and (node.target.id in getattr(self._cur_fn, "cellvars", []) or node.target.id in getattr(self._cur_fn, "freevars", [])):
+                    self._emit("CELL_SET", [safe_target, nxt])
+                else:
+                    self._emit("STORE", [safe_target, nxt])
             elif isinstance(node.target, (ast.Tuple, ast.List)):
                 for i, t in enumerate(node.target.elts):
                     if isinstance(t, ast.Name):
+                        safe_t = _safe_var(t.id)
                         idx_tmp = self._new_tmp()
                         self._emit("CONST", [i], result=idx_tmp)
                         elem_tmp = self._new_tmp()
                         self._emit("SUBSCR", [nxt, idx_tmp], result=elem_tmp)
-                        self._emit("STORE", [t.id, elem_tmp])
+                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
+                            self._emit("CELL_SET", [safe_t, elem_tmp])
+                        else:
+                            self._emit("STORE", [safe_t, elem_tmp])
             self._emit("JUMP", [body_lbl])
             self._cur_block = self._new_block(body_lbl)
             for s in node.body:

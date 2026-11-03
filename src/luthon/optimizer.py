@@ -358,6 +358,31 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                             uses.add(sub)
                 if isinstance(target, str) and target in poolable:
                     defs.add(target)
+            elif ins.op in ("BINOP", "CMP", "UNOP") and ins.args:
+                # args[0] is operator name (not a variable)
+                for arg in ins.args[1:]:
+                    if isinstance(arg, str) and arg in poolable and arg not in defs:
+                        uses.add(arg)
+                    elif isinstance(arg, (list, tuple)):
+                        for sub in arg:
+                            if isinstance(sub, str) and sub in poolable and sub not in defs:
+                                uses.add(sub)
+                if ins.result and ins.result in poolable:
+                    defs.add(ins.result)
+            elif ins.op == "GET_ATTR" and len(ins.args) >= 2:
+                # args[0] is obj (used), args[1] is attribute name literal
+                obj_arg = ins.args[0]
+                if isinstance(obj_arg, str) and obj_arg in poolable and obj_arg not in defs:
+                    uses.add(obj_arg)
+                if ins.result and ins.result in poolable:
+                    defs.add(ins.result)
+            elif ins.op == "SET_ATTR" and len(ins.args) >= 3:
+                # args[0] is obj (used), args[1] is attribute name literal, args[2] is val (used)
+                obj_arg, val_arg = ins.args[0], ins.args[2]
+                if isinstance(obj_arg, str) and obj_arg in poolable and obj_arg not in defs:
+                    uses.add(obj_arg)
+                if isinstance(val_arg, str) and val_arg in poolable and val_arg not in defs:
+                    uses.add(val_arg)
             else:
                 for arg in ins.args:
                     if isinstance(arg, str) and arg in poolable:
@@ -413,6 +438,36 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                     for sub in val:
                         if isinstance(sub, str) and sub in poolable:
                             live.add(sub)
+            elif ins.op in ("BINOP", "CMP", "UNOP") and ins.args:
+                if ins.result and ins.result in poolable:
+                    live.discard(ins.result)
+                    for other in live:
+                        if other in poolable and other != ins.result:
+                            adj[ins.result].add(other)
+                            adj[other].add(ins.result)
+                for arg in ins.args[1:]:
+                    if isinstance(arg, str) and arg in poolable:
+                        live.add(arg)
+                    elif isinstance(arg, (list, tuple)):
+                        for sub in arg:
+                            if isinstance(sub, str) and sub in poolable:
+                                live.add(sub)
+            elif ins.op == "GET_ATTR" and len(ins.args) >= 2:
+                if ins.result and ins.result in poolable:
+                    live.discard(ins.result)
+                    for other in live:
+                        if other in poolable and other != ins.result:
+                            adj[ins.result].add(other)
+                            adj[other].add(ins.result)
+                obj_arg = ins.args[0]
+                if isinstance(obj_arg, str) and obj_arg in poolable:
+                    live.add(obj_arg)
+            elif ins.op == "SET_ATTR" and len(ins.args) >= 3:
+                obj_arg, val_arg = ins.args[0], ins.args[2]
+                if isinstance(obj_arg, str) and obj_arg in poolable:
+                    live.add(obj_arg)
+                if isinstance(val_arg, str) and val_arg in poolable:
+                    live.add(val_arg)
             else:
                 if ins.result and ins.result in poolable:
                     live.discard(ins.result)
@@ -472,6 +527,23 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                     else:
                         new_args.append(arg)
                 ins.args = new_args
+            elif ins.op == "GET_ATTR" and len(ins.args) >= 2:
+                # In GET_ATTR, args[0] is obj, args[1] is attribute name (literal identifier).
+                # args[1] must NOT be rewritten!
+                if ins.result and ins.result in reg_map:
+                    ins.result = reg_map[ins.result]
+                obj_arg = ins.args[0]
+                new_obj = reg_map.get(obj_arg, obj_arg) if isinstance(obj_arg, str) else obj_arg
+                ins.args[0] = new_obj
+            elif ins.op == "SET_ATTR" and len(ins.args) >= 3:
+                # In SET_ATTR, args[0] is obj, args[1] is attribute name (literal identifier), args[2] is val.
+                # args[1] must NOT be rewritten!
+                obj_arg = ins.args[0]
+                val_arg = ins.args[2]
+                new_obj = reg_map.get(obj_arg, obj_arg) if isinstance(obj_arg, str) else obj_arg
+                new_val = reg_map.get(val_arg, val_arg) if isinstance(val_arg, str) else val_arg
+                ins.args[0] = new_obj
+                ins.args[2] = new_val
             else:
                 if ins.result and ins.result in reg_map:
                     ins.result = reg_map[ins.result]
