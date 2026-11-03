@@ -1103,6 +1103,14 @@ function make_generator(fn, ...)
   return gen
 end
 
+function make_coroutine(fn, ...)
+  local args = {...}
+  local co = coroutine.create(function()
+    return fn(unpack(args))
+  end)
+  return co
+end
+
 function iter(t)
   if type(t) == "table" and t.__anext__ then
     return function() return t:__anext__() end
@@ -3139,28 +3147,79 @@ asyncio.Future = function()
   })
 end
 asyncio.run = function(coro_or_fn)
-  if type(coro_or_fn) == "function" then
-    local co = coroutine.create(coro_or_fn)
+  local co = type(coro_or_fn) == "thread" and coro_or_fn or coroutine.create(coro_or_fn)
+  local last_res = nil
+  while coroutine.status(co) ~= "dead" do
     local ok, res = coroutine.resume(co)
     if not ok then error(tostring(res), 2) end
-    return res
-  elseif type(coro_or_fn) == "thread" then
-    local ok, res = coroutine.resume(coro_or_fn)
-    if not ok then error(tostring(res), 2) end
-    return res
+    if coroutine.status(co) == "dead" then
+      return res
+    end
+    -- Handle yields like sleep
+    if res == "sleep" then
+      local ffi_ok, ffi_mod = pcall(require, "ffi")
+      local poll_ok = false
+      if ffi_ok and ffi_mod and ffi_mod.C then
+        pcall(function()
+          ffi_mod.cdef[[
+            int poll(void *fds, unsigned long nfds, int timeout);
+          ]]
+        end)
+        local ok_poll = pcall(function() ffi_mod.C.poll(nil, 0, 50) end)
+        if ok_poll then poll_ok = true end
+      end
+      if not poll_ok then
+        local t_end = os.clock() + 0.05
+        while os.clock() < t_end do end
+      end
+    end
+    last_res = res
   end
-  return coro_or_fn
+  return last_res
 end
 asyncio.sleep = function(secs)
   return coroutine.yield("sleep", secs)
+end
+asyncio.TimeoutError = "TimeoutError"
+asyncio.exceptions = { TimeoutError = "TimeoutError" }
+asyncio.wait_for = function(fut_or_fn, timeout)
+  local t_start = os.clock()
+  timeout = timeout or 0
+  while true do
+    if type(fut_or_fn) == "thread" then
+      if coroutine.status(fut_or_fn) == "dead" then break end
+      local ok, res = coroutine.resume(fut_or_fn)
+      if not ok then error(tostring(res), 2) end
+      if coroutine.status(fut_or_fn) == "dead" then return res end
+    elseif type(fut_or_fn) == "function" then
+      local ok, res = pcall(fut_or_fn)
+      if ok and res ~= nil then return res end
+    elseif type(fut_or_fn) == "table" and type(fut_or_fn.done) == "function" then
+      if fut_or_fn:done() then return fut_or_fn:result() end
+    end
+    if timeout > 0 and (os.clock() - t_start) >= timeout then
+      error("TimeoutError: operation timed out", 2)
+    end
+    local ffi_ok, ffi_mod = pcall(require, "ffi")
+    if ffi_ok and ffi_mod and ffi_mod.C and ffi_mod.C.poll then
+      ffi_mod.C.poll(nil, 0, 50)
+    end
+  end
 end
 _G.asyncio = asyncio
 
 function _luthon_await(val)
   if type(val) == "thread" then
-    local ok, res = coroutine.resume(val)
-    if not ok then error(tostring(res), 2) end
-    return res
+    while coroutine.status(val) ~= "dead" do
+      local ok, res = coroutine.resume(val)
+      if not ok then error(tostring(res), 2) end
+      if coroutine.status(val) == "dead" then
+        return res
+      end
+      -- Pass yield value up to outer coroutine runner (asyncio.run)
+      coroutine.yield(res)
+    end
+    return nil
   elseif type(val) == "function" then
     return val()
   elseif type(val) == "table" and type(val.result) == "function" and not val:done() then

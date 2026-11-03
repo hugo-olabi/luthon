@@ -35,6 +35,7 @@ pcall(function()
 
     int socket(int domain, int type, int protocol);
     int bind(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+    int connect(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
     int listen(int sockfd, int backlog);
     int accept(int sockfd, struct sockaddr *addr, uint32_t *addrlen);
     ssize_t send(int sockfd, const void *buf, size_t len, int flags);
@@ -362,7 +363,7 @@ function Server_mt:run_event_loop(future)
   end
 end
 
-function Server_mt:__aexit__()
+function Server_mt:close()
   if self._server_fd and self._server_fd >= 0 then
     pcall(ffi.C.close, self._server_fd)
     self._server_fd = -1
@@ -375,6 +376,14 @@ function Server_mt:__aexit__()
       end
     end
   end
+end
+
+function Server_mt:wait_closed()
+  return true
+end
+
+function Server_mt:__aexit__()
+  self:close()
 end
 
 function websockets.serve(...)
@@ -409,7 +418,67 @@ function websockets.serve(...)
     port = port,
     _server_fd = -1,
   }
-  return setmetatable(srv, Server_mt)
+  setmetatable(srv, Server_mt)
+  -- Immediately bind and listen so it is available before being awaited or entered
+  srv:__aenter__()
+  return srv
+end
+
+-- Client context manager for `websockets.connect(uri)`
+local Client_mt = {}
+Client_mt.__index = Client_mt
+
+function Client_mt:__aenter__()
+  -- Parse uri ws://host:port
+  local host, port = self.uri:match("ws://([^:]+):?(%d*)")
+  host = (host and host ~= "") and host or "127.0.0.1"
+  if host == "localhost" then host = "127.0.0.1" end
+  port = (port and port ~= "") and tonumber(port) or 80
+
+  local s = ffi.C.socket(AF_INET, SOCK_STREAM, 0)
+  if s < 0 then error("Cannot create client socket") end
+
+  local addr = ffi.new("struct sockaddr_in")
+  addr.sin_family = AF_INET
+  addr.sin_port = ffi.C.htons(port)
+  ffi.C.inet_pton(AF_INET, host, addr.sin_addr)
+
+  local c_res = ffi.C.connect(s, ffi.cast("struct sockaddr*", addr), ffi.sizeof("struct sockaddr_in"))
+  if c_res < 0 then
+    ffi.C.close(s)
+    error("ConnectionRefusedError: could not connect to " .. self.uri)
+  end
+
+  local client_key = "dGhlIHNhbXBsZSBub25jZQ=="
+  local req = "GET / HTTP/1.1\r\n" ..
+              "Host: " .. host .. ":" .. port .. "\r\n" ..
+              "Upgrade: websocket\r\n" ..
+              "Connection: Upgrade\r\n" ..
+              "Sec-WebSocket-Key: " .. client_key .. "\r\n" ..
+              "Sec-WebSocket-Version: 13\r\n\r\n"
+  ffi.C.send(s, req, #req, 0)
+
+  local resp_buf = ffi.new("char[4096]")
+  local n = ffi.C.recv(s, resp_buf, 4096, 0)
+  if n <= 0 then
+    ffi.C.close(s)
+    error("WebSocket handshake failed")
+  end
+
+  local ws = WebSocketConnection.new(s)
+  self._ws = ws
+  return ws
+end
+
+function Client_mt:__aexit__()
+  if self._ws then
+    self._ws:close()
+    self._ws = nil
+  end
+end
+
+function websockets.connect(uri)
+  return setmetatable({ uri = uri, _ws = nil }, Client_mt)
 end
 
 _G.websockets = websockets

@@ -343,13 +343,15 @@ class IRLowerer:
             if not node.body or not isinstance(node.body[-1], ast.Return):
                 self._emit("RETURN", [])
             is_gen = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node))
-            if is_gen:
-                # Wrap generator function body inside an implementation function
+            is_async = isinstance(node, ast.AsyncFunctionDef)
+
+            if is_gen or is_async:
+                wrapper_type = "make_generator" if is_gen else "make_coroutine"
                 impl_name = fn.name + "_impl"
                 fn.name = impl_name
                 self.module.functions.append(fn)
 
-                # Now create the wrapper function that calls make_generator(impl_name, ...)
+                # Create wrapper function that returns a generator or coroutine thread
                 wrapper_fn = Function(name=unique_fn_name, params=[_safe_var(a.arg) for a in node.args.args])
                 sc = getattr(node, "_scope", None)
                 if sc is not None:
@@ -361,18 +363,17 @@ class IRLowerer:
                 self._cur_fn = wrapper_fn
                 self._cur_block = wrapper_block
 
-                # Call make_generator(impl_name, arg1, arg2, ...)
-                gen_res = self._new_tmp()
-                call_args = ["make_generator", impl_name] + [_safe_var(a.arg) for a in node.args.args]
-                self._emit("CALL", call_args, result=gen_res)
-                self._emit("RETURN", [gen_res])
+                # Call make_generator/make_coroutine(impl_name, arg1, arg2, ...)
+                res_tmp = self._new_tmp()
+                call_args = [wrapper_type, impl_name] + [_safe_var(a.arg) for a in node.args.args]
+                self._emit("CALL", call_args, result=res_tmp)
+                self._emit("RETURN", [res_tmp])
                 self.module.functions.append(wrapper_fn)
 
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
             else:
                 self.module.functions.append(fn)
-                # Switch back to enclosing block before applying decorators
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
             self._emit("STORE", [_safe_var(fn_sym), unique_fn_name])
@@ -1044,6 +1045,12 @@ class IRLowerer:
             # Create a nested function for the lambda body
             lambda_name = "_lambda_%d" % self._tmp
             fn = Function(name=lambda_name, params=args)
+            sc = getattr(node, "_scope", None)
+            if sc is not None:
+                fn.locals = sorted(_safe_var(k) for k in sc.locals.keys())
+                fn.freevars = sorted(_safe_var(k) for k in getattr(sc, "freevars", set()))
+                fn.cellvars = sorted(_safe_var(k) for k in getattr(sc, "cellvars", set()))
+                fn.upvalues = list(fn.freevars)
             prev_fn = self._cur_fn
             prev_block = self._cur_block
             self._cur_fn = fn
