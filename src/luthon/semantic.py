@@ -261,10 +261,20 @@ class SemanticAnalyzer(ast.NodeVisitor):
         while s is not None:
             if name in s.locals:
                 if s is not scope:
-                    # Only inner functions capture variables from enclosing functions/classes as freevars
+                    # Comprehensions are inlined in Lua and do not create closure boundaries.
+                    # Only nested functions/lambdas capture variables from enclosing scopes as cellvars.
                     if s.kind != "module":
-                        scope.freevars.add(name)
-                        s.cellvars.add(name)
+                        if scope.kind != "comprehension":
+                            scope.freevars.add(name)
+                            s.cellvars.add(name)
+                        else:
+                            # Pass freevar through comprehension to enclosing function
+                            enc = scope.parent
+                            while enc is not None and enc.kind == "comprehension":
+                                enc = enc.parent
+                            if enc is not None and enc != s and enc.kind != "module":
+                                enc.freevars.add(name)
+                                s.cellvars.add(name)
                 return s.locals[name]
             if name in s.globals:
                 root = self._module()
@@ -302,10 +312,15 @@ class SemanticAnalyzer(ast.NodeVisitor):
             for fv in child.freevars:
                 if fv in scope.locals and scope.kind != "module":
                     scope.cellvars.add(fv)
+                elif fv not in scope.locals and scope.kind != "module":
+                    # Propagate upvalue/freevar upward through intermediate scopes
+                    scope.freevars.add(fv)
         if scope.parent is not None and scope.parent.kind != "module":
             for fv in scope.freevars:
                 if fv in scope.parent.locals:
                     scope.parent.cellvars.add(fv)
+                elif fv not in scope.parent.locals and scope.parent.kind != "module":
+                    scope.parent.freevars.add(fv)
 
     def generic_visit(self, node):
         for child in ast.iter_child_nodes(node):
