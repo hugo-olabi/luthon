@@ -1,6 +1,6 @@
 # Luthon
 
-<img src="./assets/icon-white.svg" align="right" style="filter: invert(1); background-color: inherit;" width="150px" height="150px">
+<img src="./assets/icon-white-bg-circle.svg" align="right" style="filter: invert(1); background-color: inherit;" width="150px" height="150px">
 
 Luthon is a high-performance Python to LuaJIT transpiler with an optimizing compiler backend. It parses Python source, runs semantic analysis, lowers programs to an intermediate representation (IR/CIR) with explicit control flow, and emits optimized Lua that executes under LuaJIT 2.1+.
 
