@@ -63,6 +63,12 @@ ffi.cdef[[
   bool luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
   void luthon_png_free(void *ptr);
   void luthon_img_flip_vertical(uint8_t *data, int w, int h, int channels);
+
+  typedef void* tjhandle;
+  tjhandle tjInitDecompress(void);
+  int tjDecompressHeader3(tjhandle handle, const unsigned char *jpegBuf, unsigned long jpegSize, int *width, int *height, int *jpegSubsamp, int *jpegColorspace);
+  int tjDecompress2(tjhandle handle, const unsigned char *jpegBuf, unsigned long jpegSize, unsigned char *dstBuf, int width, int pitch, int height, int pixelFormat, int flags);
+  int tjDestroy(tjhandle handle);
 ]]
 
 local luthon_native = _G._luthon_native_lib
@@ -77,6 +83,12 @@ local libpng = nil
 for _, name in ipairs({"libpng16.so.16", "libpng16.so", "libpng.so"}) do
   local ok, lib = pcall(ffi.load, name)
   if ok and lib then libpng = lib; break end
+end
+
+local libtj = nil
+for _, name in ipairs({"libturbojpeg.so.0", "libturbojpeg.so", "/usr/lib64/libturbojpeg.so.0", "libjpeg.so.62"}) do
+  local ok, lib = pcall(ffi.load, name)
+  if ok and lib then libtj = lib; break end
 end
 
 local Image = {}
@@ -230,6 +242,74 @@ function Image_mt:convert(target_mode)
   error("PIL.Image.convert: unsupported mode conversion " .. tostring(src_mode) .. " -> " .. tostring(target_mode))
 end
 
+function Image_mt:getpixel(xy)
+  local x = type(xy) == "table" and xy[1] or xy
+  local y = type(xy) == "table" and xy[2] or 0
+  local w, h = self.size[1], self.size[2]
+  if x < 0 or x >= w or y < 0 or y >= h then
+    error("IndexError: image index out of range")
+  end
+  local channels = (self.mode == "RGBA" and 4) or (self.mode == "RGB" and 3) or 1
+  local idx = (y * w + x) * channels
+  if channels == 4 then
+    return setmetatable({self._buffer[idx], self._buffer[idx + 1], self._buffer[idx + 2], self._buffer[idx + 3]}, _G._tuple_mt)
+  elseif channels == 3 then
+    return setmetatable({self._buffer[idx], self._buffer[idx + 1], self._buffer[idx + 2]}, _G._tuple_mt)
+  else
+    return self._buffer[idx]
+  end
+end
+
+function Image_mt:putpixel(xy, color)
+  local x = type(xy) == "table" and xy[1] or xy
+  local y = type(xy) == "table" and xy[2] or 0
+  local w, h = self.size[1], self.size[2]
+  if x < 0 or x >= w or y < 0 or y >= h then
+    error("IndexError: image index out of range")
+  end
+  local channels = (self.mode == "RGBA" and 4) or (self.mode == "RGB" and 3) or 1
+  local idx = (y * w + x) * channels
+  if type(color) == "table" then
+    for c = 1, channels do
+      self._buffer[idx + c - 1] = color[c] or 255
+    end
+  else
+    self._buffer[idx] = tonumber(color) or 0
+  end
+end
+
+function Image_mt:thumbnail(size)
+  local target_w = size[1]
+  local target_h = size[2]
+  local orig_w, orig_h = self.size[1], self.size[2]
+  if target_w <= 0 or target_h <= 0 or (target_w >= orig_w and target_h >= orig_h) then
+    return
+  end
+  local channels = (self.mode == "RGBA" and 4) or (self.mode == "RGB" and 3) or 1
+  local new_buf = ffi.new("uint8_t[?]", target_w * target_h * channels)
+  local x_ratio = orig_w / target_w
+  local y_ratio = orig_h / target_h
+
+  for y = 0, target_h - 1 do
+    local src_y = math.floor(y * y_ratio)
+    if src_y >= orig_h then src_y = orig_h - 1 end
+    local dst_row = y * target_w * channels
+    local src_row = src_y * orig_w * channels
+    for x = 0, target_w - 1 do
+      local src_x = math.floor(x * x_ratio)
+      if src_x >= orig_w then src_x = orig_w - 1 end
+      local dst_idx = dst_row + x * channels
+      local src_idx = src_row + src_x * channels
+      for c = 0, channels - 1 do
+        new_buf[dst_idx + c] = self._buffer[src_idx + c]
+      end
+    end
+  end
+
+  self._buffer = new_buf
+  self.size = setmetatable({target_w, target_h}, _G._tuple_mt)
+end
+
 function Image_mt:save(fp, format, ...)
   if not libpng then error("PIL.Image.save: libpng is not loaded") end
 
@@ -326,8 +406,7 @@ function Image.open(fp)
   local is_filepath = (type(fp) == "string")
   local raw_bytes = nil
 
-  -- Native fast path for memory-based PNGs (BytesIO, string) via C streaming
-  if not is_filepath and luthon_native ~= nil then
+  if not is_filepath then
     if type(fp) == "table" and type(fp.getvalue) == "function" then
       raw_bytes = fp:getvalue()
     elseif type(fp) == "table" and type(fp.read) == "function" then
@@ -335,8 +414,52 @@ function Image.open(fp)
     elseif type(fp) == "string" then
       raw_bytes = fp
     end
+  else
+    local f = io.open(fp, "rb")
+    if f then
+      raw_bytes = f:read("*a")
+      f:close()
+    end
+  end
 
-    if raw_bytes and #raw_bytes >= 8 and string.sub(raw_bytes, 1, 8) == "\137PNG\r\n\026\n" then
+  -- 1. Check for JPEG / JFIF format (\xFF\xD8)
+  if raw_bytes and #raw_bytes >= 2 and raw_bytes:byte(1) == 0xFF and raw_bytes:byte(2) == 0xD8 then
+    if libtj ~= nil then
+      local handle = libtj.tjInitDecompress()
+      if handle ~= nil then
+        local w = ffi.new("int[1]")
+        local h = ffi.new("int[1]")
+        local subsamp = ffi.new("int[1]")
+        local colorspace = ffi.new("int[1]")
+        local res = libtj.tjDecompressHeader3(handle, raw_bytes, #raw_bytes, w, h, subsamp, colorspace)
+        if res == 0 then
+          local width = tonumber(w[0])
+          local height = tonumber(h[0])
+          local dst = ffi.new("uint8_t[?]", width * height * 4)
+          -- 2 = TJPF_RGBA
+          local dec_res = libtj.tjDecompress2(handle, raw_bytes, #raw_bytes, dst, width, 0, height, 2, 0)
+          libtj.tjDestroy(handle)
+          if dec_res == 0 then
+            local im = {
+              _buffer = dst,
+              _raw_bytes = raw_bytes,
+              _is_valid = true,
+              size = setmetatable({width, height}, _G._tuple_mt or {}),
+              mode = "RGBA",
+              format = "JPEG",
+            }
+            return setmetatable(im, Image_mt)
+          end
+        else
+          libtj.tjDestroy(handle)
+        end
+      end
+    end
+  end
+
+  -- 2. Native fast path for memory-based PNGs (BytesIO, string) via C streaming
+  if not is_filepath and luthon_native ~= nil and raw_bytes ~= nil then
+    if #raw_bytes >= 8 and string.sub(raw_bytes, 1, 8) == "\137PNG\r\n\026\n" then
       local out_w = ffi.new("int[1]")
       local out_h = ffi.new("int[1]")
       local out_channels = ffi.new("int[1]")
@@ -366,7 +489,7 @@ function Image.open(fp)
           _buffer = buf,
           _raw_bytes = raw_bytes,
           _is_valid = true,
-          size = setmetatable({w, h}, _G._tuple_mt),
+          size = setmetatable({w, h}, _G._tuple_mt or {}),
           mode = "RGBA",
           format = "PNG",
         }

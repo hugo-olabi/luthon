@@ -747,6 +747,13 @@ local _list_methods = {
 }
 _list_mt = {__index = _list_methods}
 
+-- Auto-flush print for server and interactive logging
+local _raw_print = print
+function print(...)
+  _raw_print(...)
+  pcall(function() io.stdout:flush() end)
+end
+
 function make_list(...)
   local r = {...}
   return setmetatable(r, _list_mt)
@@ -1097,9 +1104,26 @@ function make_generator(fn, ...)
 end
 
 function iter(t)
-  if type(t) == "table" and t.__aiter__ then return t:__aiter__() end
-  if type(t) == "table" and t.__iter__ then return t:__iter__() end
-  if type(t) == "table" and t.__next__ then return t end
+  if type(t) == "table" and t.__anext__ then
+    return function() return t:__anext__() end
+  end
+  if type(t) == "table" and t.__aiter__ then
+    local it = t:__aiter__()
+    if type(it) == "table" and it.__anext__ then
+      return function() return it:__anext__() end
+    end
+    return it
+  end
+  if type(t) == "table" and t.__iter__ then
+    local it = t:__iter__()
+    if type(it) == "table" and it.__next__ then
+      return function() return it:__next__() end
+    end
+    return it
+  end
+  if type(t) == "table" and t.__next__ then
+    return function() return t:__next__() end
+  end
   if type(t) == "function" then return t end
   local i = 0
   return function()
@@ -3074,6 +3098,34 @@ function _luthon_await(val)
     return res
   elseif type(val) == "function" then
     return val()
+  elseif type(val) == "table" and type(val.result) == "function" and not val:done() then
+    -- If awaiting an unfinished Future/Task, poll until resolved
+    -- If a WebSocket server is active, dispatch its event loop
+    if _G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS and #_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS > 0 then
+      for _, srv in ipairs(_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS) do
+        if srv.run_event_loop then
+          return srv:run_event_loop(val)
+        end
+      end
+    end
+    -- Fallback: block waiting
+    local pcall_yield = pcall(function() return coroutine.yield() end)
+    while not val:done() do
+      if not pcall_yield then
+        -- We are in main thread or C-call boundary, use sleep
+        local ffi_ok, ffi_mod = pcall(require, "ffi")
+        if ffi_ok and ffi_mod and ffi_mod.C and ffi_mod.C.poll then
+          ffi_mod.C.poll(nil, 0, 100)
+        else
+          local t_end = os.clock() + 0.1
+          while os.clock() < t_end do end
+        end
+      else
+        coroutine.yield()
+      end
+      if val:done() then break end
+    end
+    return val:result()
   end
   return val
 end
