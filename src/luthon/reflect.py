@@ -220,11 +220,19 @@ class BinaryReflector:
         pcall(ffi.load, "{self.capi_path}", true)
         local ext = ffi.load("{binary_path}")
         local ok, mod_ptr = pcall(function() return ffi.cast("MyPyObject*", ext.PyInit_{module_name}()) end)
-        if not ok or mod_ptr == nil or mod_ptr.as.module_def == nil then
+        local raw_def = nil
+        if ok and mod_ptr ~= nil then
+            if mod_ptr.as.module_def ~= nil then
+                raw_def = mod_ptr.as.module_def
+            else
+                -- PEP 489 multi-phase: PyInit returns PyModuleDef* directly
+                raw_def = ffi.cast("void*", mod_ptr)
+            end
+        end
+        if raw_def == nil then
             print(string.format('{{"name": "%s", "doc": "", "methods": []}}', "{module_name}"))
             return
         end
-        local raw_def = mod_ptr.as.module_def
 
         local m_name = "{module_name}"
         local m_doc = ""
