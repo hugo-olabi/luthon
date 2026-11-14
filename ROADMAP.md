@@ -21,7 +21,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | **Phase 37** | Native Reflection Automation | DWARF Debuginfo Inspection & Autonomous C Header Extraction | [x] | 3/3 |
 | **Phase 38** | Runtime Concurrency | True Multi-Threading & GIL-Free OS Thread Pools | [x] | 4/4 |
 | **Phase 39** | Compiler & SIMD | SIMD & Vectorization Lowering in CIR (AVX2 / NEON) | [x] | 4/4 |
-| **Phase 40** | Native C-API Proxy | Extended Ecosystem Coverage (PyTorch, OpenCV, SciPy) | [ ] | 0/4 |
+| **Phase 40** | Native C-API Proxy | Extended Ecosystem Coverage (PyTorch, OpenCV, SciPy) | [x] | 4/4 |
 | **Phase 41** | Cross-Platform Codegen | WebAssembly & WASI Compilation Target | [ ] | 0/4 |
 
 ---
@@ -186,16 +186,16 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 ## Phase 40 — Extended Ecosystem C-API Coverage (PyTorch, OpenCV & SciPy Interop)
 *Target: Enable binary reflection and execution of heavy scientific Python C/C++ extensions without CPython by completing dynamic heap type allocation, extended slot protocols, and multi-phase initialization.*
 
-- [ ] **Dynamic Heap Type Creation & Type Spec Protocol (`PyType_FromSpec`)**:
+- [x] **Dynamic Heap Type Creation & Type Spec Protocol (`PyType_FromSpec`)**:
   - In `src/luthon/native/core/types.c`, implement `PyType_FromSpec` and `PyType_FromSpecWithBases` parsing `PyType_Slot` arrays to dynamically construct heap types.
   - Support dynamic base inheritance, heap-type flags (`Py_TPFLAGS_HEAPTYPE`, `Py_TPFLAGS_BASETYPE`), and descriptor registration for dynamic classes emitted by C++ bindings (pybind11 and nanobind in PyTorch/OpenCV).
-- [ ] **PEP 489 Multi-Phase Module Initialization & Capsule Table Sharing**:
+- [x] **PEP 489 Multi-Phase Module Initialization & Capsule Table Sharing**:
   - Expand `src/luthon/native/modules/loader.c` and `src/luthon/reflect.py` to support PEP 489 multi-phase loading via `PyModuleDef_Init`, `Py_mod_create`, and `Py_mod_exec`.
   - Implement dynamic `PyCapsule_Import` symbol tables enabling cross-module C-API sharing (such as SciPy Cython BLAS/LAPACK capsules and PyTorch C++ dispatcher tables).
-- [ ] **Extended Slot & Metamethod Coverage**:
+- [x] **Extended Slot & Metamethod Coverage**:
   - Implement missing numeric and mapping slots in `protocols/number.c` and `protocols/mapping.c`: `nb_matrix_multiply` (`@`), `nb_inplace_matrix_multiply`, `nb_power`, `nb_inplace_power`, and `mp_ass_subscript` for multi-dimensional slice assignments.
   - Implement asynchronous and protocol slots: `tp_as_async` (`am_await`, `am_aiter`, `am_anext`) and `tp_finalize` for native C++ object cleanup.
-- [ ] **Ecosystem Integration Test Harness & ABI Verification**:
+- [x] **Ecosystem Integration Test Harness & ABI Verification**:
   - Create synthetic test modules in `tests/test_phase40_ecosystem_capi.py` exercising heap-type specs, multi-phase loading, and capsule function exports without full CPython dependencies.
   - Validate end-to-end binary loading and execution of precompiled SciPy linalg and OpenCV image processing C-extensions.
 

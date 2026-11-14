@@ -49,6 +49,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 37 — Autonomous C Header & DWARF Reflection (reflect.py) | [Done] | 3/3 |
 | Phase 38 — True Multi-Threading & GIL-Free OS Thread Pools (pthreads & Shared Memory Workers) | [Done] | 4/4 |
 | Phase 39 — SIMD & Vectorization Lowering in CIR (AVX2 / NEON Auto-Vectorization) | [Done] | 4/4 |
+| Phase 40 — Extended Ecosystem C-API Coverage (PyTorch, OpenCV & SciPy Interop) | [Done] | 4/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -348,6 +349,15 @@ Transform countable affine array loops in High-Level Intermediate Representation
 - [x] CIR Vector Instruction Set & Loop Strip-Mining: introduce `VEC_LOAD`, `VEC_STORE`, `VEC_ADD`, `VEC_SUB`, `VEC_MUL`, `VEC_FMA`, `VEC_BROADCAST`, and `VEC_REDUCE_SUM` instructions with strip-mining decomposition into pre-header, SIMD body, and scalar remainder blocks.
 - [x] Backend Vector Lowering & Native Intrinsics: implement AVX2, FMA, and NEON accelerated vector kernels in `src/luthon/native/core/simd.c` and header `luthon_simd.h`, with fast LuaJIT FFI fallback and vectorized polynomial transcendental approximations.
 - [x] Diagnostics & Numerical Benchmarking: add `--dump-vectorization` CLI diagnostic flag, `math.simd` and accelerated `array` modules, and benchmark suite demonstrating up to 7.9x throughput speedups.
+
+## Phase 40 — Extended Ecosystem C-API Coverage (PyTorch, OpenCV & SciPy Interop)
+
+Enable binary reflection and execution of heavy scientific Python C/C++ extensions without CPython by completing dynamic heap type allocation, extended slot protocols, PEP 489 multi-phase initialization, and cross-module capsule table sharing.
+
+- [x] Dynamic Heap Type Creation & Type Spec Protocol: implement `PyType_FromSpec` and `PyType_FromSpecWithBases` in `src/luthon/native/core/types.c` with contiguous `PyHeapTypeObject` layout, dynamic slot parsing (slots 1 to 79), and subtype inheritance verification (`PyType_IsSubtype`).
+- [x] PEP 489 Multi-Phase Module Initialization & Capsule Table Sharing: implement `PyModule_FromDefAndSpec`, `PyModule_ExecDef`, `PyModuleDef_Init`, and support for multi-phase binary exports in `src/luthon/reflect.py`. Implemented dynamic cross-module C-API table sharing via `PyCapsule_Register` and `PyCapsule_Import`.
+- [x] Extended Slot & Metamethod Coverage: complete numeric and mapping protocols (`nb_matrix_multiply` for `@`, `nb_inplace_matrix_multiply`, `nb_power`, `nb_inplace_power`, `mp_ass_subscript` for multidimensional key assignment), `tp_as_async` (`am_await`, `am_aiter`, `am_anext`), and `tp_finalize` hook prior to deallocation.
+- [x] Ecosystem Integration Test Harness & ABI Verification: add comprehensive test suite in `tests/test_phase40_ecosystem_capi.py` verifying dynamic heap type creation, PEP 489 initialization, capsule tables, and end-to-end compilation/reflection of standalone scientific extensions.
 
 ## How to update
 
