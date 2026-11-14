@@ -19,7 +19,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | **Phase 35** | Runtime Event Loop | Multi-Task Asynchronous Event Loop (`asyncio.gather`, `create_task`) | [x] | 4/4 |
 | **Phase 36** | Language Parity | Modern Python Parity (`ast.Match`, Dict Unpacking `**kwargs`) | [x] | 4/4 |
 | **Phase 37** | Native Reflection Automation | DWARF Debuginfo Inspection & Autonomous C Header Extraction | [x] | 3/3 |
-| **Phase 38** | Runtime Concurrency | True Multi-Threading & GIL-Free OS Thread Pools | [ ] | 0/4 |
+| **Phase 38** | Runtime Concurrency | True Multi-Threading & GIL-Free OS Thread Pools | [x] | 4/4 |
 | **Phase 39** | Compiler & SIMD | SIMD & Vectorization Lowering in CIR (AVX2 / NEON) | [ ] | 0/4 |
 | **Phase 40** | Native C-API Proxy | Extended Ecosystem Coverage (PyTorch, OpenCV, SciPy) | [ ] | 0/4 |
 | **Phase 41** | Cross-Platform Codegen | WebAssembly & WASI Compilation Target | [ ] | 0/4 |
@@ -148,16 +148,16 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 ## Phase 38 — True Multi-Threading & GIL-Free OS Thread Pools (pthreads & Shared Memory Workers)
 *Target: Deliver true multi-core parallel computing for Python workloads without CPython's Global Interpreter Lock (GIL) via native OS thread pools and shared-memory communication.*
 
-- [ ] **Native POSIX Thread Pool & Worker Runtime Primitives**:
+- [x] **Native POSIX Thread Pool & Worker Runtime Primitives**:
   - In `src/luthon/native/core/thread.c`, implement a lightweight POSIX `pthread` worker pool exposing C ABI bindings (`luthon_threadpool_create`, `luthon_threadpool_submit`, `luthon_threadpool_wait`, `luthon_threadpool_destroy`).
   - Initialize an independent, isolated `lua_State*` runtime instance per worker thread, eliminating GIL contention while sharing read-only global constant state and immutable bytecode.
-- [ ] **Lock-Free SPSC/MPMC Ring Buffers & Zero-Copy Memory Sharing**:
+- [x] **Lock-Free SPSC/MPMC Ring Buffers & Zero-Copy Memory Sharing**:
   - Implement lock-free circular queues in `src/luthon/native/core/channel.c` using atomic compare-and-swap primitives (`__atomic_compare_exchange_n`) for sub-microsecond task dispatch and result collection.
   - Enable zero-copy exchange of unboxed typed memory buffers (`array('d')`, raw C pointers, PEP 3118 contiguous buffers) across worker threads without data copying or serialization.
-- [ ] **Python Concurrency Lowering (`concurrent.futures` & `threading`)**:
+- [x] **Python Concurrency Lowering (`concurrent.futures` & `threading`)**:
   - Lower `concurrent.futures.ThreadPoolExecutor(max_workers=N)` and `executor.map` / `submit` in `src/luthon/stdlib.py` and `src/luthon/ir.py` to dispatch directly to the native pthread pool.
   - Implement thread-safe synchronization primitives in pure LuaJIT FFI: `threading.Lock`, `threading.RLock`, `threading.Event`, and `threading.Semaphore` backed by native `pthread_mutex_t` and `pthread_cond_t`.
-- [ ] **GIL-Free Multi-Core Verification & Scaling Benchmarks**:
+- [x] **GIL-Free Multi-Core Verification & Scaling Benchmarks**:
   - Add test suite in `tests/test_phase38_threading.py` verifying parallel task dispatch, return value harvesting, exception propagation, and mutex synchronization.
   - Implement multi-core scaling benchmarks (parallel Monte Carlo simulation and parallel Mandelbrot rendering) demonstrating near-linear speedup across 4+ physical CPU cores.
 
