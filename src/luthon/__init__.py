@@ -1,5 +1,5 @@
 """Luthon package."""
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 from .semantic import analyze, SemanticAnalyzer, future_features
 from .ir import IRLowerer, Module as IRModule
 from .sourcemap import SourceMap

@@ -22,7 +22,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | **Phase 38** | Runtime Concurrency | True Multi-Threading & GIL-Free OS Thread Pools | [x] | 4/4 |
 | **Phase 39** | Compiler & SIMD | SIMD & Vectorization Lowering in CIR (AVX2 / NEON) | [x] | 4/4 |
 | **Phase 40** | Native C-API Proxy | Extended Ecosystem Coverage (PyTorch, OpenCV, SciPy) | [x] | 4/4 |
-| **Phase 41** | Cross-Platform Codegen | WebAssembly & WASI Compilation Target | [ ] | 0/4 |
+| **Phase 41** | Cross-Platform Codegen | WebAssembly & WASI Compilation Target | [x] | 4/4 |
 
 ---
 
@@ -204,15 +204,15 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 ## Phase 41 — WebAssembly & WASI Compilation Target (WASM Browser & Edge Runtimes)
 *Target: Compile and execute Luthon-transpiled Python applications in WebAssembly environments, supporting both standalone WASI runtimes and web browsers.*
 
-- [ ] **WASI Preview 1 Syscall Emulation & Platform Abstraction Layer**:
+- [x] **WASI Preview 1 Syscall Emulation & Platform Abstraction Layer**:
   - In `src/luthon/native/platform/wasi.c`, implement POSIX syscall shims compatible with WASI Preview 1 (`fd_read`, `fd_write`, `fd_seek`, `clock_time_get`, `environ_sizes_get`, `environ_get`, `random_get`).
   - Update `src/luthon/native/build_capi.py` to support compilation via `clang --target=wasm32-wasi` and Emscripten with `-O3 -flto`.
-- [ ] **Standalone WebAssembly Binary Bundle Emitter (`bundle.py`)**:
+- [x] **Standalone WebAssembly Binary Bundle Emitter (`bundle.py`)**:
   - Extend `src/luthon/bundle.py` and CLI with `luthon build --target wasm` and `luthon build --target wasi`.
   - Package the Lua VM interpreter, precompiled Luthon stdlib prelude, and user application bytecode into a single self-contained `.wasm` binary (<2 MB).
-- [ ] **Browser WebWorker & JS-Python Interoperability Bridge**:
+- [x] **Browser WebWorker & JS-Python Interoperability Bridge**:
   - Create browser runtime scaffolding (`src/luthon/lua/wasm_js.lua`) facilitating bi-directional data marshaling between JavaScript objects and Luthon types.
   - Wire WebAssembly linear memory (`SharedArrayBuffer` / `ArrayBuffer`) for zero-copy binary data exchange with WebGL, WebGPU, and Canvas APIs.
-- [ ] **WASI Engine Validation & Headless Test Suite**:
+- [x] **WASI Engine Validation & Headless Test Suite**:
   - Add automated tests in `tests/test_phase41_wasm.py` executing compiled `.wasm` targets using standard WASI runtimes (`wasmtime`, `wasmer`, `nodejs --experimental-wasi-unstable-preview1`).
   - Validate algorithmic, mathematical, and string formatting correctness in sandboxed WASI environments with zero host filesystem/environment leakage.

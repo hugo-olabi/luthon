@@ -50,6 +50,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 38 — True Multi-Threading & GIL-Free OS Thread Pools (pthreads & Shared Memory Workers) | [Done] | 4/4 |
 | Phase 39 — SIMD & Vectorization Lowering in CIR (AVX2 / NEON Auto-Vectorization) | [Done] | 4/4 |
 | Phase 40 — Extended Ecosystem C-API Coverage (PyTorch, OpenCV & SciPy Interop) | [Done] | 4/4 |
+| Phase 41 — WebAssembly & WASI Compilation Target (WASM Browser & Edge Runtimes) | [Done] | 4/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -358,6 +359,15 @@ Enable binary reflection and execution of heavy scientific Python C/C++ extensio
 - [x] PEP 489 Multi-Phase Module Initialization & Capsule Table Sharing: implement `PyModule_FromDefAndSpec`, `PyModule_ExecDef`, `PyModuleDef_Init`, and support for multi-phase binary exports in `src/luthon/reflect.py`. Implemented dynamic cross-module C-API table sharing via `PyCapsule_Register` and `PyCapsule_Import`.
 - [x] Extended Slot & Metamethod Coverage: complete numeric and mapping protocols (`nb_matrix_multiply` for `@`, `nb_inplace_matrix_multiply`, `nb_power`, `nb_inplace_power`, `mp_ass_subscript` for multidimensional key assignment), `tp_as_async` (`am_await`, `am_aiter`, `am_anext`), and `tp_finalize` hook prior to deallocation.
 - [x] Ecosystem Integration Test Harness & ABI Verification: add comprehensive test suite in `tests/test_phase40_ecosystem_capi.py` verifying dynamic heap type creation, PEP 489 initialization, capsule tables, and end-to-end compilation/reflection of standalone scientific extensions.
+
+## Phase 41 — WebAssembly & WASI Compilation Target (WASM Browser & Edge Runtimes)
+
+Compile and execute Luthon-transpiled Python applications in WebAssembly environments, supporting both standalone WASI runtimes and web browsers.
+
+- [x] WASI Preview 1 Syscall Emulation & Platform Abstraction Layer: implement `src/luthon/native/platform/wasi.c` and `wasi.h` providing POSIX syscall shims compatible with WASI Preview 1 (`fd_read`, `fd_write`, `fd_seek`, `clock_time_get`, `environ_sizes_get`, `environ_get`, `random_get`) and freestanding linear memory allocator. Updated `src/luthon/native/build_capi.py` with `compile_wasi_target()` utilizing `clang --target=wasm32` / `wasm32-wasi` and `emcc` with `-O3 -flto`.
+- [x] Standalone WebAssembly Binary Bundle Emitter: extended `src/luthon/bundle.py` and CLI with `luthon build --target wasm` and `luthon build --target wasi`. Implemented `WasmCodeGenerator` compiling Python AST and embedding transpiled Lua payload into self-contained `.wasm` binaries (<2 MB).
+- [x] Browser WebWorker & JS-Python Interoperability Bridge: created `src/luthon/lua/wasm_js.lua` for bi-directional data marshaling between JS types and Luthon representations, zero-copy linear memory typed array views (`create_buffer_view`, `export_to_typed_array`), and WebGL/WebGPU/Canvas bindings, accompanied by `src/luthon/runtime/wasm_runner.js`.
+- [x] WASI Engine Validation & Headless Test Suite: added comprehensive automated test suite `tests/test_phase41_wasm.py` verifying WASI library compilation, standalone `.wasm` bundle execution via Node.js WASI Preview 1, CLI build integration, browser memory views, and sandboxed execution.
 
 ## How to update
 
