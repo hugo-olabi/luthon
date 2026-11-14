@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 def get_capi_library_path() -> Path:
@@ -125,6 +125,98 @@ def compile_capi_proxy(force: bool = False) -> Path:
     return lib_path
 
 
+def compile_wasi_target(
+    output_path: Optional[Path] = None,
+    sources: Optional[List[Path]] = None,
+    entrypoint: Optional[str] = None,
+    force: bool = False,
+    extra_cflags: Optional[List[str]] = None,
+    extra_ldflags: Optional[List[str]] = None,
+) -> Path:
+    """Compiles C translation units into a WebAssembly/WASI binary (.wasm) via clang or emcc with -O3 -flto."""
+    native_dir = Path(__file__).parent.resolve()
+    platform_dir = native_dir / "platform"
+    include_dir = native_dir / "include"
+    build_dir = native_dir / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    if output_path is None:
+        output_path = native_dir / "libluthon_wasi.wasm"
+    output_path = Path(output_path).resolve()
+
+    if sources is None:
+        wasi_c = platform_dir / "wasi.c"
+        if not wasi_c.exists():
+            raise FileNotFoundError(f"WASI platform source not found: {wasi_c}")
+        sources = [wasi_c]
+
+    # Check timestamps for incremental rebuild
+    if not force and output_path.exists():
+        newest_src_mtime = max(s.stat().st_mtime for s in sources)
+        newest_hdr_mtime = max(
+            (h.stat().st_mtime for h in platform_dir.glob("*.h")), default=0
+        )
+        if output_path.stat().st_mtime >= max(newest_src_mtime, newest_hdr_mtime):
+            return output_path
+
+    # Try emcc first, then clang
+    emcc = shutil.which("emcc")
+    clang = shutil.which("clang")
+
+    if emcc:
+        cmd = [
+            emcc,
+            "-O3",
+            "-flto",
+            "-sSTANDALONE_WASM=1",
+            f"-I{platform_dir}",
+            f"-I{include_dir}",
+        ]
+        if extra_cflags:
+            cmd.extend(extra_cflags)
+        cmd.extend([str(s) for s in sources])
+        if entrypoint:
+            cmd.extend([f"-sEXPORTED_FUNCTIONS=['_{entrypoint}']"])
+        else:
+            cmd.append("-sEXPORT_ALL=1")
+        if extra_ldflags:
+            cmd.extend(extra_ldflags)
+        cmd.extend(["-o", str(output_path)])
+    elif clang:
+        cmd = [
+            clang,
+            "--target=wasm32",
+            "-nostdlib",
+            "-O3",
+            "-flto",
+            f"-I{platform_dir}",
+            f"-I{include_dir}",
+        ]
+        if extra_cflags:
+            cmd.extend(extra_cflags)
+        cmd.extend([str(s) for s in sources])
+        if entrypoint:
+            cmd.extend([f"-Wl,--export={entrypoint}"])
+        else:
+            cmd.append("-Wl,--no-entry")
+        if extra_ldflags:
+            cmd.extend(extra_ldflags)
+        cmd.extend(["-o", str(output_path)])
+    else:
+        raise RuntimeError("Neither 'emcc' nor 'clang' found for WebAssembly compilation")
+
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"WebAssembly compilation failed: {e.stderr}\nCommand: {' '.join(cmd)}"
+        )
+
+    return output_path
+
+
 if __name__ == "__main__":
     out = compile_capi_proxy(force=True)
     print(f"[+] Compiled modular C library {out} ({out.stat().st_size} bytes)")
+    wasi_out = compile_wasi_target(force=True)
+    print(f"[+] Compiled WASI WebAssembly library {wasi_out} ({wasi_out.stat().st_size} bytes)")
