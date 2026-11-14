@@ -19,6 +19,10 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | **Phase 35** | Runtime Event Loop | Multi-Task Asynchronous Event Loop (`asyncio.gather`, `create_task`) | [x] | 4/4 |
 | **Phase 36** | Language Parity | Modern Python Parity (`ast.Match`, Dict Unpacking `**kwargs`) | [x] | 4/4 |
 | **Phase 37** | Native Reflection Automation | DWARF Debuginfo Inspection & Autonomous C Header Extraction | [x] | 3/3 |
+| **Phase 38** | Runtime Concurrency | True Multi-Threading & GIL-Free OS Thread Pools | [ ] | 0/4 |
+| **Phase 39** | Compiler & SIMD | SIMD & Vectorization Lowering in CIR (AVX2 / NEON) | [ ] | 0/4 |
+| **Phase 40** | Native C-API Proxy | Extended Ecosystem Coverage (PyTorch, OpenCV, SciPy) | [ ] | 0/4 |
+| **Phase 41** | Cross-Platform Codegen | WebAssembly & WASI Compilation Target | [ ] | 0/4 |
 
 ---
 
@@ -138,3 +142,77 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 - [x] **Automated FFI CDEF Generation**:
   - Generate full LuaJIT `ffi.cdef` type declarations automatically for compiled extensions during `luthon reflect <binary.so>`.
 - [x] **End-to-End Binary Loading Test**: Verify standalone binary loading of compiled scientific C extensions with zero manual C code.
+
+---
+
+## Phase 38 — True Multi-Threading & GIL-Free OS Thread Pools (pthreads & Shared Memory Workers)
+*Target: Deliver true multi-core parallel computing for Python workloads without CPython's Global Interpreter Lock (GIL) via native OS thread pools and shared-memory communication.*
+
+- [ ] **Native POSIX Thread Pool & Worker Runtime Primitives**:
+  - In `src/luthon/native/core/thread.c`, implement a lightweight POSIX `pthread` worker pool exposing C ABI bindings (`luthon_threadpool_create`, `luthon_threadpool_submit`, `luthon_threadpool_wait`, `luthon_threadpool_destroy`).
+  - Initialize an independent, isolated `lua_State*` runtime instance per worker thread, eliminating GIL contention while sharing read-only global constant state and immutable bytecode.
+- [ ] **Lock-Free SPSC/MPMC Ring Buffers & Zero-Copy Memory Sharing**:
+  - Implement lock-free circular queues in `src/luthon/native/core/channel.c` using atomic compare-and-swap primitives (`__atomic_compare_exchange_n`) for sub-microsecond task dispatch and result collection.
+  - Enable zero-copy exchange of unboxed typed memory buffers (`array('d')`, raw C pointers, PEP 3118 contiguous buffers) across worker threads without data copying or serialization.
+- [ ] **Python Concurrency Lowering (`concurrent.futures` & `threading`)**:
+  - Lower `concurrent.futures.ThreadPoolExecutor(max_workers=N)` and `executor.map` / `submit` in `src/luthon/stdlib.py` and `src/luthon/ir.py` to dispatch directly to the native pthread pool.
+  - Implement thread-safe synchronization primitives in pure LuaJIT FFI: `threading.Lock`, `threading.RLock`, `threading.Event`, and `threading.Semaphore` backed by native `pthread_mutex_t` and `pthread_cond_t`.
+- [ ] **GIL-Free Multi-Core Verification & Scaling Benchmarks**:
+  - Add test suite in `tests/test_phase38_threading.py` verifying parallel task dispatch, return value harvesting, exception propagation, and mutex synchronization.
+  - Implement multi-core scaling benchmarks (parallel Monte Carlo simulation and parallel Mandelbrot rendering) demonstrating near-linear speedup across 4+ physical CPU cores.
+
+---
+
+## Phase 39 — SIMD & Vectorization Lowering in CIR (AVX2 / NEON Auto-Vectorization)
+*Target: Transform countable array loops in High-Level Intermediate Representation (CIR) into unrolled SIMD vector operations targeting AVX2 and ARM NEON.*
+
+- [ ] **Affine Loop Dependency & Vectorizability Analysis**:
+  - In `src/luthon/cir.py`, implement an affine loop dependency pass analyzing natural loop nests identified by dominator tree analysis in `optimizer.py`.
+  - Detect countable affine loops with unit stride (`i += 1`) iterating over homogeneous numeric arrays (`array('f')`, `array('d')`, typed `list[float]`, `list[int]`).
+  - Check distance vectors and memory aliasing to prove the absence of loop-carried dependencies (no RAW/WAR/WAW hazards across iterations) to certify loops for vectorization.
+- [ ] **CIR Vector Instruction Set & Loop Strip-Mining**:
+  - Introduce typed vector IR instructions in `src/luthon/cir.py`: `VEC_LOAD`, `VEC_STORE`, `VEC_ADD`, `VEC_SUB`, `VEC_MUL`, `VEC_FMA`, `VEC_BROADCAST`, and `VEC_REDUCE_SUM`.
+  - Implement strip-mining pass decomposing candidate loops into alignment peeling pre-headers, SIMD kernel bodies of width W (W=4 for double on AVX2, W=8 for float; W=2/4 on ARM NEON), and scalar remainder cleanup blocks.
+- [ ] **Backend Vector Lowering (LuaJIT FFI & Native AVX2/NEON Intrinsics)**:
+  - In `src/luthon/codegen.py`, lower CIR vector operations into native C vector kernels in `src/luthon/native/core/simd.c` compiled with architecture flags (`-mavx2 -mfma` on x86_64, `-mfpu=neon` on aarch64).
+  - Provide fast fallback lowering to 128-bit unrolled LuaJIT FFI vector struct operations for platforms lacking AVX2 hardware.
+  - Implement vectorized transcendental approximations (vectorized `sin`, `cos`, `exp`, `sqrt`) utilizing SIMD FMA instructions.
+- [ ] **Vectorization Diagnostics & Numerical Benchmarking**:
+  - Add CLI diagnostic flag `--dump-vectorization` displaying auto-vectorized loop nests, vector widths, unroll factors, and reasons for rejected loops.
+  - Add benchmark suite in `tests/test_phase39_simd.py` demonstrating 3x-6x throughput speedup on vector math kernels (SAXPY/DAXPY, dot product, Euclidean distance, polynomial evaluation).
+
+---
+
+## Phase 40 — Extended Ecosystem C-API Coverage (PyTorch, OpenCV & SciPy Interop)
+*Target: Enable binary reflection and execution of heavy scientific Python C/C++ extensions without CPython by completing dynamic heap type allocation, extended slot protocols, and multi-phase initialization.*
+
+- [ ] **Dynamic Heap Type Creation & Type Spec Protocol (`PyType_FromSpec`)**:
+  - In `src/luthon/native/core/types.c`, implement `PyType_FromSpec` and `PyType_FromSpecWithBases` parsing `PyType_Slot` arrays to dynamically construct heap types.
+  - Support dynamic base inheritance, heap-type flags (`Py_TPFLAGS_HEAPTYPE`, `Py_TPFLAGS_BASETYPE`), and descriptor registration for dynamic classes emitted by C++ bindings (pybind11 and nanobind in PyTorch/OpenCV).
+- [ ] **PEP 489 Multi-Phase Module Initialization & Capsule Table Sharing**:
+  - Expand `src/luthon/native/modules/loader.c` and `src/luthon/reflect.py` to support PEP 489 multi-phase loading via `PyModuleDef_Init`, `Py_mod_create`, and `Py_mod_exec`.
+  - Implement dynamic `PyCapsule_Import` symbol tables enabling cross-module C-API sharing (such as SciPy Cython BLAS/LAPACK capsules and PyTorch C++ dispatcher tables).
+- [ ] **Extended Slot & Metamethod Coverage**:
+  - Implement missing numeric and mapping slots in `protocols/number.c` and `protocols/mapping.c`: `nb_matrix_multiply` (`@`), `nb_inplace_matrix_multiply`, `nb_power`, `nb_inplace_power`, and `mp_ass_subscript` for multi-dimensional slice assignments.
+  - Implement asynchronous and protocol slots: `tp_as_async` (`am_await`, `am_aiter`, `am_anext`) and `tp_finalize` for native C++ object cleanup.
+- [ ] **Ecosystem Integration Test Harness & ABI Verification**:
+  - Create synthetic test modules in `tests/test_phase40_ecosystem_capi.py` exercising heap-type specs, multi-phase loading, and capsule function exports without full CPython dependencies.
+  - Validate end-to-end binary loading and execution of precompiled SciPy linalg and OpenCV image processing C-extensions.
+
+---
+
+## Phase 41 — WebAssembly & WASI Compilation Target (WASM Browser & Edge Runtimes)
+*Target: Compile and execute Luthon-transpiled Python applications in WebAssembly environments, supporting both standalone WASI runtimes and web browsers.*
+
+- [ ] **WASI Preview 1 Syscall Emulation & Platform Abstraction Layer**:
+  - In `src/luthon/native/platform/wasi.c`, implement POSIX syscall shims compatible with WASI Preview 1 (`fd_read`, `fd_write`, `fd_seek`, `clock_time_get`, `environ_sizes_get`, `environ_get`, `random_get`).
+  - Update `src/luthon/native/build_capi.py` to support compilation via `clang --target=wasm32-wasi` and Emscripten with `-O3 -flto`.
+- [ ] **Standalone WebAssembly Binary Bundle Emitter (`bundle.py`)**:
+  - Extend `src/luthon/bundle.py` and CLI with `luthon build --target wasm` and `luthon build --target wasi`.
+  - Package the Lua VM interpreter, precompiled Luthon stdlib prelude, and user application bytecode into a single self-contained `.wasm` binary (<2 MB).
+- [ ] **Browser WebWorker & JS-Python Interoperability Bridge**:
+  - Create browser runtime scaffolding (`src/luthon/lua/wasm_js.lua`) facilitating bi-directional data marshaling between JavaScript objects and Luthon types.
+  - Wire WebAssembly linear memory (`SharedArrayBuffer` / `ArrayBuffer`) for zero-copy binary data exchange with WebGL, WebGPU, and Canvas APIs.
+- [ ] **WASI Engine Validation & Headless Test Suite**:
+  - Add automated tests in `tests/test_phase41_wasm.py` executing compiled `.wasm` targets using standard WASI runtimes (`wasmtime`, `wasmer`, `nodejs --experimental-wasi-unstable-preview1`).
+  - Validate algorithmic, mathematical, and string formatting correctness in sandboxed WASI environments with zero host filesystem/environment leakage.
