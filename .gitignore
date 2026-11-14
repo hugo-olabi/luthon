@@ -19,3 +19,4 @@ src/luthon/native/build/
 *.luthon-nyi
 .agents/
 .venv/
+uv.lock
