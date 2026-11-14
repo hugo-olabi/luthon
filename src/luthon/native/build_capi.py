@@ -67,6 +67,7 @@ def compile_capi_proxy(force: bool = False) -> Path:
         "-fPIC",
         "-Wall",
         "-Wextra",
+        "-pthread",
         f"-I{include_dir}",
         "-fvisibility=default",
     ]
@@ -98,7 +99,7 @@ def compile_capi_proxy(force: bool = False) -> Path:
             raise RuntimeError(f"Failed to compile {src}: {e.stderr}\nCommand: {' '.join(cmd)}")
 
     # 2. Link shared library libluthon_capi.so (libraries must follow object files)
-    link_cmd = [cc, "-shared", "-fPIC"] + [str(o) for o in obj_files] + ldflags + ["-lm", "-o", str(lib_path)]
+    link_cmd = [cc, "-shared", "-fPIC", "-pthread"] + [str(o) for o in obj_files] + ldflags + ["-lm", "-lpthread", "-o", str(lib_path)]
     try:
         subprocess.run(link_cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
