@@ -236,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build", help="Build a standalone executable bundle from a Python file")
     b.add_argument("input", help="Input .py file")
     b.add_argument("-o", "--output", required=True, help="Output executable binary path")
+    b.add_argument("--target", default="native", choices=["native", "wasi", "wasm", "browser"], help="Compilation target: native executable, wasi preview 1, or browser wasm")
     b.add_argument("--standalone", action="store_true", default=True, help="Package as self-contained standalone bundle")
     b.add_argument("--optimize", "-O", action="store_true", default=True, help="Run IR optimizations")
 
@@ -333,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "build":
         from .bundle import StandaloneBundler
-        bundler = StandaloneBundler(optimize=args.optimize)
+        bundler = StandaloneBundler(optimize=args.optimize, target=args.target)
         out_bin = bundler.build_bundle(Path(args.input), Path(args.output))
         print(f"Built standalone executable: {out_bin} ({out_bin.stat().st_size} bytes)")
         return 0
