@@ -290,6 +290,31 @@ EXPORT PyObject* PyNumber_Power(PyObject *o1, PyObject *o2, PyObject *o3) {
     return PyFloat_FromDouble(pow(b, e));
 }
 
+EXPORT PyObject* PyNumber_InPlacePower(PyObject *o1, PyObject *o2, PyObject *o3) {
+    if (!o1 || !o2) return NULL;
+    if (o1->ob_type && o1->ob_type->tp_as_number && o1->ob_type->tp_as_number->nb_inplace_power)
+        return o1->ob_type->tp_as_number->nb_inplace_power(o1, o2, o3);
+    return PyNumber_Power(o1, o2, o3);
+}
+
+EXPORT PyObject* PyNumber_MatrixMultiply(PyObject *o1, PyObject *o2) {
+    if (!o1 || !o2) return NULL;
+    if (o1->ob_type && o1->ob_type->tp_as_number && o1->ob_type->tp_as_number->nb_matrix_multiply)
+        return o1->ob_type->tp_as_number->nb_matrix_multiply(o1, o2);
+    if (o2->ob_type && o2->ob_type->tp_as_number && o2->ob_type->tp_as_number->nb_matrix_multiply)
+        return o2->ob_type->tp_as_number->nb_matrix_multiply(o1, o2);
+    return PyErr_Format(PyExc_TypeError, "unsupported operand type(s) for @: '%.100s' and '%.100s'",
+                        o1->ob_type ? o1->ob_type->tp_name : "<null>",
+                        o2->ob_type ? o2->ob_type->tp_name : "<null>");
+}
+
+EXPORT PyObject* PyNumber_InPlaceMatrixMultiply(PyObject *o1, PyObject *o2) {
+    if (!o1 || !o2) return NULL;
+    if (o1->ob_type && o1->ob_type->tp_as_number && o1->ob_type->tp_as_number->nb_inplace_matrix_multiply)
+        return o1->ob_type->tp_as_number->nb_inplace_matrix_multiply(o1, o2);
+    return PyNumber_MatrixMultiply(o1, o2);
+}
+
 EXPORT PyObject* PyNumber_Negative(PyObject *o) {
     if (!o) return NULL;
     if (o->ob_type && o->ob_type->tp_as_number && o->ob_type->tp_as_number->nb_negative)

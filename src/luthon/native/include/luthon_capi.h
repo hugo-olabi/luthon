@@ -125,6 +125,16 @@ typedef struct PyModuleDef_Base {
     void       *m_copy;
 } PyModuleDef_Base;
 
+/* PEP 489 Multi-Phase Module Initialization Slots */
+typedef struct PyModuleDef_Slot {
+    int slot;
+    void *value;
+} PyModuleDef_Slot;
+
+#define Py_mod_create 1
+#define Py_mod_exec 2
+#define Py_mod_multiple_interpreters 3
+
 /* PyModuleDef */
 typedef struct PyModuleDef {
     PyModuleDef_Base m_base;
@@ -132,6 +142,10 @@ typedef struct PyModuleDef {
     const char      *m_doc;
     Py_ssize_t       m_size;
     PyMethodDef     *m_methods;
+    struct PyModuleDef_Slot *m_slots;
+    void            *m_traverse;
+    void            *m_clear;
+    void            *m_free;
 } PyModuleDef;
 
 /* PEP 3118 Buffer Protocol Flags */
@@ -185,6 +199,14 @@ typedef struct bufferinfo {
     void *internal;
 } Py_buffer;
 
+/* Async Methods Protocol */
+typedef struct {
+    PyObject *(*am_await)(PyObject *);
+    PyObject *(*am_aiter)(PyObject *);
+    PyObject *(*am_anext)(PyObject *);
+    PyObject *(*am_send)(PyObject *, PyObject *);
+} PyAsyncMethods;
+
 /* Number Methods Protocol */
 typedef struct {
     PyObject *(*nb_add)(PyObject *, PyObject *);
@@ -211,6 +233,9 @@ typedef struct {
     PyObject *(*nb_inplace_multiply)(PyObject *, PyObject *);
     PyObject *(*nb_true_divide)(PyObject *, PyObject *);
     PyObject *(*nb_floor_divide)(PyObject *, PyObject *);
+    PyObject *(*nb_matrix_multiply)(PyObject *, PyObject *);
+    PyObject *(*nb_inplace_matrix_multiply)(PyObject *, PyObject *);
+    PyObject *(*nb_inplace_power)(PyObject *, PyObject *, PyObject *);
 } PyNumberMethods;
 
 /* Sequence Methods Protocol */
@@ -245,7 +270,7 @@ struct _typeobject {
     void *tp_print;
     void *tp_getattr;
     void *tp_setattr;
-    void *tp_as_async;
+    PyAsyncMethods *tp_as_async;
     void *tp_repr;
     PyNumberMethods *tp_as_number;
     PySequenceMethods *tp_as_sequence;
@@ -276,7 +301,119 @@ struct _typeobject {
     void *tp_alloc;
     PyObject *(*tp_new)(struct _typeobject *, PyObject *, PyObject *);
     void *tp_free;
+    void (*tp_finalize)(PyObject *);
 };
+
+/* Dynamic Heap Types & Type Spec Protocol (PEP 384) */
+typedef struct {
+    int slot;
+    void *pfunc;
+} PyType_Slot;
+
+typedef struct {
+    const char *name;
+    int basicsize;
+    int itemsize;
+    unsigned int flags;
+    PyType_Slot *slots;
+} PyType_Spec;
+
+/* Slot IDs matching standard CPython */
+#define Py_bf_getbuffer       1
+#define Py_bf_releasebuffer   2
+#define Py_mp_ass_subscript   3
+#define Py_mp_length          4
+#define Py_mp_subscript       5
+#define Py_nb_absolute        6
+#define Py_nb_add             7
+#define Py_nb_and             8
+#define Py_nb_bool            9
+#define Py_nb_divmod          10
+#define Py_nb_float           11
+#define Py_nb_floor_divide    12
+#define Py_nb_index           13
+#define Py_nb_inplace_add     14
+#define Py_nb_inplace_and     15
+#define Py_nb_inplace_floor_divide 16
+#define Py_nb_inplace_lshift  17
+#define Py_nb_inplace_multiply 18
+#define Py_nb_inplace_or      19
+#define Py_nb_inplace_power   20
+#define Py_nb_inplace_remainder 21
+#define Py_nb_inplace_rshift  22
+#define Py_nb_inplace_subtract 23
+#define Py_nb_inplace_true_divide 24
+#define Py_nb_inplace_xor     25
+#define Py_nb_invert          26
+#define Py_nb_lshift          27
+#define Py_nb_multiply        28
+#define Py_nb_negative        29
+#define Py_nb_or              30
+#define Py_nb_positive        31
+#define Py_nb_power           32
+#define Py_nb_remainder       33
+#define Py_nb_rshift          34
+#define Py_nb_subtract        35
+#define Py_nb_true_divide     36
+#define Py_nb_xor             37
+#define Py_sq_concat          38
+#define Py_sq_contains        39
+#define Py_sq_inplace_concat  40
+#define Py_sq_inplace_repeat  41
+#define Py_sq_item            42
+#define Py_sq_length          43
+#define Py_sq_repeat          44
+#define Py_sq_ass_item        45
+#define Py_tp_alloc           46
+#define Py_tp_base            47
+#define Py_tp_bases           48
+#define Py_tp_call            49
+#define Py_tp_clear           50
+#define Py_tp_dealloc         51
+#define Py_tp_descr_get       52
+#define Py_tp_descr_set       53
+#define Py_tp_doc             54
+#define Py_tp_getattr         55
+#define Py_tp_getattro        56
+#define Py_tp_hash            57
+#define Py_tp_init            58
+#define Py_tp_is_gc           59
+#define Py_tp_iter            60
+#define Py_tp_iternext        61
+#define Py_tp_methods         62
+#define Py_tp_new             63
+#define Py_tp_repr            64
+#define Py_tp_richcompare     65
+#define Py_tp_setattr         66
+#define Py_tp_setattro        67
+#define Py_tp_str             68
+#define Py_tp_traverse        69
+#define Py_tp_members         70
+#define Py_tp_getset          71
+#define Py_tp_free            72
+#define Py_nb_matrix_multiply 73
+#define Py_nb_inplace_matrix_multiply 74
+#define Py_am_await           75
+#define Py_am_aiter           76
+#define Py_am_anext           77
+#define Py_tp_finalize        78
+#define Py_nb_int             79
+
+#define Py_TPFLAGS_HEAPTYPE   (1UL << 9)
+#define Py_TPFLAGS_BASETYPE   (1UL << 10)
+#define Py_TPFLAGS_DEFAULT    (1UL << 0)
+
+typedef struct {
+    PyTypeObject ht_type;
+    PyAsyncMethods as_async;
+    PyNumberMethods as_number;
+    PyMappingMethods as_mapping;
+    PySequenceMethods as_sequence;
+    PyBufferProcs as_buffer;
+    PyObject *ht_name;
+    PyObject *ht_slots;
+    PyObject *ht_qualname;
+} PyHeapTypeObject;
 
 /* Slice structure */
 typedef struct {
@@ -329,6 +466,10 @@ struct _object {
         } buf_val;
         PySliceObject slice_val;
         PyStreamObject stream_val;
+        struct {
+            void *module_def;
+            PyObject *dict;
+        } mod_val;
         void *module_def;
     } as;
 };
@@ -491,6 +632,12 @@ EXPORT int PyDict_SetItemString(PyObject *dp, const char *key, PyObject *item);
 EXPORT PyObject* PyDict_GetItemString(PyObject *dp, const char *key);
 EXPORT Py_ssize_t PyDict_Size(PyObject *dp);
 EXPORT int PyDict_GetItemRef(PyObject *p, PyObject *key, PyObject **result);
+EXPORT int PyDict_SetItem(PyObject *dp, PyObject *key, PyObject *item);
+EXPORT PyObject* PyDict_GetItem(PyObject *dp, PyObject *key);
+EXPORT int PyDict_DelItem(PyObject *dp, PyObject *key);
+EXPORT int PyDict_Contains(PyObject *dp, PyObject *key);
+EXPORT int PyMapping_SetItemString(PyObject *o, const char *key, PyObject *v);
+EXPORT PyObject* PyMapping_GetItemString(PyObject *o, const char *key);
 
 EXPORT PyObject* PySlice_New(PyObject *start, PyObject *stop, PyObject *step);
 EXPORT int PySlice_Unpack(PyObject *r, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t *step);
@@ -503,9 +650,14 @@ EXPORT int PyMapping_Check(PyObject *o);
 /* Number & Comparison Protocol API */
 EXPORT PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op);
 EXPORT int PyObject_RichCompareBool(PyObject *v, PyObject *w, int op);
+EXPORT PyObject* PyNumber_MatrixMultiply(PyObject *o1, PyObject *o2);
+EXPORT PyObject* PyNumber_InPlaceMatrixMultiply(PyObject *o1, PyObject *o2);
+EXPORT PyObject* PyNumber_InPlacePower(PyObject *o1, PyObject *o2, PyObject *o3);
 
 /* Type & Attribute Protocol API */
 EXPORT int PyType_Ready(PyTypeObject *type);
+EXPORT PyObject* PyType_FromSpec(PyType_Spec *spec);
+EXPORT PyObject* PyType_FromSpecWithBases(PyType_Spec *spec, PyObject *bases);
 EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name);
 EXPORT int PyObject_SetAttrString(PyObject *o, const char *attr_name, PyObject *v);
 EXPORT int PyObject_HasAttrString(PyObject *o, const char *attr_name);
@@ -534,7 +686,16 @@ EXPORT PyObject* PyModule_Create2(PyModuleDef *def, int apiver);
 EXPORT PyObject* PyModuleDef_Init(PyModuleDef *def);
 EXPORT PyObject* PyModule_GetDict(PyObject *mod);
 EXPORT int PyModule_AddObjectRef(PyObject *mod, const char *name, PyObject *value);
+EXPORT int PyModule_AddObject(PyObject *mod, const char *name, PyObject *value);
 EXPORT int PyModule_AddIntConstant(PyObject *mod, const char *name, long value);
+EXPORT int PyModule_AddStringConstant(PyObject *mod, const char *name, const char *value);
+EXPORT PyObject* PyModule_FromDefAndSpec(PyModuleDef *def, PyObject *spec);
+EXPORT PyObject* PyModule_FromDefAndSpec2(PyModuleDef *def, PyObject *spec, int module_api_version);
+EXPORT int PyModule_ExecDef(PyObject *module, PyModuleDef *def);
+EXPORT PyObject* PyImport_ImportModule(const char *name);
+EXPORT PyObject* PyImport_Import(PyObject *name);
+EXPORT PyObject* PyEval_GetBuiltins(void);
+EXPORT PyObject* PySys_GetObject(const char *name);
 EXPORT Py_ssize_t PyObject_Size(PyObject *o);
 EXPORT PyObject* Py_BuildValue(const char *format, ...);
 EXPORT PyObject* PyObject_CallFunction(PyObject *callable, const char *format, ...);
@@ -558,6 +719,9 @@ EXPORT int PyCapsule_IsValid(PyObject *op, const char *name);
 EXPORT void* PyCapsule_GetPointer(PyObject *op, const char *name);
 EXPORT void* PyCapsule_GetContext(PyObject *op);
 EXPORT int PyCapsule_SetContext(PyObject *op, void *context);
+EXPORT int PyCapsule_SetName(PyObject *op, const char *name);
+EXPORT int PyCapsule_Register(const char *name, void *pointer);
+EXPORT void* PyCapsule_Import(const char *name, int no_block);
 
 /* PEP 3118 Multi-Dimensional Buffer Functions (Phase 33) */
 EXPORT int PyBuffer_FillInfo(Py_buffer *view, PyObject *o, void *buf, Py_ssize_t len, int readonly, int flags);

@@ -5,28 +5,28 @@
 #include "luthon_capi.h"
 
 /* Standard Type Objects */
-EXPORT PyTypeObject Base_Type    = { 1, NULL, "object", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyType_Type  = { 1, &Base_Type, "type", sizeof(PyTypeObject), 0, NULL };
-EXPORT PyTypeObject PyLong_Type  = { 1, &Base_Type, "int", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyFloat_Type = { 1, &Base_Type, "float", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyUnicode_Type = { 1, &Base_Type, "str", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyBytes_Type = { 1, &Base_Type, "bytes", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyTuple_Type = { 1, &Base_Type, "tuple", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyList_Type  = { 1, &Base_Type, "list", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyDict_Type  = { 1, &Base_Type, "dict", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyBool_Type  = { 1, &Base_Type, "bool", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PySlice_Type = { 1, &Base_Type, "slice", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyStream_Type = { 1, &Base_Type, "BytesIO", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyBaseObject_Type = { 1, NULL, "object", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyComplex_Type = { 1, &Base_Type, "complex", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyCFunction_Type = { 1, &Base_Type, "builtin_function_or_method", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyDictProxy_Type = { 1, &Base_Type, "mappingproxy", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyGetSetDescr_Type = { 1, &Base_Type, "getset_descriptor", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyMemberDescr_Type = { 1, &Base_Type, "member_descriptor", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyMethodDescr_Type = { 1, &Base_Type, "method_descriptor", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyMemoryView_Type = { 1, &Base_Type, "memoryview", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PySet_Type = { 1, &Base_Type, "set", sizeof(PyObject), 0, NULL };
-EXPORT PyTypeObject PyFrozenSet_Type = { 1, &Base_Type, "frozenset", sizeof(PyObject), 0, NULL };
+EXPORT PyTypeObject Base_Type    = { .ob_refcnt = 1, .ob_type = NULL, .tp_name = "object", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyType_Type  = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "type", .tp_basicsize = sizeof(PyTypeObject) };
+EXPORT PyTypeObject PyLong_Type  = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "int", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyFloat_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "float", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyUnicode_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "str", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyBytes_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "bytes", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyTuple_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "tuple", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyList_Type  = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "list", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyDict_Type  = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "dict", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyBool_Type  = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "bool", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PySlice_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "slice", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyStream_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "BytesIO", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyBaseObject_Type = { .ob_refcnt = 1, .ob_type = NULL, .tp_name = "object", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyComplex_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "complex", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyCFunction_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "builtin_function_or_method", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyDictProxy_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "mappingproxy", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyGetSetDescr_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "getset_descriptor", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyMemberDescr_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "member_descriptor", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyMethodDescr_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "method_descriptor", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyMemoryView_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "memoryview", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PySet_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "set", .tp_basicsize = sizeof(PyObject) };
+EXPORT PyTypeObject PyFrozenSet_Type = { .ob_refcnt = 1, .ob_type = &Base_Type, .tp_name = "frozenset", .tp_basicsize = sizeof(PyObject) };
 
 /* PyType_Ready: initializes type slots and inherits missing slots from tp_base */
 EXPORT int PyType_Ready(PyTypeObject *type) {
@@ -71,13 +71,186 @@ EXPORT int PyType_Ready(PyTypeObject *type) {
     if (!type->tp_iternext && base->tp_iternext) {
         type->tp_iternext = base->tp_iternext;
     }
+    if (!type->tp_as_async && base->tp_as_async) {
+        type->tp_as_async = base->tp_as_async;
+    }
+    if (!type->tp_finalize && base->tp_finalize) {
+        type->tp_finalize = base->tp_finalize;
+    }
+    if (!type->tp_dict) {
+        type->tp_dict = PyDict_New();
+    }
 
     return 0;
+}
+
+/* Dynamic Heap Types & Type Spec Protocol (PEP 384 / Phase 40) */
+EXPORT PyObject* PyType_FromSpecWithBases(PyType_Spec *spec, PyObject *bases) {
+    if (!spec) {
+        return PyErr_Format(PyExc_ValueError, "PyType_FromSpecWithBases received NULL spec");
+    }
+
+    PyHeapTypeObject *ht = (PyHeapTypeObject *)calloc(1, sizeof(PyHeapTypeObject));
+    if (!ht) {
+        return PyErr_NoMemory();
+    }
+
+    PyTypeObject *type = &ht->ht_type;
+    type->ob_refcnt = 1;
+    type->ob_type = &PyType_Type;
+    type->tp_name = spec->name ? spec->name : "AnonymousHeapType";
+    type->tp_basicsize = spec->basicsize > 0 ? (Py_ssize_t)spec->basicsize : (Py_ssize_t)sizeof(PyObject);
+    type->tp_itemsize = spec->itemsize;
+    type->tp_flags = spec->flags | Py_TPFLAGS_HEAPTYPE;
+
+    /* Link embedded method suites directly into the heap type */
+    type->tp_as_async = &ht->as_async;
+    type->tp_as_number = &ht->as_number;
+    type->tp_as_mapping = &ht->as_mapping;
+    type->tp_as_sequence = &ht->as_sequence;
+    type->tp_as_buffer = (void *)&ht->as_buffer;
+
+    /* Base inheritance resolution */
+    if (bases) {
+        if (bases->tag == PY_TAG_TUPLE && bases->as.seq_val.size > 0) {
+            type->tp_base = (PyTypeObject *)bases->as.seq_val.items[0];
+        } else if (bases->ob_type == &PyType_Type || (bases->ob_type && (bases->ob_type->tp_flags & Py_TPFLAGS_HEAPTYPE))) {
+            type->tp_base = (PyTypeObject *)bases;
+        }
+    }
+    if (!type->tp_base) {
+        type->tp_base = &Base_Type;
+    }
+
+    /* Iterate through slots */
+    if (spec->slots) {
+        for (PyType_Slot *slot = spec->slots; slot->slot != 0; slot++) {
+            void *p = slot->pfunc;
+            switch (slot->slot) {
+                case Py_tp_alloc: type->tp_alloc = p; break;
+                case Py_tp_base: type->tp_base = (PyTypeObject *)p; break;
+                case Py_tp_call: type->tp_call = (PyObject *(*)(PyObject *, PyObject *, PyObject *))p; break;
+                case Py_tp_clear: type->tp_clear = p; break;
+                case Py_tp_dealloc: type->tp_dealloc = (void (*)(PyObject *))p; break;
+                case Py_tp_descr_get: type->tp_descr_get = p; break;
+                case Py_tp_descr_set: type->tp_descr_set = p; break;
+                case Py_tp_doc: type->tp_doc = (const char *)p; break;
+                case Py_tp_getattr: type->tp_getattr = p; break;
+                case Py_tp_getattro: type->tp_getattro = (PyObject *(*)(PyObject *, PyObject *))p; break;
+                case Py_tp_hash: type->tp_hash = p; break;
+                case Py_tp_init: type->tp_init = (int (*)(PyObject *, PyObject *, PyObject *))p; break;
+                case Py_tp_iter: type->tp_iter = (PyObject *(*)(PyObject *))p; break;
+                case Py_tp_iternext: type->tp_iternext = (PyObject *(*)(PyObject *))p; break;
+                case Py_tp_methods: type->tp_methods = (PyMethodDef *)p; break;
+                case Py_tp_new: type->tp_new = (PyObject *(*)(struct _typeobject *, PyObject *, PyObject *))p; break;
+                case Py_tp_repr: type->tp_repr = p; break;
+                case Py_tp_richcompare: type->tp_richcompare = (PyObject *(*)(PyObject *, PyObject *, int))p; break;
+                case Py_tp_setattr: type->tp_setattr = p; break;
+                case Py_tp_setattro: type->tp_setattro = (int (*)(PyObject *, PyObject *, PyObject *))p; break;
+                case Py_tp_str: type->tp_str = p; break;
+                case Py_tp_traverse: type->tp_traverse = p; break;
+                case Py_tp_members: type->tp_members = p; break;
+                case Py_tp_getset: type->tp_getset = p; break;
+                case Py_tp_free: type->tp_free = p; break;
+                case Py_tp_finalize: type->tp_finalize = (void (*)(PyObject *))p; break;
+
+                /* Number slots */
+                case Py_nb_add: ht->as_number.nb_add = p; break;
+                case Py_nb_subtract: ht->as_number.nb_subtract = p; break;
+                case Py_nb_multiply: ht->as_number.nb_multiply = p; break;
+                case Py_nb_remainder: ht->as_number.nb_remainder = p; break;
+                case Py_nb_divmod: ht->as_number.nb_divmod = p; break;
+                case Py_nb_power: ht->as_number.nb_power = p; break;
+                case Py_nb_negative: ht->as_number.nb_negative = p; break;
+                case Py_nb_positive: ht->as_number.nb_positive = p; break;
+                case Py_nb_absolute: ht->as_number.nb_absolute = p; break;
+                case Py_nb_bool: ht->as_number.nb_bool = (int (*)(PyObject *))p; break;
+                case Py_nb_invert: ht->as_number.nb_invert = p; break;
+                case Py_nb_lshift: ht->as_number.nb_lshift = p; break;
+                case Py_nb_rshift: ht->as_number.nb_rshift = p; break;
+                case Py_nb_and: ht->as_number.nb_and = p; break;
+                case Py_nb_xor: ht->as_number.nb_xor = p; break;
+                case Py_nb_or: ht->as_number.nb_or = p; break;
+                case Py_nb_int: ht->as_number.nb_int = p; break;
+                case Py_nb_float: ht->as_number.nb_float = p; break;
+                case Py_nb_inplace_add: ht->as_number.nb_inplace_add = p; break;
+                case Py_nb_inplace_subtract: ht->as_number.nb_inplace_subtract = p; break;
+                case Py_nb_inplace_multiply: ht->as_number.nb_inplace_multiply = p; break;
+                case Py_nb_inplace_power: ht->as_number.nb_inplace_power = p; break;
+                case Py_nb_true_divide: ht->as_number.nb_true_divide = p; break;
+                case Py_nb_floor_divide: ht->as_number.nb_floor_divide = p; break;
+                case Py_nb_matrix_multiply: ht->as_number.nb_matrix_multiply = p; break;
+                case Py_nb_inplace_matrix_multiply: ht->as_number.nb_inplace_matrix_multiply = p; break;
+
+                /* Sequence slots */
+                case Py_sq_length: ht->as_sequence.sq_length = (Py_ssize_t (*)(PyObject *))p; break;
+                case Py_sq_concat: ht->as_sequence.sq_concat = p; break;
+                case Py_sq_repeat: ht->as_sequence.sq_repeat = (PyObject *(*)(PyObject *, Py_ssize_t))p; break;
+                case Py_sq_item: ht->as_sequence.sq_item = (PyObject *(*)(PyObject *, Py_ssize_t))p; break;
+                case Py_sq_ass_item: ht->as_sequence.sq_ass_item = (int (*)(PyObject *, Py_ssize_t, PyObject *))p; break;
+                case Py_sq_contains: ht->as_sequence.sq_contains = (int (*)(PyObject *, PyObject *))p; break;
+
+                /* Mapping slots */
+                case Py_mp_length: ht->as_mapping.mp_length = (Py_ssize_t (*)(PyObject *))p; break;
+                case Py_mp_subscript: ht->as_mapping.mp_subscript = (PyObject *(*)(PyObject *, PyObject *))p; break;
+                case Py_mp_ass_subscript: ht->as_mapping.mp_ass_subscript = (int (*)(PyObject *, PyObject *, PyObject *))p; break;
+
+                /* Buffer slots */
+                case Py_bf_getbuffer: ht->as_buffer.bf_getbuffer = (getbufferproc)p; break;
+                case Py_bf_releasebuffer: ht->as_buffer.bf_releasebuffer = (releasebufferproc)p; break;
+
+                /* Async slots */
+                case Py_am_await: ht->as_async.am_await = p; break;
+                case Py_am_aiter: ht->as_async.am_aiter = p; break;
+                case Py_am_anext: ht->as_async.am_anext = p; break;
+
+                default: break;
+            }
+        }
+    }
+
+    PyType_Ready(type);
+
+    /* Populate tp_dict with methods, members, getsets */
+    if (type->tp_dict) {
+        if (type->tp_doc) {
+            PyDict_SetItemString(type->tp_dict, "__doc__", PyUnicode_FromString(type->tp_doc));
+        }
+        if (type->tp_name) {
+            PyDict_SetItemString(type->tp_dict, "__name__", PyUnicode_FromString(type->tp_name));
+        }
+    }
+
+    return (PyObject *)type;
+}
+
+EXPORT PyObject* PyType_FromSpec(PyType_Spec *spec) {
+    return PyType_FromSpecWithBases(spec, NULL);
 }
 
 /* Attribute access with full Descriptor / Property / Member dispatch (Phase 32) */
 EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name) {
     if (!o || !attr_name) return NULL;
+
+    /* 0. If target is a Type Object itself, resolve class attributes */
+    if (o->ob_type == &PyType_Type) {
+        PyTypeObject *as_type = (PyTypeObject *)o;
+        if (strcmp(attr_name, "__name__") == 0) return PyUnicode_FromString(as_type->tp_name ? as_type->tp_name : "");
+        if (strcmp(attr_name, "__doc__") == 0) return PyUnicode_FromString(as_type->tp_doc ? as_type->tp_doc : "");
+        if (as_type->tp_dict) {
+            PyObject *v = PyDict_GetItemString(as_type->tp_dict, attr_name);
+            if (v) { Py_IncRef(v); return v; }
+        }
+        if (as_type->tp_methods) {
+            for (PyMethodDef *m = as_type->tp_methods; m->ml_name != NULL; m++) {
+                if (strcmp(m->ml_name, attr_name) == 0) {
+                    PyObject *fn = alloc_pyobject(PY_TAG_OPAQUE, &Base_Type);
+                    if (fn) fn->as.buf_val.ptr = m->ml_meth;
+                    return fn;
+                }
+            }
+        }
+    }
 
     PyTypeObject *tp = o->ob_type;
     if (!tp) tp = &Base_Type;
@@ -159,9 +332,17 @@ EXPORT PyObject* PyObject_GetAttrString(PyObject *o, const char *attr_name) {
     }
 
     /* 6. Module dictionary / method lookup */
-    if (o->tag == PY_TAG_MODULE && o->as.module_def) {
-        PyModuleDef *def = (PyModuleDef *)o->as.module_def;
-        if (def->m_methods) {
+    if (o->tag == PY_TAG_MODULE) {
+        PyObject *dict = PyModule_GetDict(o);
+        if (dict) {
+            PyObject *val = PyDict_GetItemString(dict, attr_name);
+            if (val) {
+                Py_IncRef(val);
+                return val;
+            }
+        }
+        PyModuleDef *def = (PyModuleDef *)o->as.mod_val.module_def;
+        if (def && def->m_methods) {
             for (PyMethodDef *m = def->m_methods; m->ml_name != NULL; m++) {
                 if (strcmp(m->ml_name, attr_name) == 0) {
                     PyObject *fn = alloc_pyobject(PY_TAG_OPAQUE, &Base_Type);
@@ -284,6 +465,22 @@ EXPORT PyObject* PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwa
     if (!callable) return NULL;
 
     PyTypeObject *tp = callable->ob_type;
+
+    /* If callable is a Type object: instantiate via tp_new + tp_init */
+    if (callable->ob_type == &PyType_Type || (tp && (tp->tp_flags & Py_TPFLAGS_HEAPTYPE))) {
+        PyTypeObject *target_type = (PyTypeObject *)callable;
+        PyObject *instance = NULL;
+        if (target_type->tp_new) {
+            instance = target_type->tp_new(target_type, args, kwargs);
+        } else {
+            instance = _PyObject_New(target_type);
+        }
+        if (instance && target_type->tp_init) {
+            target_type->tp_init(instance, args, kwargs);
+        }
+        return instance;
+    }
+
     if (tp && tp->tp_call) {
         return tp->tp_call(callable, args, kwargs);
     }

@@ -26,6 +26,11 @@ EXPORT void _Py_Dealloc(PyObject *o) {
     if (!o) return;
     if (o == &_Py_NoneStruct || o == &_Py_TrueStruct || o == &_Py_FalseStruct) return;
 
+    /* tp_finalize hook for native C++ object cleanup prior to destruction (Phase 40) */
+    if (o->ob_type && o->ob_type->tp_finalize) {
+        o->ob_type->tp_finalize(o);
+    }
+
     if (o->ob_type && o->ob_type->tp_dealloc) {
         o->ob_type->tp_dealloc(o);
         return;
@@ -53,6 +58,27 @@ EXPORT void _Py_Dealloc(PyObject *o) {
         if (cap->destructor) {
             cap->destructor(o);
         }
+    } else if (o->tag == PY_TAG_DICT) {
+        typedef struct {
+            char *key;
+            PyObject *val;
+        } _PyDictItem;
+        typedef struct {
+            _PyDictItem *items;
+            Py_ssize_t size;
+            Py_ssize_t capacity;
+        } _PyDictStorage;
+        _PyDictStorage *st = (_PyDictStorage *)o->as.buf_val.ptr;
+        if (st) {
+            for (Py_ssize_t i = 0; i < st->size; i++) {
+                free(st->items[i].key);
+                Py_DecRef(st->items[i].val);
+            }
+            free(st->items);
+            free(st);
+        }
+    } else if (o->tag == PY_TAG_MODULE) {
+        Py_DecRef(o->as.mod_val.dict);
     }
     free(o);
 }
