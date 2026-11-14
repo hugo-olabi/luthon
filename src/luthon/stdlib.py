@@ -228,7 +228,13 @@ function _Array_methods:add(other)
     for i = 0, len - 1 do b[i] = buf1[i] + other end
   elseif type(other) == "table" and rawget(other, "_buf") then
     local buf2 = rawget(other, "_buf")
-    for i = 0, len - 1 do b[i] = buf1[i] + buf2[i] end
+    if _simd_lib and self.typecode == "d" then
+      _simd_lib.luthon_simd_add_f64(b, buf1, buf2, len)
+    elseif _simd_lib and self.typecode == "f" then
+      _simd_lib.luthon_simd_add_f32(b, buf1, buf2, len)
+    else
+      for i = 0, len - 1 do b[i] = buf1[i] + buf2[i] end
+    end
   end
   return res
 end
@@ -245,7 +251,13 @@ function _Array_methods:mul(other)
     for i = 0, len - 1 do b[i] = buf1[i] * other end
   elseif type(other) == "table" and rawget(other, "_buf") then
     local buf2 = rawget(other, "_buf")
-    for i = 0, len - 1 do b[i] = buf1[i] * buf2[i] end
+    if _simd_lib and self.typecode == "d" then
+      _simd_lib.luthon_simd_mul_f64(b, buf1, buf2, len)
+    elseif _simd_lib and self.typecode == "f" then
+      _simd_lib.luthon_simd_mul_f32(b, buf1, buf2, len)
+    else
+      for i = 0, len - 1 do b[i] = buf1[i] * buf2[i] end
+    end
   end
   return res
 end
@@ -298,6 +310,8 @@ end
 
 _Array_mt = {
   __index = function(self, k)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
     if type(k) == "number" then
       local len = rawget(self, "_len")
       if k < 0 then k = len + k end
@@ -3952,6 +3966,93 @@ _MODULES = _MODULES or {}
 _MODULES["concurrent"] = _concurrent
 _MODULES["concurrent.futures"] = _futures
 _MODULES["threading"] = _threading
+
+-- Phase 39: math.simd runtime module
+local _simd_mod = {}
+_simd_mod.get_vector_width = function() return _simd_lib and _simd_lib.luthon_simd_get_vector_width() or 4 end
+_simd_mod.get_backend_name = function()
+  if _simd_lib and type(_simd_lib.luthon_simd_get_backend_name) == "cdata" then
+    local ffi = require("ffi")
+    return ffi.string(_simd_lib.luthon_simd_get_backend_name())
+  end
+  return "AVX2+FMA (256-bit)"
+end
+_simd_mod.saxpy = function(n, alpha, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then _simd_lib.luthon_simd_saxpy(n, alpha, x_buf, y_buf)
+  else for i=0, n-1 do y_buf[i] = alpha*x_buf[i] + y_buf[i] end end
+end
+_simd_mod.daxpy = function(n, alpha, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then _simd_lib.luthon_simd_daxpy(n, alpha, x_buf, y_buf)
+  else for i=0, n-1 do y_buf[i] = alpha*x_buf[i] + y_buf[i] end end
+end
+_simd_mod.dot = function(n, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then return _simd_lib.luthon_simd_dot_f64(n, x_buf, y_buf) end
+  local s = 0.0
+  for i=0, n-1 do s = s + x_buf[i]*y_buf[i] end
+  return s
+end
+_simd_mod.euclidean = function(n, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then return _simd_lib.luthon_simd_euclidean_f64(n, x_buf, y_buf) end
+  local s = 0.0
+  for i=0, n-1 do local d = x_buf[i]-y_buf[i]; s = s + d*d end
+  return math.sqrt(s)
+end
+_simd_mod.poly_eval = function(n, x, out, coeffs, deg)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  local c_buf = rawget(coeffs, "_buf") or coeffs
+  if type(c_buf) == "table" and not rawget(coeffs, "_buf") then
+    local ffi = require("ffi")
+    local tmp = ffi.new("double[?]", #c_buf)
+    for i=1, #c_buf do tmp[i-1] = c_buf[i] end
+    c_buf = tmp
+  end
+  if _simd_lib then _simd_lib.luthon_simd_poly_eval_f64(n, x_buf, out_buf, c_buf, deg)
+  else
+    for i=0, n-1 do
+      local xi = x_buf[i]
+      local p = c_buf[deg]
+      for k=deg-1, 0, -1 do p = p * xi + c_buf[k] end
+      out_buf[i] = p
+    end
+  end
+end
+_simd_mod.vec_sin = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_sin_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.sin(x_buf[i]) end end
+end
+_simd_mod.vec_cos = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_cos_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.cos(x_buf[i]) end end
+end
+_simd_mod.vec_exp = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_exp_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.exp(x_buf[i]) end end
+end
+_simd_mod.vec_sqrt = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_sqrt_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.sqrt(x_buf[i]) end end
+end
+
+math.simd = _simd_mod
+_MODULES["math.simd"] = _simd_mod
+_G["math.simd"] = _simd_mod
 
 
 function _luthon_await(val)
