@@ -20,7 +20,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | **Phase 36** | Language Parity | Modern Python Parity (`ast.Match`, Dict Unpacking `**kwargs`) | [x] | 4/4 |
 | **Phase 37** | Native Reflection Automation | DWARF Debuginfo Inspection & Autonomous C Header Extraction | [x] | 3/3 |
 | **Phase 38** | Runtime Concurrency | True Multi-Threading & GIL-Free OS Thread Pools | [x] | 4/4 |
-| **Phase 39** | Compiler & SIMD | SIMD & Vectorization Lowering in CIR (AVX2 / NEON) | [ ] | 0/4 |
+| **Phase 39** | Compiler & SIMD | SIMD & Vectorization Lowering in CIR (AVX2 / NEON) | [x] | 4/4 |
 | **Phase 40** | Native C-API Proxy | Extended Ecosystem Coverage (PyTorch, OpenCV, SciPy) | [ ] | 0/4 |
 | **Phase 41** | Cross-Platform Codegen | WebAssembly & WASI Compilation Target | [ ] | 0/4 |
 
@@ -166,18 +166,18 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 ## Phase 39 — SIMD & Vectorization Lowering in CIR (AVX2 / NEON Auto-Vectorization)
 *Target: Transform countable array loops in High-Level Intermediate Representation (CIR) into unrolled SIMD vector operations targeting AVX2 and ARM NEON.*
 
-- [ ] **Affine Loop Dependency & Vectorizability Analysis**:
+- [x] **Affine Loop Dependency & Vectorizability Analysis**:
   - In `src/luthon/cir.py`, implement an affine loop dependency pass analyzing natural loop nests identified by dominator tree analysis in `optimizer.py`.
   - Detect countable affine loops with unit stride (`i += 1`) iterating over homogeneous numeric arrays (`array('f')`, `array('d')`, typed `list[float]`, `list[int]`).
   - Check distance vectors and memory aliasing to prove the absence of loop-carried dependencies (no RAW/WAR/WAW hazards across iterations) to certify loops for vectorization.
-- [ ] **CIR Vector Instruction Set & Loop Strip-Mining**:
+- [x] **CIR Vector Instruction Set & Loop Strip-Mining**:
   - Introduce typed vector IR instructions in `src/luthon/cir.py`: `VEC_LOAD`, `VEC_STORE`, `VEC_ADD`, `VEC_SUB`, `VEC_MUL`, `VEC_FMA`, `VEC_BROADCAST`, and `VEC_REDUCE_SUM`.
   - Implement strip-mining pass decomposing candidate loops into alignment peeling pre-headers, SIMD kernel bodies of width W (W=4 for double on AVX2, W=8 for float; W=2/4 on ARM NEON), and scalar remainder cleanup blocks.
-- [ ] **Backend Vector Lowering (LuaJIT FFI & Native AVX2/NEON Intrinsics)**:
+- [x] **Backend Vector Lowering (LuaJIT FFI & Native AVX2/NEON Intrinsics)**:
   - In `src/luthon/codegen.py`, lower CIR vector operations into native C vector kernels in `src/luthon/native/core/simd.c` compiled with architecture flags (`-mavx2 -mfma` on x86_64, `-mfpu=neon` on aarch64).
   - Provide fast fallback lowering to 128-bit unrolled LuaJIT FFI vector struct operations for platforms lacking AVX2 hardware.
   - Implement vectorized transcendental approximations (vectorized `sin`, `cos`, `exp`, `sqrt`) utilizing SIMD FMA instructions.
-- [ ] **Vectorization Diagnostics & Numerical Benchmarking**:
+- [x] **Vectorization Diagnostics & Numerical Benchmarking**:
   - Add CLI diagnostic flag `--dump-vectorization` displaying auto-vectorized loop nests, vector widths, unroll factors, and reasons for rejected loops.
   - Add benchmark suite in `tests/test_phase39_simd.py` demonstrating 3x-6x throughput speedup on vector math kernels (SAXPY/DAXPY, dot product, Euclidean distance, polynomial evaluation).
 

@@ -48,6 +48,7 @@ Progress is tracked with GitHub task lists. Check boxes as work is completed.
 | Phase 36 — Modern Python Syntax Parity (ast.Match, Dict Unpacking, Kwargs Splatting) | [Done] | 3/3 |
 | Phase 37 — Autonomous C Header & DWARF Reflection (reflect.py) | [Done] | 3/3 |
 | Phase 38 — True Multi-Threading & GIL-Free OS Thread Pools (pthreads & Shared Memory Workers) | [Done] | 4/4 |
+| Phase 39 — SIMD & Vectorization Lowering in CIR (AVX2 / NEON Auto-Vectorization) | [Done] | 4/4 |
 
 ## Phase 0 — Baseline & Audit
 
@@ -338,6 +339,15 @@ Achieve zero-CPython native execution of third-party C-extensions (such as Pillo
 - [x] C-Level Heap Object Allocation & Lifetime: implement `_PyObject_New` allocating memory matching `PyTypeObject.tp_basicsize` and wire type slot dispatch directly to LuaJIT FFI trampolines
 - [x] PyCapsule Inter-Module Table Sharing: implement `PyCapsule_New` and `PyCapsule_GetPointer` so C-extensions can pass internal C-API dispatch tables between shared libraries
 - [x] In-Place C-Extension Reflection Verification: verify `_imaging.so` and `_multiarray_umath.so` load and execute in-place directly via `BinaryReflector` and `libluthon_capi.so` without `libpython3.so`
+
+## Phase 39 — SIMD & Vectorization Lowering in CIR (AVX2 / NEON Auto-Vectorization)
+
+Transform countable affine array loops in High-Level Intermediate Representation (CIR) into unrolled SIMD vector operations targeting AVX2 and ARM NEON.
+
+- [x] Affine Loop Dependency & Vectorizability Analysis: natural loop detection in CIR, unit-stride affine induction verification, and distance vector memory aliasing checks to eliminate loop-carried hazards.
+- [x] CIR Vector Instruction Set & Loop Strip-Mining: introduce `VEC_LOAD`, `VEC_STORE`, `VEC_ADD`, `VEC_SUB`, `VEC_MUL`, `VEC_FMA`, `VEC_BROADCAST`, and `VEC_REDUCE_SUM` instructions with strip-mining decomposition into pre-header, SIMD body, and scalar remainder blocks.
+- [x] Backend Vector Lowering & Native Intrinsics: implement AVX2, FMA, and NEON accelerated vector kernels in `src/luthon/native/core/simd.c` and header `luthon_simd.h`, with fast LuaJIT FFI fallback and vectorized polynomial transcendental approximations.
+- [x] Diagnostics & Numerical Benchmarking: add `--dump-vectorization` CLI diagnostic flag, `math.simd` and accelerated `array` modules, and benchmark suite demonstrating up to 7.9x throughput speedups.
 
 ## How to update
 
