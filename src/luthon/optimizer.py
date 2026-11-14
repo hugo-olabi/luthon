@@ -14,7 +14,7 @@ from .ir import Module, Function, Block, Instr
 _LITERAL_TYPES = (int, float, bool)
 
 _BINOP_EVAL = {
-    "add": lambda a, b: a + b if (type(a) in (int, float) and type(b) in (int, float)) or (isinstance(a, str) and isinstance(b, str) and not a.startswith("_t") and not b.startswith("_t")) else None,
+    "add": lambda a, b: a + b if (type(a) in (int, float) and type(b) in (int, float)) or (isinstance(a, str) and isinstance(b, str) and not a.startswith(("_t", "_r", "_v", "_")) and not b.startswith(("_t", "_r", "_v", "_"))) else None,
     "sub": lambda a, b: a - b if type(a) in (int, float) and type(b) in (int, float) else None,
     "mul": lambda a, b: a * b if type(a) in (int, float) and type(b) in (int, float) else None,
     "div": lambda a, b: a / b if type(a) in (int, float) and type(b) in (int, float) and b != 0 else None,
@@ -677,7 +677,15 @@ def dead_store_elimination_function(fn: Function) -> bool:
         defs: Set[str] = set()
         uses: Set[str] = set()
         for ins in b.instrs:
-            if ins.op == "STORE" and len(ins.args) >= 2:
+            if ins.op == "CONST":
+                if ins.result:
+                    defs.add(ins.result)
+            elif ins.op in ("JUMP", "BRANCH", "BRANCH_NONE", "BRANCH_COND", "BRANCH_FALSE"):
+                if ins.op != "JUMP" and ins.args:
+                    cond = ins.args[0]
+                    if isinstance(cond, str) and cond not in defs:
+                        uses.add(cond)
+            elif ins.op == "STORE" and len(ins.args) >= 2:
                 target, val = str(ins.args[0]), ins.args[1]
                 if isinstance(val, str) and val not in defs:
                     uses.add(val)
@@ -748,13 +756,21 @@ def dead_store_elimination_function(fn: Function) -> bool:
             # Update liveness for non-STORE instructions
             if ins.result:
                 live.discard(ins.result)
-            for a in ins.args:
-                if isinstance(a, str):
-                    live.add(a)
-                elif isinstance(a, (list, tuple)):
-                    for sub in a:
-                        if isinstance(sub, str):
-                            live.add(sub)
+            if ins.op == "CONST":
+                pass
+            elif ins.op == "JUMP":
+                pass
+            elif ins.op in ("BRANCH", "BRANCH_NONE", "BRANCH_COND", "BRANCH_FALSE"):
+                if ins.args and isinstance(ins.args[0], str):
+                    live.add(ins.args[0])
+            else:
+                for a in ins.args:
+                    if isinstance(a, str):
+                        live.add(a)
+                    elif isinstance(a, (list, tuple)):
+                        for sub in a:
+                            if isinstance(sub, str):
+                                live.add(sub)
             new_instrs.append(ins)
         b.instrs = list(reversed(new_instrs))
 
@@ -834,8 +850,18 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
         defs: Set[str] = set()
         uses: Set[str] = set()
         for ins in b.instrs:
+            if ins.op == "CONST":
+                if ins.result and ins.result in poolable:
+                    defs.add(ins.result)
+            elif ins.op == "JUMP":
+                pass
+            elif ins.op in ("BRANCH", "BRANCH_NONE", "BRANCH_COND", "BRANCH_FALSE"):
+                if ins.args:
+                    cond = ins.args[0]
+                    if isinstance(cond, str) and cond in poolable and cond not in defs:
+                        uses.add(cond)
             # STORE: args[0] is defined, args[1] is used
-            if ins.op == "STORE" and len(ins.args) >= 2:
+            elif ins.op == "STORE" and len(ins.args) >= 2:
                 target, val = ins.args[0], ins.args[1]
                 if isinstance(val, str) and val in poolable and val not in defs:
                     uses.add(val)
@@ -993,7 +1019,15 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
     # 7. Rewrite instructions to use pooled registers / spill slots
     for b in fn.blocks:
         for ins in b.instrs:
-            if ins.op == "STORE" and len(ins.args) >= 2:
+            if ins.op == "CONST":
+                if ins.result and ins.result in reg_map:
+                    ins.result = reg_map[ins.result]
+            elif ins.op == "JUMP":
+                pass
+            elif ins.op in ("BRANCH", "BRANCH_NONE", "BRANCH_COND", "BRANCH_FALSE"):
+                if ins.args and isinstance(ins.args[0], str) and ins.args[0] in reg_map:
+                    ins.args[0] = reg_map[ins.args[0]]
+            elif ins.op == "STORE" and len(ins.args) >= 2:
                 target = ins.args[0]
                 val = ins.args[1]
                 new_target = reg_map.get(target, target) if isinstance(target, str) else target
@@ -1077,11 +1111,11 @@ def optimize_function(fn: Function, max_iterations: int = 5) -> None:
     allocate_registers_function(fn)
 
 
-def optimize(module: Module) -> Module:
+def optimize(module: Module, dump_vectorization: bool = False) -> Module:
     """Run optimizer passes over all functions in the IR module."""
     try:
         from .cir import optimize_cir
-        optimize_cir(module)
+        optimize_cir(module, dump_vectorization=dump_vectorization)
     except Exception:
         pass
     try:

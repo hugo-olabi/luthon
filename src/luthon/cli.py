@@ -21,11 +21,12 @@ def compile_file(
     cache_dir: str | None = None,
     output_path: Path | None = None,
     pure: bool = False,
+    dump_vectorization: bool = False,
 ) -> tuple[str, Path | None]:
     """Compiles a Python file to Lua using cache and specified pipeline."""
     src = input_path.read_text()
     cache_key_extra = ":pure" if pure else ""
-    cache = None if no_cache else CompilationCache(cache_dir)
+    cache = None if (no_cache or dump_vectorization) else CompilationCache(cache_dir)
     deps = {}
     lua = None
     if cache is not None:
@@ -39,13 +40,17 @@ def compile_file(
         from .transpiler import transpile_ir
         if sourcemap:
             import json
-            lua, sm = transpile_ir(src, optimize=optimize, sourcemap=True, filename=str(input_path))
+            lua, sm = transpile_ir(src, optimize=optimize, sourcemap=True, filename=str(input_path), dump_vectorization=dump_vectorization)
             sm_path = (output_path.with_suffix(".lua.map") if output_path else input_path.with_suffix(".lua.map"))
             sm_path.write_text(json.dumps(sm.to_dict(), indent=2))
         else:
-            lua = transpile_ir(src, optimize=optimize, filename=str(input_path))
+            lua = transpile_ir(src, optimize=optimize, filename=str(input_path), dump_vectorization=dump_vectorization)
     else:
         lua = transpile(src)
+
+    if dump_vectorization:
+        from .cir import print_vectorization_report
+        print_vectorization_report()
 
     if pure:
         lua = "_G.__LUTHON_PURE__ = true\n" + lua
@@ -70,6 +75,7 @@ def run_file(
     dump_traces: bool = False,
     direct_jit: bool = False,
     pure: bool = False,
+    dump_vectorization: bool = False,
 ) -> int:
     """Compiles a Python file and executes it immediately under LuaJIT."""
     # Fast path: direct execution of valid cached Lua artifact
@@ -113,6 +119,7 @@ def run_file(
             cache_dir=cache_dir,
             output_path=tmp_lua_path,
             pure=pure,
+            dump_vectorization=dump_vectorization,
         )
 
         cmd = ["luajit"]
@@ -202,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--ir", action="store_true", default=True, help="Use IR pipeline (default: True)")
     r.add_argument("--no-ir", dest="ir", action="store_false", help="Use direct AST visitor pipeline")
     r.add_argument("--optimize", "-O", action="store_true", help="Run IR optimizations")
+    r.add_argument("--dump-vectorization", action="store_true", help="Dump auto-vectorization diagnostics for loop nests")
     r.add_argument("--profile", action="store_true", help="Run with LuaJIT JIT profiler enabled (-jp)")
     r.add_argument("--dump-traces", action="store_true", help="Dump JIT trace bytecode and IR (-jdump)")
     r.add_argument("--direct", "--jit", dest="direct_jit", action="store_true", help="Execute directly via LuaJIT if cached artifact exists")
@@ -215,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--ir", action="store_true", default=True, help="Use IR pipeline instead of direct transpiler")
     t.add_argument("--no-ir", dest="ir", action="store_false", help="Use direct AST visitor pipeline")
     t.add_argument("--optimize", "-O", action="store_true", help="Run IR optimizations (constant folding, DCE, copy propagation)")
+    t.add_argument("--dump-vectorization", action="store_true", help="Dump auto-vectorization diagnostics for loop nests")
     t.add_argument("--sourcemap", action="store_true", help="Generate VLQ source map")
     t.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     t.add_argument("--cache-dir", default=None, help="Cache directory")
@@ -260,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             dump_traces=args.dump_traces,
             direct_jit=getattr(args, "direct_jit", False),
             pure=getattr(args, "pure", False),
+            dump_vectorization=getattr(args, "dump_vectorization", False),
         )
 
     if args.command == "venv":
@@ -381,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             cache_dir=args.cache_dir,
             output_path=out_path,
             pure=getattr(args, "pure", False),
+            dump_vectorization=getattr(args, "dump_vectorization", False),
         )
         if out_path:
             print(f"Wrote {args.output}")

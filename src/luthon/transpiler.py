@@ -613,7 +613,7 @@ def transpile(source: str) -> str:
     return Transpiler().transpile(source)
 
 
-def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, filename: str = "", package: str = ""):
+def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, filename: str = "", package: str = "", dump_vectorization: bool = False):
     """Transpile via the IR pipeline (semantic -> IR -> Lua codegen)."""
     import ast
     from .semantic import analyze
@@ -625,8 +625,15 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
     ir = IRLowerer(package=package)
     module = ir.lower_module(tree, scope)
     if optimize:
+        from .cir import clear_vectorization_records
+        if dump_vectorization:
+            clear_vectorization_records()
         from .optimizer import optimize as opt_pass
-        opt_pass(module)
+        opt_pass(module, dump_vectorization=dump_vectorization)
+    elif dump_vectorization:
+        from .cir import clear_vectorization_records, optimize_cir
+        clear_vectorization_records()
+        optimize_cir(module, dump_vectorization=True)
     else:
         # Automatically run register allocation if a function's variable count threatens LuaJIT limits
         from .optimizer import allocate_registers_function

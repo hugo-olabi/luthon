@@ -164,6 +164,46 @@ def _emit(ins):
         return ins.args[0] + " = _luthon_import(\"" + ins.args[1] + "\")"
     if o == "IMPORT_FROM":
         return ins.args[0] + " = _luthon_import_from(\"" + ins.args[1] + "\", \"" + ins.args[2] + "\")"
+    if o == "VEC_LOAD":
+        arr = ins.args[0]
+        idx = ins.args[1]
+        elem_t = ins.args[3] if len(ins.args) > 3 else "f64"
+        fn_name = "luthon_simd_v4df_load" if elem_t == "f64" else "luthon_simd_v8sf_load"
+        buf = f"(rawget({arr}, '_buf') and rawget({arr}, '_buf') or {arr})"
+        return f"{ins.result} = _simd_lib.{fn_name}({buf}, {idx})"
+    if o == "VEC_STORE":
+        arr = ins.args[0]
+        idx = ins.args[1]
+        val = ins.args[2]
+        elem_t = ins.args[4] if len(ins.args) > 4 else "f64"
+        fn_name = "luthon_simd_v4df_store" if elem_t == "f64" else "luthon_simd_v8sf_store"
+        buf = f"(rawget({arr}, '_buf') and rawget({arr}, '_buf') or {arr})"
+        return f"_simd_lib.{fn_name}({buf}, {idx}, {val})"
+    if o == "VEC_BROADCAST":
+        val = ins.args[0]
+        elem_t = ins.args[2] if len(ins.args) > 2 else "f64"
+        fn_name = "luthon_simd_v4df_broadcast" if elem_t == "f64" else "luthon_simd_v8sf_broadcast"
+        return f"{ins.result} = _simd_lib.{fn_name}({val})"
+    if o == "VEC_ADD":
+        elem_t = ins.args[3] if len(ins.args) > 3 else "f64"
+        fn_name = "luthon_simd_v4df_add" if elem_t == "f64" else "luthon_simd_v8sf_add"
+        return f"{ins.result} = _simd_lib.{fn_name}({ins.args[0]}, {ins.args[1]})"
+    if o == "VEC_SUB":
+        elem_t = ins.args[3] if len(ins.args) > 3 else "f64"
+        fn_name = "luthon_simd_v4df_sub" if elem_t == "f64" else "luthon_simd_v8sf_sub"
+        return f"{ins.result} = _simd_lib.{fn_name}({ins.args[0]}, {ins.args[1]})"
+    if o == "VEC_MUL":
+        elem_t = ins.args[3] if len(ins.args) > 3 else "f64"
+        fn_name = "luthon_simd_v4df_mul" if elem_t == "f64" else "luthon_simd_v8sf_mul"
+        return f"{ins.result} = _simd_lib.{fn_name}({ins.args[0]}, {ins.args[1]})"
+    if o == "VEC_FMA":
+        elem_t = ins.args[4] if len(ins.args) > 4 else "f64"
+        fn_name = "luthon_simd_v4df_fma" if elem_t == "f64" else "luthon_simd_v8sf_fma"
+        return f"{ins.result} = _simd_lib.{fn_name}({ins.args[0]}, {ins.args[1]}, {ins.args[2]})"
+    if o == "VEC_REDUCE_SUM":
+        elem_t = ins.args[2] if len(ins.args) > 2 else "f64"
+        fn_name = "luthon_simd_v4df_reduce_sum" if elem_t == "f64" else "luthon_simd_v8sf_reduce_sum"
+        return f"{ins.result} = _simd_lib.{fn_name}({ins.args[0]})"
     return "-- " + o
 
 
@@ -172,6 +212,73 @@ def generate(module, sourcemap=None):
         "local _bit_band, _bit_bor, _bit_bxor, _bit_lshift, _bit_rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift",
         "local _math_floor, _math_abs, _math_min, _math_max = math.floor, math.abs, math.min, math.max",
         "local _table_insert, _table_concat, _string_sub = table.insert, table.concat, string.sub",
+        "local _simd_lib = _G._luthon_simd_lib",
+        "if _simd_lib == nil then",
+        "  local _ok_ffi, _ffi = pcall(require, 'ffi')",
+        "  if _ok_ffi and _ffi then",
+        "    pcall(function()",
+        "      _ffi.cdef[[",
+        "        typedef struct { double v[4]; } luthon_v4df;",
+        "        typedef struct { float  v[8]; } luthon_v8sf;",
+        "        int         luthon_simd_get_vector_width(void);",
+        "        const char* luthon_simd_get_backend_name(void);",
+        "        luthon_v4df luthon_simd_v4df_load(const double *ptr, int64_t offset);",
+        "        void        luthon_simd_v4df_store(double *ptr, int64_t offset, luthon_v4df val);",
+        "        luthon_v4df luthon_simd_v4df_broadcast(double scalar);",
+        "        luthon_v4df luthon_simd_v4df_add(luthon_v4df a, luthon_v4df b);",
+        "        luthon_v4df luthon_simd_v4df_sub(luthon_v4df a, luthon_v4df b);",
+        "        luthon_v4df luthon_simd_v4df_mul(luthon_v4df a, luthon_v4df b);",
+        "        luthon_v4df luthon_simd_v4df_fma(luthon_v4df a, luthon_v4df b, luthon_v4df c);",
+        "        double      luthon_simd_v4df_reduce_sum(luthon_v4df a);",
+        "        void   luthon_simd_saxpy(size_t n, float alpha, const float *x, float *y);",
+        "        void   luthon_simd_daxpy(size_t n, double alpha, const double *x, double *y);",
+        "        double luthon_simd_dot_f64(size_t n, const double *x, const double *y);",
+        "        float  luthon_simd_dot_f32(size_t n, const float *x, const float *y);",
+        "        double luthon_simd_euclidean_f64(size_t n, const double *x, const double *y);",
+        "        float  luthon_simd_euclidean_f32(size_t n, const float *x, const float *y);",
+        "        void   luthon_simd_poly_eval_f64(size_t n, const double *x, double *out, const double *coeffs, size_t deg);",
+        "        void   luthon_simd_poly_eval_f32(size_t n, const float *x, float *out, const float *coeffs, size_t deg);",
+        "        void   luthon_simd_sin_f64(double *out, const double *x, size_t n);",
+        "        void   luthon_simd_cos_f64(double *out, const double *x, size_t n);",
+        "        void   luthon_simd_exp_f64(double *out, const double *x, size_t n);",
+        "        void   luthon_simd_sqrt_f64(double *out, const double *x, size_t n);",
+        "      ]]",
+        "    end)",
+        "    local _candidates = { 'src/luthon/native/libluthon_capi.so', './src/luthon/native/libluthon_capi.so', './libluthon_capi.so', 'libluthon_capi.so' }",
+        "    for _, _p in ipairs(_candidates) do",
+        "      local _ok_l, _lib = pcall(_ffi.load, _p)",
+        "      if _ok_l and _lib then _simd_lib = _lib; _G._luthon_simd_lib = _lib; break end",
+        "    end",
+        "  end",
+        "end",
+        "if _simd_lib == nil then",
+        "  _simd_lib = {",
+        "    luthon_simd_v4df_load = function(ptr, off) return {v = {ptr[off], ptr[off+1], ptr[off+2], ptr[off+3]}} end,",
+        "    luthon_simd_v4df_store = function(ptr, off, val) ptr[off] = val.v[1]; ptr[off+1] = val.v[2]; ptr[off+2] = val.v[3]; ptr[off+3] = val.v[4] end,",
+        "    luthon_simd_v4df_broadcast = function(s) return {v = {s, s, s, s}} end,",
+        "    luthon_simd_v4df_add = function(a, b) return {v = {a.v[1]+b.v[1], a.v[2]+b.v[2], a.v[3]+b.v[3], a.v[4]+b.v[4]}} end,",
+        "    luthon_simd_v4df_sub = function(a, b) return {v = {a.v[1]-b.v[1], a.v[2]-b.v[2], a.v[3]-b.v[3], a.v[4]-b.v[4]}} end,",
+        "    luthon_simd_v4df_mul = function(a, b) return {v = {a.v[1]*b.v[1], a.v[2]*b.v[2], a.v[3]*b.v[3], a.v[4]*b.v[4]}} end,",
+        "    luthon_simd_v4df_fma = function(a, b, c) return {v = {a.v[1]*b.v[1]+c.v[1], a.v[2]*b.v[2]+c.v[2], a.v[3]*b.v[3]+c.v[3], a.v[4]*b.v[4]+c.v[4]}} end,",
+        "    luthon_simd_v4df_reduce_sum = function(a) return a.v[1]+a.v[2]+a.v[3]+a.v[4] end,",
+        "    luthon_simd_daxpy = function(n, alpha, x, y) for i=0, n-1 do y[i] = alpha*x[i] + y[i] end end,",
+        "    luthon_simd_saxpy = function(n, alpha, x, y) for i=0, n-1 do y[i] = alpha*x[i] + y[i] end end,",
+        "    luthon_simd_dot_f64 = function(n, x, y) local s=0 for i=0, n-1 do s = s + x[i]*y[i] end return s end,",
+        "    luthon_simd_euclidean_f64 = function(n, x, y) local s=0 for i=0, n-1 do local d=x[i]-y[i] s = s + d*d end return math.sqrt(s) end,",
+        "    luthon_simd_poly_eval_f64 = function(n, x, out, coeffs, deg)",
+        "      for i=0, n-1 do",
+        "        local xi = x[i]",
+        "        local p = coeffs[deg]",
+        "        for k=deg-1, 0, -1 do p = p * xi + coeffs[k] end",
+        "        out[i] = p",
+        "      end",
+        "    end,",
+        "    luthon_simd_sin_f64 = function(out, x, n) for i=0, n-1 do out[i] = math.sin(x[i]) end end,",
+        "    luthon_simd_cos_f64 = function(out, x, n) for i=0, n-1 do out[i] = math.cos(x[i]) end end,",
+        "    luthon_simd_exp_f64 = function(out, x, n) for i=0, n-1 do out[i] = math.exp(x[i]) end end,",
+        "    luthon_simd_sqrt_f64 = function(out, x, n) for i=0, n-1 do out[i] = math.sqrt(x[i]) end end,",
+        "  }",
+        "end",
     ]
     _fnames = {f.name for f in module.functions}
     # hoist class tables for dotted method names and MAKE_CLASS statements
@@ -188,7 +295,7 @@ def generate(module, sourcemap=None):
                     classes.add(ins.args[0])
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
-    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__"}
+    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib"}
     # Hoist module-level and cross-function locals that are captured as upvalues
     hoisted_set = set()
     if all_upvalues:
@@ -211,7 +318,7 @@ def generate(module, sourcemap=None):
             out.append("function " + fn.name + "(" + ", ".join(fn.params) + ")")
         if getattr(fn, "upvalues", None):
             out.append("  -- upvalues: " + ", ".join(fn.upvalues))
-        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__"}
+        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib"}
         _classes = set(classes)
         uv_set = set(getattr(fn, "upvalues", []) or [])
         param_set = set(fn.params or [])
