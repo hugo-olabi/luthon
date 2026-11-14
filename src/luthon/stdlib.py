@@ -3542,6 +3542,418 @@ asyncio.wait_for = function(fut_or_fn, timeout)
 end
 _G.asyncio = asyncio
 
+-- =========================================================================
+-- Phase 38: Native Multi-Threading & Concurrency Runtime (GIL-Free OS Threads)
+-- =========================================================================
+
+local _thread_lib = nil
+local function _get_thread_lib()
+  if _thread_lib ~= nil then return _thread_lib end
+  local ok, ffi = pcall(require, "ffi")
+  if not ok or not ffi then return nil end
+  pcall(function()
+    ffi.cdef[[
+      typedef struct LuthonThreadPool LuthonThreadPool;
+      typedef void* (*luthon_task_fn)(void *arg);
+      LuthonThreadPool* luthon_threadpool_create(int num_workers);
+      int               luthon_threadpool_worker_count(const LuthonThreadPool *pool);
+      uint64_t          luthon_threadpool_submit(LuthonThreadPool *pool, luthon_task_fn fn, void *arg);
+      uint64_t          luthon_threadpool_submit_lua(LuthonThreadPool *pool, const char *code, const char *entry_func, void *arg);
+      uint64_t          luthon_threadpool_submit_bytecode(LuthonThreadPool *pool, const char *bytecode, size_t bytecode_len, int has_arg_num, double arg_num, void *arg_ptr);
+      bool              luthon_threadpool_is_done(LuthonThreadPool *pool, uint64_t task_id);
+      void*             luthon_threadpool_wait(LuthonThreadPool *pool, uint64_t task_id, int *out_error);
+      double            luthon_threadpool_wait_number(LuthonThreadPool *pool, uint64_t task_id, int *out_error);
+      const char*       luthon_threadpool_get_error(LuthonThreadPool *pool, uint64_t task_id);
+      void              luthon_threadpool_destroy(LuthonThreadPool *pool);
+
+      void* luthon_dedicated_thread_create(const char *bytecode, size_t len, double arg_num, void *arg_ptr);
+      void  luthon_dedicated_thread_join(void *handle);
+      bool  luthon_dedicated_thread_is_alive(void *handle);
+
+      typedef struct {
+          void     *data;
+          size_t    size;
+          int32_t   type_tag;
+          uint64_t  tag;
+      } LuthonMessage;
+      typedef struct LuthonChannel LuthonChannel;
+      LuthonChannel* luthon_channel_create(size_t capacity);
+      bool           luthon_channel_push(LuthonChannel *chan, const LuthonMessage *msg);
+      bool           luthon_channel_pop(LuthonChannel *chan, LuthonMessage *out_msg);
+      size_t         luthon_channel_size(const LuthonChannel *chan);
+      bool           luthon_channel_is_empty(const LuthonChannel *chan);
+      void           luthon_channel_destroy(LuthonChannel *chan);
+
+      typedef struct LuthonMutex LuthonMutex;
+      typedef struct LuthonEvent LuthonEvent;
+      typedef struct LuthonSemaphore LuthonSemaphore;
+      LuthonMutex* luthon_mutex_create(bool recursive);
+      bool         luthon_mutex_lock(LuthonMutex *m);
+      bool         luthon_mutex_trylock(LuthonMutex *m);
+      bool         luthon_mutex_unlock(LuthonMutex *m);
+      void         luthon_mutex_destroy(LuthonMutex *m);
+
+      LuthonEvent* luthon_event_create(bool initial_state);
+      void         luthon_event_set(LuthonEvent *e);
+      void         luthon_event_clear(LuthonEvent *e);
+      bool         luthon_event_is_set(LuthonEvent *e);
+      bool         luthon_event_wait(LuthonEvent *e, double timeout_sec);
+      void         luthon_event_destroy(LuthonEvent *e);
+
+      LuthonSemaphore* luthon_semaphore_create(int initial_value);
+      bool             luthon_semaphore_acquire(LuthonSemaphore *s, double timeout_sec);
+      void             luthon_semaphore_release(LuthonSemaphore *s);
+      int              luthon_semaphore_get_value(LuthonSemaphore *s);
+      void             luthon_semaphore_destroy(LuthonSemaphore *s);
+    ]]
+  end)
+  local candidate_paths = {
+    "src/luthon/native/libluthon_capi.so",
+    "./src/luthon/native/libluthon_capi.so",
+    "./libluthon_capi.so",
+    "libluthon_capi.so"
+  }
+  for _, cp in ipairs(candidate_paths) do
+    local ok_load, lib = pcall(ffi.load, cp)
+    if ok_load and lib then
+      _thread_lib = lib
+      return _thread_lib
+    end
+  end
+  return nil
+end
+
+local _future_mt = {}
+_future_mt.__index = _future_mt
+
+function _future_mt:done()
+  if self._resolved then return true end
+  if self._task_id and self._pool then
+    local lib = _get_thread_lib()
+    if lib and lib.luthon_threadpool_is_done(self._pool, self._task_id) then
+      pcall(function() self:result() end)
+      return true
+    end
+  end
+  return self._resolved
+end
+
+function _future_mt:result(timeout)
+  if self._resolved then
+    if self._error then error(self._error, 2) end
+    return self._result
+  end
+  if self._task_id and self._pool then
+    local lib = _get_thread_lib()
+    if lib then
+      local ffi = require("ffi")
+      local err = ffi.new("int[1]")
+      if self._is_numeric then
+        local num = lib.luthon_threadpool_wait_number(self._pool, self._task_id, err)
+        if err[0] ~= 0 then
+          local err_msg = lib.luthon_threadpool_get_error(self._pool, self._task_id)
+          self._error = err_msg ~= nil and ffi.string(err_msg) or "Thread execution error"
+          self._resolved = true
+          error(self._error, 2)
+        end
+        self._result = num
+        self._resolved = true
+        return num
+      else
+        local ptr = lib.luthon_threadpool_wait(self._pool, self._task_id, err)
+        if err[0] ~= 0 then
+          local err_msg = lib.luthon_threadpool_get_error(self._pool, self._task_id)
+          self._error = err_msg ~= nil and ffi.string(err_msg) or "Thread execution error"
+          self._resolved = true
+          error(self._error, 2)
+        end
+        self._result = self._result or ptr
+        self._resolved = true
+        return self._result
+      end
+    end
+  end
+  if self._error then error(self._error, 2) end
+  return self._result
+end
+
+function _future_mt:exception(timeout)
+  pcall(function() self:result(timeout) end)
+  return self._error
+end
+
+function _future_mt:cancel()
+  if self:done() then return false end
+  self._error = "CancelledError"
+  self._resolved = true
+  return true
+end
+
+local _futures = {}
+
+_futures.Future = function()
+  return setmetatable({ _resolved = false, _result = nil, _error = nil }, _future_mt)
+end
+
+_futures.ThreadPoolExecutor = function(opts_or_workers)
+  local max_workers = 4
+  if type(opts_or_workers) == "number" then
+    max_workers = opts_or_workers
+  elseif type(opts_or_workers) == "table" and opts_or_workers.max_workers then
+    max_workers = opts_or_workers.max_workers
+  end
+  local lib = _get_thread_lib()
+  local pool = lib and lib.luthon_threadpool_create(max_workers) or nil
+  return setmetatable({ _pool = pool, _max_workers = max_workers, _shutdown = false, _futures = {} }, {
+    __index = {
+      submit = function(self, fn, ...)
+        if self._shutdown then error("cannot schedule new futures after shutdown", 2) end
+        local fut = _futures.Future()
+        local lib = _get_thread_lib()
+        local n_args = select("#", ...)
+        local arg1 = select(1, ...)
+        if self._pool and lib and type(fn) == "function" then
+          local ok_dump, bc = pcall(string.dump, fn)
+          if ok_dump and bc then
+            local has_num = (type(arg1) == "number") and 1 or 0
+            local num_val = has_num == 1 and arg1 or 0.0
+            local ptr_val = (type(arg1) == "cdata" or type(arg1) == "userdata") and arg1 or nil
+            local tid = lib.luthon_threadpool_submit_bytecode(self._pool, bc, #bc, has_num, num_val, ptr_val)
+            fut._task_id = tid
+            fut._pool = self._pool
+            fut._is_numeric = (type(arg1) == "number")
+            table.insert(self._futures, fut)
+            return fut
+          end
+        end
+        -- In-process fallback execution
+        local ok, res = pcall(fn, ...)
+        if ok then
+          fut._result = res
+          fut._resolved = true
+        else
+          fut._error = res
+          fut._resolved = true
+        end
+        table.insert(self._futures, fut)
+        return fut
+      end,
+      map = function(self, fn, iterable)
+        local results = {}
+        local pending = {}
+        for _, item in ipairs(iterable) do
+          local fut = self:submit(fn, item)
+          table.insert(pending, fut)
+        end
+        for _, fut in ipairs(pending) do
+          table.insert(results, fut:result())
+        end
+        return setmetatable(results, _list_mt)
+      end,
+      shutdown = function(self, wait)
+        if self._shutdown then return end
+        self._shutdown = true
+        if wait and self._pool then
+          for _, fut in ipairs(self._futures) do
+            pcall(function() fut:result() end)
+          end
+        end
+        if self._pool then
+          local lib = _get_thread_lib()
+          if lib then lib.luthon_threadpool_destroy(self._pool) end
+          self._pool = nil
+        end
+      end,
+      __enter__ = function(self) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:shutdown(true) end,
+    }
+  })
+end
+
+_futures.as_completed = function(fs)
+  local list = {}
+  for _, f in ipairs(fs) do table.insert(list, f) end
+  local idx = 0
+  return function()
+    idx = idx + 1
+    if idx <= #list then
+      list[idx]:result()
+      return list[idx]
+    end
+    return nil
+  end
+end
+
+_futures.wait = function(fs, timeout, return_when)
+  local done = {}
+  local not_done = {}
+  for _, f in ipairs(fs) do
+    f:result(timeout)
+    table.insert(done, f)
+  end
+  return setmetatable({ setmetatable(done, _set_mt), setmetatable(not_done, _set_mt) }, _tuple_mt)
+end
+
+local _concurrent = {
+  futures = _futures
+}
+
+local _threading = {}
+
+_threading.Lock = function()
+  local lib = _get_thread_lib()
+  local m = lib and lib.luthon_mutex_create(false) or nil
+  return setmetatable({ _m = m, _locked = false }, {
+    __index = {
+      acquire = function(self, blocking, timeout)
+        if self._m then
+          local ok = (blocking == false) and lib.luthon_mutex_trylock(self._m) or lib.luthon_mutex_lock(self._m)
+          if ok then self._locked = true end
+          return ok
+        end
+        self._locked = true
+        return true
+      end,
+      release = function(self)
+        if self._m then lib.luthon_mutex_unlock(self._m) end
+        self._locked = false
+      end,
+      locked = function(self) return self._locked end,
+      __enter__ = function(self) self:acquire(true) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:release() end,
+    }
+  })
+end
+
+_threading.RLock = function()
+  local lib = _get_thread_lib()
+  local m = lib and lib.luthon_mutex_create(true) or nil
+  local count = 0
+  return setmetatable({ _m = m }, {
+    __index = {
+      acquire = function(self, blocking, timeout)
+        if self._m then
+          local ok = (blocking == false) and lib.luthon_mutex_trylock(self._m) or lib.luthon_mutex_lock(self._m)
+          if ok then count = count + 1 end
+          return ok
+        end
+        count = count + 1
+        return true
+      end,
+      release = function(self)
+        if self._m then lib.luthon_mutex_unlock(self._m) end
+        count = count - 1
+      end,
+      __enter__ = function(self) self:acquire(true) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:release() end,
+    }
+  })
+end
+
+_threading.Event = function()
+  local lib = _get_thread_lib()
+  local e = lib and lib.luthon_event_create(false) or nil
+  local state = false
+  return setmetatable({ _e = e }, {
+    __index = {
+      is_set = function(self)
+        if self._e then return lib.luthon_event_is_set(self._e) end
+        return state
+      end,
+      isSet = function(self) return self:is_set() end,
+      set = function(self)
+        if self._e then lib.luthon_event_set(self._e) else state = true end
+      end,
+      clear = function(self)
+        if self._e then lib.luthon_event_clear(self._e) else state = false end
+      end,
+      wait = function(self, timeout)
+        if self._e then return lib.luthon_event_wait(self._e, timeout or 0.0) end
+        return state
+      end,
+    }
+  })
+end
+
+_threading.Semaphore = function(value)
+  local lib = _get_thread_lib()
+  local initial = value or 1
+  local s = lib and lib.luthon_semaphore_create(initial) or nil
+  return setmetatable({ _s = s, _val = initial }, {
+    __index = {
+      acquire = function(self, blocking, timeout)
+        if self._s then return lib.luthon_semaphore_acquire(self._s, (blocking == false and 0.000001) or (timeout or 0.0)) end
+        if self._val > 0 then self._val = self._val - 1 return true end
+        return false
+      end,
+      release = function(self)
+        if self._s then lib.luthon_semaphore_release(self._s) else self._val = self._val + 1 end
+      end,
+      __enter__ = function(self) self:acquire(true) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:release() end,
+    }
+  })
+end
+
+_threading.Thread = function(opts)
+  opts = opts or {}
+  local target = opts.target
+  local args = opts.args or {}
+  return setmetatable({ _target = target, _args = args, _alive = false }, {
+    __index = {
+      start = function(self)
+        self._alive = true
+        local lib = _get_thread_lib()
+        if lib and self._target then
+          local ok_dump, bc = pcall(string.dump, self._target)
+          if ok_dump and bc then
+            local arg1 = self._args[1]
+            local has_num = (type(arg1) == "number") and 1 or 0
+            local num_val = (has_num == 1) and arg1 or 0.0
+            local ptr_val = (type(arg1) == "cdata" or type(arg1) == "userdata") and arg1 or nil
+            self._handle = lib.luthon_dedicated_thread_create(bc, #bc, num_val, ptr_val)
+            return
+          end
+        end
+        pcall(self._target, unpack(self._args))
+        self._alive = false
+      end,
+      join = function(self, timeout)
+        if self._handle then
+          local lib = _get_thread_lib()
+          if lib then
+            lib.luthon_dedicated_thread_join(self._handle)
+            self._handle = nil
+          end
+        end
+        self._alive = false
+      end,
+      is_alive = function(self)
+        if self._handle then
+          local lib = _get_thread_lib()
+          if lib then
+            return lib.luthon_dedicated_thread_is_alive(self._handle)
+          end
+        end
+        return self._alive
+      end,
+    }
+  })
+end
+
+_threading.current_thread = function()
+  return { name = "MainThread", ident = 1 }
+end
+
+_G.concurrent = _concurrent
+_G["concurrent.futures"] = _futures
+_G.threading = _threading
+_MODULES = _MODULES or {}
+_MODULES["concurrent"] = _concurrent
+_MODULES["concurrent.futures"] = _futures
+_MODULES["threading"] = _threading
+
+
 function _luthon_await(val)
   if type(val) == "table" and (val._is_task or (type(val.done) == "function" and type(val.result) == "function")) then
     while not val:done() do
@@ -3647,7 +4059,12 @@ function _luthon_import_from(mod_name, item_name)
     mod_name = __package__
   end
   -- 1. Check if the parent module is already loaded in _G or _MODULES
-  local parent = (type(_G[mod_name]) == "table" and _G[mod_name]) or (_MODULES and type(_MODULES[mod_name]) == "table" and _MODULES[mod_name])
+  local parent = nil
+  if type(_G[mod_name]) == "table" then
+    parent = _G[mod_name]
+  elseif _MODULES and type(_MODULES[mod_name]) == "table" then
+    parent = _MODULES[mod_name]
+  end
   if parent ~= nil and parent[item_name] ~= nil then
     return parent[item_name]
   end
