@@ -72,6 +72,16 @@ def compile_capi_proxy(force: bool = False) -> Path:
         "-fvisibility=default",
     ]
 
+    import platform
+    mach = platform.machine().lower()
+    if mach in ("x86_64", "amd64"):
+        cflags.extend(["-mavx2", "-mfma"])
+    elif "arm" in mach or "aarch64" in mach:
+        if mach == "aarch64":
+            cflags.append("-march=armv8-a+simd")
+        else:
+            cflags.extend(["-mfpu=neon", "-mfloat-abi=hard"])
+
     # Check if libpng is available and add flags
     ldflags = []
     try:
