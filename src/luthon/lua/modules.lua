@@ -81,7 +81,23 @@ function M.add_search_path(path)
 end
 
 function M.get_search_paths()
-  return search_paths
+  local all = {}
+  local seen = {}
+  if _G.sys and _G.sys.path and type(_G.sys.path) == "table" then
+    for _, p in ipairs(_G.sys.path) do
+      if type(p) == "string" and not seen[p] then
+        table.insert(all, p)
+        seen[p] = true
+      end
+    end
+  end
+  for _, p in ipairs(search_paths) do
+    if type(p) == "string" and not seen[p] then
+      table.insert(all, p)
+      seen[p] = true
+    end
+  end
+  return all
 end
 
 ------------------------------------------------------------------------------
@@ -106,7 +122,7 @@ function M.find_lua_module(name)
   end
 
   local function try_find(part_list)
-    for _, base in ipairs(search_paths) do
+    for _, base in ipairs(M.get_search_paths()) do
       if pure and (base:match("/native$") or base:match("/native/")) then
         -- Skip native shim directories in pure mode
       else
@@ -142,7 +158,7 @@ function M.find_py_module(name)
   end
 
   local function try_find(part_list)
-    for _, base in ipairs(search_paths) do
+    for _, base in ipairs(M.get_search_paths()) do
       -- Package directory with __init__.py
       local pkg_dir = base .. "/" .. table.concat(part_list, "/")
       local init_path = pkg_dir .. "/__init__.py"
@@ -231,7 +247,7 @@ function M.find_binary_module(name)
     ".dylib",
   }
 
-  for _, base in ipairs(search_paths) do
+  for _, base in ipairs(M.get_search_paths()) do
     local base_dir = rel_dir ~= "" and (base .. "/" .. rel_dir) or base
     for _, sfx in ipairs(suffixes) do
       local cand = base_dir .. "/" .. mod_stem .. sfx
@@ -513,8 +529,15 @@ function M.load(name)
   -- 4. Pure Python source file (transpile on the fly if parser available)
   local py_path = M.find_py_module(name)
   if py_path then
-    local ok_driver, driver = pcall(require, "src/luthon/lua/luthon_lua")
-    if ok_driver and driver and driver.transpile_file then
+    local driver = nil
+    for _, mod_candidate in ipairs({"src/luthon/lua/luthon_lua", "luthon.lua.luthon_lua", "luthon_lua"}) do
+      local ok_driver, d = pcall(require, mod_candidate)
+      if ok_driver and d and d.transpile_file then
+        driver = d
+        break
+      end
+    end
+    if driver and driver.transpile_file then
       local ok_transpile, lua_out = pcall(driver.transpile_file, py_path)
       if ok_transpile and lua_out then
         local ns = { __name__ = name, __file__ = py_path }
@@ -522,7 +545,7 @@ function M.load(name)
         local chunk = load(lua_out, py_path, "t", ns)
         if chunk then
           loading[name] = true
-          local ok, res = pcall(chunk)
+          local ok, res = xpcall(chunk, debug.traceback)
           loading[name] = nil
           if ok then
             if type(res) == "table" then
@@ -530,6 +553,8 @@ function M.load(name)
             end
             sys_modules[name] = ns
             return ns
+          else
+            error("Error executing transpiled module '" .. name .. "': " .. tostring(res), 2)
           end
         end
       end
