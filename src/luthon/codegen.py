@@ -419,20 +419,33 @@ def generate(module, sourcemap=None):
     for c in sorted(classes):
         if c in struct_classes:
             continue
-        has_repr = any(f.name == c + ".__repr__" for f in module.functions)
-        has_str = any(f.name == c + ".__str__" for f in module.functions)
-        has_eq = any(f.name == c + ".__eq__" for f in module.functions)
         out.append(c + ".__index = " + c)
-        mt_setup = c + ".__instance_mt = {__index = function(inst, k) local v = " + c + "[k]; if type(v) == 'table' and type(v.__get__) == 'function' then return v:__get__(inst, " + c + ") end; return v end"
-        if has_str:
-            mt_setup += ", __tostring = function(inst) return " + c + ".__str__(inst) end"
-        elif has_repr:
-            mt_setup += ", __tostring = function(inst) return " + c + ".__repr__(inst) end"
-        if has_eq:
-            mt_setup += ", __eq = function(a, b) return " + c + ".__eq__(a, b) end"
-        mt_setup += "}"
+        mt_setup = (
+            c + ".__instance_mt = {__index = function(inst, k) local v = " + c + "[k]; "
+            "if type(v) == 'table' and type(v.__get__) == 'function' then return v:__get__(inst, " + c + ") end; "
+            "return v end, "
+            "__tostring = function(inst) "
+            "local s = inst.__str__; if type(s) == 'function' then return s(inst) end; "
+            "local r = inst.__repr__; if type(r) == 'function' then return r(inst) end; "
+            "local cls = rawget(inst, '__class__'); "
+            "local name = cls and (cls.__name__ or rawget(cls, '__name__')) or '" + c + "'; "
+            "return '<' .. tostring(name) .. ' object>' end, "
+            "__eq = function(a, b) "
+            "local eq = type(a) == 'table' and a.__eq__; "
+            "if type(eq) == 'function' then return eq(a, b) end; "
+            "return rawequal(a, b) end}"
+        )
         out.append(mt_setup)
-        call_body = "local self = setmetatable({__class__ = " + c + "}, " + c + ".__instance_mt); if " + c + ".__init__ then " + c + ".__init__(self, ...) end; return self"
+        call_body = (
+            "local self; "
+            "if rawget(" + c + ", '__new__') or (" + c + ".__new__ and " + c + ".__new__ ~= (rawget(_G, 'object') and _G.object.__new__)) then "
+            "self = " + c + ".__new__(" + c + ", ...) "
+            "else "
+            "self = setmetatable({__class__ = " + c + "}, " + c + ".__instance_mt) "
+            "end; "
+            "if type(self) == 'table' and " + c + ".__init__ then " + c + ".__init__(self, ...) end; "
+            "return self"
+        )
         cls_mt = "{__index = function(t, k) local b = rawget(t, '__base__'); return b and b[k] end, __call = function(cls, ...) " + call_body + " end}"
         out.append("setmetatable(" + c + ", " + cls_mt + ")")
     return "\n".join(out) + "\n"

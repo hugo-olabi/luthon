@@ -432,8 +432,19 @@ function M.generate(module, skip_prelude, sourcemap)
   -- Set up class metatables for __call (constructor emulation)
   for c in pairs(classes) do
     table.insert(out, c .. ".__index = " .. c)
-    table.insert(out, c .. ".__instance_mt = {__index = " .. c .. "}")
-    local call_body = "local self = setmetatable({__class__ = " .. c .. "}, " .. c .. ".__instance_mt); if " .. c .. ".__init__ then " .. c .. ".__init__(self, ...) end; return self"
+    local mt_setup = c .. ".__instance_mt = {__index = function(inst, k) local v = " .. c .. "[k]; if type(v) == 'table' and type(v.__get__) == 'function' then return v:__get__(inst, " .. c .. ") end; return v end, " ..
+      "__tostring = function(inst) " ..
+      "local s = inst.__str__; if type(s) == 'function' then return s(inst) end; " ..
+      "local r = inst.__repr__; if type(r) == 'function' then return r(inst) end; " ..
+      "local cls = rawget(inst, '__class__'); " ..
+      "local name = cls and (cls.__name__ or rawget(cls, '__name__')) or '" .. c .. "'; " ..
+      "return '<' .. tostring(name) .. ' object>' end, " ..
+      "__eq = function(a, b) " ..
+      "local eq = type(a) == 'table' and a.__eq__; " ..
+      "if type(eq) == 'function' then return eq(a, b) end; " ..
+      "return rawequal(a, b) end}"
+    table.insert(out, mt_setup)
+    local call_body = "local self; if rawget(" .. c .. ", '__new__') or (" .. c .. ".__new__ and " .. c .. ".__new__ ~= (rawget(_G, 'object') and _G.object.__new__)) then self = " .. c .. ".__new__(" .. c .. ", ...) else self = setmetatable({__class__ = " .. c .. "}, " .. c .. ".__instance_mt) end; if type(self) == 'table' and " .. c .. ".__init__ then " .. c .. ".__init__(self, ...) end; return self"
     local cls_mt = "{__index = function(t, k) local b = rawget(t, '__base__'); return b and b[k] end, __call = function(cls, ...) " .. call_body .. " end}"
     table.insert(out, "setmetatable(" .. c .. ", " .. cls_mt .. ")")
   end
