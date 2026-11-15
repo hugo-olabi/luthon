@@ -87,6 +87,7 @@ local BUILTIN_MODULES = {
   ["itertools"] = true, ["functools"] = true, ["pathlib"] = true,
   ["datetime"] = true, ["typing"] = true, ["site"] = true,
   ["tempfile"] = true, ["subprocess"] = true, ["ast"] = true, ["bit"] = true, ["ffi"] = true,
+  ["types"] = true, ["socket"] = true, ["asyncio"] = true, ["http"] = true, ["urllib"] = true,
 }
 
 local UNARY_OP_MAP = {
@@ -117,6 +118,7 @@ function IRLowerer.new(package)
   local self = setmetatable({}, IRLowerer)
   self._tmp = 0
   self.package = package or ""
+  self._imported_modules = {}
   self.module = Module.new("<module>")
   self._cur_fn = nil
   self._cur_block = nil
@@ -482,6 +484,8 @@ function IRLowerer:_lower_stmt_impl(node)
   elseif t == "Import" then
     for _, alias in ipairs(node.names or {}) do
       local name = alias.asname or alias.name:match("([^%.]+)")
+      self._imported_modules[name] = true
+      self._imported_modules[alias.name] = true
       self:_emit("IMPORT", {name, alias.name})
     end
   elseif t == "ImportFrom" then
@@ -503,6 +507,7 @@ function IRLowerer:_lower_stmt_impl(node)
     end
     for _, alias in ipairs(node.names or {}) do
       local name = alias.asname or alias.name
+      self._imported_modules[name] = true
       self:_emit("IMPORT_FROM", {name, mod, alias.name})
     end
   elseif t == "Try" then
@@ -1005,9 +1010,29 @@ function IRLowerer:_lower_expr_impl(node)
     local target_fn = nil
     local pos_args = {}
     if node.func._type == "Attribute" then
+      local is_module = false
       local root = node.func.value
       while root._type == "Attribute" do root = root.value end
-      if root._type == "Name" and BUILTIN_MODULES[root.id] then
+      if root._type == "Name" and (BUILTIN_MODULES[root.id] or (self._imported_modules and self._imported_modules[root.id])) then
+        is_module = true
+      end
+      if not is_module and node.func.value._type == "Attribute" then
+        local parts = {}
+        local curr = node.func.value
+        while curr._type == "Attribute" do
+          table.insert(parts, 1, curr.attr)
+          curr = curr.value
+        end
+        if curr._type == "Name" then
+          table.insert(parts, 1, curr.id)
+          local dotted = table.concat(parts, ".")
+          if self._imported_modules and self._imported_modules[dotted] then
+            is_module = true
+          end
+        end
+      end
+
+      if is_module then
         target_fn = self:lower_expr(node.func)
         pos_args = {}
       else

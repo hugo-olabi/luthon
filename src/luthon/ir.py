@@ -1032,7 +1032,7 @@ class IRLowerer:
             if isinstance(node.func, ast.Attribute):
                 # Distinguish module-level functions from instance method calls
                 is_module = False
-                known_modules = ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table","operator","six","packaging","websockets","asyncio","socket","http","requests","sqlite3","numpy","PIL")
+                known_modules = ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table","operator","six","packaging","websockets","asyncio","socket","http","requests","sqlite3","numpy","PIL","types")
                 known_submodules = ("os.path", "urllib.parse", "urllib.request", "urllib.error", "http.client", "http.server", "collections.abc", "ffi.C", "math.simd")
 
                 if isinstance(node.func.value, ast.Name):
