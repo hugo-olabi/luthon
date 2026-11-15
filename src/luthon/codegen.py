@@ -295,7 +295,7 @@ def generate(module, sourcemap=None):
                     classes.add(ins.args[0])
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
-    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib"}
+    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","bytes","type","_luthon_type","callable","issubclass","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib","repr"}
     # Hoist module-level and cross-function locals that are captured as upvalues
     hoisted_set = set()
     if all_upvalues:
@@ -318,7 +318,7 @@ def generate(module, sourcemap=None):
             out.append("function " + fn.name + "(" + ", ".join(fn.params) + ")")
         if getattr(fn, "upvalues", None):
             out.append("  -- upvalues: " + ", ".join(fn.upvalues))
-        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib"}
+        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","bytes","type","_luthon_type","callable","issubclass","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib","repr"}
         _classes = set(classes)
         uv_set = set(getattr(fn, "upvalues", []) or [])
         param_set = set(fn.params or [])

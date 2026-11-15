@@ -261,6 +261,42 @@ function M.generate(module, skip_prelude, sourcemap)
     table.insert(out, c .. " = " .. c .. " or {}")
   end
 
+  local builtins = {
+    "len","range","print","list","round","math","os","sys","json","random","re",
+    "str","int","float","abs","min","max","sum","sorted","reversed","enumerate","repr",
+    "zip","map","filter","any","all","bool","datetime","collections","itertools",
+    "functools","pathlib","string","base64","io","struct","hashlib","typing",
+    "site","tempfile","open","dataclasses","subprocess","ast","bit","array","matrix","ffi","__name__","isinstance",
+    "super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals",
+    "dict","bytes","type","set","frozenset","_luthon_type","callable","issubclass","table",
+    "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
+    "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+    "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
+    "True", "False", "None"
+  }
+  local builtins_set = {}
+  for _, b in ipairs(builtins) do builtins_set[b] = true end
+
+  -- Hoist module-level and cross-function locals that are captured as upvalues
+  local all_upvalues = {}
+  for _, fn in ipairs(module.functions or {}) do
+    for _, uv in ipairs(fn.upvalues or {}) do
+      all_upvalues[uv] = true
+    end
+  end
+  local hoisted_set = {}
+  local hoisted = {}
+  for uv in pairs(all_upvalues) do
+    if not builtins_set[uv] and not classes[uv] then
+      table.insert(hoisted, uv)
+      hoisted_set[uv] = true
+    end
+  end
+  table.sort(hoisted)
+  if #hoisted > 0 then
+    table.insert(out, "local " .. table.concat(hoisted, ", "))
+  end
+
   -- Emit functions
   for _, fn in ipairs(module.functions or {}) do
     local dot = fn.name:find("%.")
@@ -276,37 +312,32 @@ function M.generate(module, skip_prelude, sourcemap)
     elseif fn.name == "main" and fn.is_entry_point then
       -- Module entry point: use a distinct name to avoid recursion with user-defined main()
       table.insert(out, "local function _luthon_module_entry(" .. table.concat(fn.params, ", ") .. ")")
-    else
+    elseif fn.name == "main" then
       table.insert(out, "local function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
+    else
+      table.insert(out, "function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
+    end
+    if fn.upvalues and #fn.upvalues > 0 then
+      table.insert(out, "  -- upvalues: " .. table.concat(fn.upvalues, ", "))
     end
 
     -- Emit locals (excluding builtins and function names)
-    local builtins = {
-      "len","range","print","list","round","math","os","sys","json","random","re",
-      "str","int","float","abs","min","max","sum","sorted","reversed","enumerate",
-      "zip","map","filter","any","all","bool","datetime","collections","itertools",
-      "functools","pathlib","string","base64","io","struct","hashlib","typing",
-      "site","tempfile","open","dataclasses","subprocess","ast","bit","array","matrix","ffi","__name__","isinstance",
-      "super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals",
-      "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
-      "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
-      "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
-      "True", "False", "None"
-    }
     local locs = {}
-    for _, l in ipairs(fn.locals or {}) do
-      local is_builtin = false
-      for _, b in ipairs(builtins) do if b == l then is_builtin = true break end end
-      local is_fn = false
-      for _, f in ipairs(fnames) do if f == l then is_fn = true break end end
-      local is_class = false
-      for c in pairs(classes) do if c == l then is_class = true break end end
-      local is_uv = false
-      for _, uv in ipairs(fn.upvalues or {}) do if uv == l then is_uv = true break end end
-      local is_param = false
-      for _, p in ipairs(fn.params or {}) do if p == l then is_param = true break end end
-      if not is_builtin and not is_fn and not is_class and not is_uv and not is_param then
-        table.insert(locs, l)
+    if fn.name == "main" then
+      locs = {}
+    else
+      for _, l in ipairs(fn.locals or {}) do
+        local is_builtin = builtins_set[l] or false
+        local is_fn = false
+        for _, f in ipairs(fnames) do if f == l then is_fn = true break end end
+        local is_class = classes[l] or false
+        local is_uv = false
+        for _, uv in ipairs(fn.upvalues or {}) do if uv == l then is_uv = true break end end
+        local is_param = false
+        for _, p in ipairs(fn.params or {}) do if p == l then is_param = true break end end
+        if not is_builtin and not is_fn and not is_class and not is_uv and not hoisted_set[l] and not is_param then
+          table.insert(locs, l)
+        end
       end
     end
     -- Find tmps exclusive to try blocks
