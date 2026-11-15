@@ -133,6 +133,11 @@ def run_file(
 
         env = os.environ.copy()
         env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
+        if "VIRTUAL_ENV" not in env and sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+            env["VIRTUAL_ENV"] = sys.prefix
+        script_dir = str(Path(input_path).resolve().parent)
+        existing_py_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{script_dir}:{existing_py_path}" if existing_py_path else script_dir
         if pure:
             env["LUTHON_PURE"] = "1"
         pkg_src = str(Path(__file__).parent.parent)

@@ -11,7 +11,7 @@ local codegen = require("src/luthon/lua/codegen")
 
 local M = {}
 
-function M.transpile_file(source_path)
+function M.transpile_file(source_path, package)
   local f = io.open(source_path, "r")
   if not f then return nil end
   local source = f:read("*a")
@@ -19,7 +19,7 @@ function M.transpile_file(source_path)
 
   local tree = parser.parse(source)
   local scope = semantic.analyze(tree)
-  local lowerer = ir.IRLowerer.new()
+  local lowerer = ir.IRLowerer.new(package)
   local module = lowerer:lower_module(tree, scope)
   local lua = codegen.generate(module, true)
 

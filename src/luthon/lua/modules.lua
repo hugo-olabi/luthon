@@ -51,9 +51,15 @@ if home then
 end
 
 -- Add active virtual environment if set
-local luthon_env = os.getenv("LUTHON_ENV")
-if luthon_env then
-  table.insert(search_paths, 1, luthon_env .. "/lib/luthon/site-packages")
+local venv = os.getenv("VIRTUAL_ENV") or os.getenv("LUTHON_ENV")
+if venv then
+  table.insert(search_paths, 1, venv .. "/lib/luthon/site-packages")
+  for _, py_ver in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
+    table.insert(search_paths, 1, venv .. "/lib/python" .. py_ver .. "/site-packages")
+  end
+end
+for _, py_ver in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
+  table.insert(search_paths, "./.venv/lib/python" .. py_ver .. "/site-packages")
 end
 
 -- Add PYTHONPATH if set
@@ -538,9 +544,10 @@ function M.load(name)
       end
     end
     if driver and driver.transpile_file then
-      local ok_transpile, lua_out = pcall(driver.transpile_file, py_path)
+      local pkg = py_path:match("__init__%.py$") and name or (name:match("^(.*)%.[^%.]+$") or "")
+      local ok_transpile, lua_out = pcall(driver.transpile_file, py_path, pkg)
       if ok_transpile and lua_out then
-        local ns = { __name__ = name, __file__ = py_path }
+        local ns = { __name__ = name, __package__ = pkg, __file__ = py_path }
         setmetatable(ns, {__index = _G})
         local chunk = load(lua_out, py_path, "t", ns)
         if chunk then

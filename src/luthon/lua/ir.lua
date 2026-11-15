@@ -113,9 +113,10 @@ local CMPOP_MAP = {
 local IRLowerer = {}
 IRLowerer.__index = IRLowerer
 
-function IRLowerer.new()
+function IRLowerer.new(package)
   local self = setmetatable({}, IRLowerer)
   self._tmp = 0
+  self.package = package or ""
   self.module = Module.new("<module>")
   self._cur_fn = nil
   self._cur_block = nil
@@ -485,6 +486,21 @@ function IRLowerer:_lower_stmt_impl(node)
     end
   elseif t == "ImportFrom" then
     local mod = node.module or ""
+    local level = node.level or 0
+    if level > 0 and self.package and self.package ~= "" then
+      local pkg_parts = {}
+      for p in self.package:gmatch("([^%.]+)") do table.insert(pkg_parts, p) end
+      if level <= #pkg_parts then
+        local base = {}
+        for i = 1, #pkg_parts - (level - 1) do table.insert(base, pkg_parts[i]) end
+        if mod ~= "" then table.insert(base, mod) end
+        mod = table.concat(base, ".")
+      elseif mod ~= "" then
+        mod = self.package .. "." .. mod
+      end
+    elseif level > 0 and (mod == "" or not mod) then
+      mod = self.package or ""
+    end
     for _, alias in ipairs(node.names or {}) do
       local name = alias.asname or alias.name
       self:_emit("IMPORT_FROM", {name, mod, alias.name})
