@@ -375,7 +375,10 @@ function IRLowerer:_lower_stmt_impl(node)
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "FunctionDef" then
     local fn = Function.new(node.name, {})
-    for _, a in ipairs(node.args.args or {}) do table.insert(fn.params, a.arg) end
+    for _, a in ipairs(node.args and node.args.args or {}) do table.insert(fn.params, a.arg) end
+    if node.args and (node.args.vararg or node.args.kwarg) then
+      table.insert(fn.params, "...")
+    end
     -- upvalues and locals from semantic scope if available
     local sc = node._scope
     if sc then
@@ -403,6 +406,20 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("MAKE_CELL", {cv}, cell)
       self:_emit("STORE", {cv, cell})
     end
+    -- If vararg is present, pack into a table
+    if node.args and node.args.vararg then
+      local vararg_name = node.args.vararg.arg
+      local t_dots = self:_new_tmp()
+      self:_emit("CALL", {"_tuple_pack", "..."}, t_dots)
+      self:_emit("STORE", {vararg_name, t_dots})
+    end
+    -- If kwarg is present, initialize table
+    if node.args and node.args.kwarg then
+      local kwarg_name = node.args.kwarg.arg
+      local t_kw = self:_new_tmp()
+      self:_emit("MAKE_DICT", {}, t_kw)
+      self:_emit("STORE", {kwarg_name, t_kw})
+    end
     for _, s in ipairs(node.body or {}) do self:lower_stmt(s) end
     if not node.body or node.body[#node.body]._type ~= "Return" then
       self:_emit("RETURN", {})
@@ -420,6 +437,15 @@ function IRLowerer:_lower_stmt_impl(node)
       local result_tmp = self:_new_tmp()
       self:_emit("CALL", {dec_tmp, fn_tmp}, result_tmp)
       self:_emit("STORE", {fn.name, result_tmp})
+    end
+    local clean_params = {}
+    for _, p in ipairs(fn.params) do
+      if p ~= "..." then table.insert(clean_params, '"' .. p .. '"') end
+    end
+    if #clean_params > 0 then
+      local param_tuple = self:_new_tmp()
+      self:_emit("MAKE_TUPLE", clean_params, param_tuple)
+      self:_emit("CALL", {"_luthon_reg_fn", fn.name, param_tuple})
     end
   elseif t == "Import" then
     for _, alias in ipairs(node.names or {}) do
@@ -529,6 +555,12 @@ function IRLowerer:_lower_stmt_impl(node)
     local cls = self:_new_tmp()
     self:_emit("MAKE_CLASS", {node.name}, cls)
 
+    -- Set base class if inheritance is used
+    if node.bases and #node.bases > 0 then
+      local base_tmp = self:lower_expr(node.bases[1])
+      self:_emit("SET_ATTR", {node.name, "__base__", base_tmp})
+    end
+
     -- Set __name__ and __dataclass_fields__ on class
     local name_tmp = self:_new_tmp()
     self:_emit("CONST", {node.name}, name_tmp)
@@ -545,13 +577,20 @@ function IRLowerer:_lower_stmt_impl(node)
     local has_init = false
     local has_repr = false
     local has_eq = false
+    local prev_cur_class = self._cur_class
+    self._cur_class = node.name
     for _, stmt in ipairs(node.body or {}) do
       if stmt._type == "FunctionDef" then
         if stmt.name == "__init__" then has_init = true end
         if stmt.name == "__repr__" then has_repr = true end
         if stmt.name == "__eq__" then has_eq = true end
+        local prev_method_first_arg = self._cur_method_first_arg
+        self._cur_method_first_arg = stmt.args and stmt.args.args and stmt.args.args[1] and stmt.args.args[1].arg
         local fn = Function.new(node.name .. "." .. stmt.name, {})
-        for _, a in ipairs(stmt.args.args or {}) do table.insert(fn.params, a.arg) end
+        for _, a in ipairs(stmt.args and stmt.args.args or {}) do table.insert(fn.params, a.arg) end
+        if stmt.args and (stmt.args.vararg or stmt.args.kwarg) then
+          table.insert(fn.params, "...")
+        end
         local sc = stmt._scope
         if sc then
           fn.locals = {}
@@ -572,6 +611,20 @@ function IRLowerer:_lower_stmt_impl(node)
         local b = Block.new("entry")
         table.insert(fn.blocks, b)
         self._cur_block = b
+        -- If vararg is present, pack into a table
+        if stmt.args and stmt.args.vararg then
+          local vararg_name = stmt.args.vararg.arg
+          local t_dots = self:_new_tmp()
+          self:_emit("CALL", {"_tuple_pack", "..."}, t_dots)
+          self:_emit("STORE", {vararg_name, t_dots})
+        end
+        -- If kwarg is present, initialize table
+        if stmt.args and stmt.args.kwarg then
+          local kwarg_name = stmt.args.kwarg.arg
+          local t_kw = self:_new_tmp()
+          self:_emit("MAKE_DICT", {}, t_kw)
+          self:_emit("STORE", {kwarg_name, t_kw})
+        end
         for _, s2 in ipairs(stmt.body or {}) do self:lower_stmt(s2) end
         if not stmt.body or stmt.body[#stmt.body]._type ~= "Return" then
           self:_emit("RETURN", {})
@@ -579,8 +632,29 @@ function IRLowerer:_lower_stmt_impl(node)
         table.insert(self.module.functions, fn)
         self._cur_fn = prev_fn
         self._cur_block = prev_block
+        self._cur_method_first_arg = prev_method_first_arg
+
+        local clean_params = {}
+        for _, p in ipairs(fn.params) do
+          if p ~= "..." then table.insert(clean_params, '"' .. p .. '"') end
+        end
+        if #clean_params > 0 then
+          local param_tuple = self:_new_tmp()
+          self:_emit("MAKE_TUPLE", clean_params, param_tuple)
+          self:_emit("CALL", {"_luthon_reg_fn", node.name .. "." .. stmt.name, param_tuple})
+        end
+        if stmt.name == "__init__" then
+          local init_params = {}
+          for i = 2, #clean_params do table.insert(init_params, clean_params[i]) end
+          if #init_params > 0 then
+            local cls_param_tuple = self:_new_tmp()
+            self:_emit("MAKE_TUPLE", init_params, cls_param_tuple)
+            self:_emit("CALL", {"_luthon_reg_fn", node.name, cls_param_tuple})
+          end
+        end
       end
     end
+    self._cur_class = prev_cur_class
 
     -- Auto-generate __init__ if dataclass and not defined
     if is_dataclass and not has_init and #fields > 0 then
@@ -848,31 +922,68 @@ function IRLowerer:_lower_expr_impl(node)
     end
     return result
   elseif t == "Call" then
+    if node.func._type == "Name" and node.func.id == "super" and (not node.args or #node.args == 0) then
+      local cur_cls = self._cur_class
+      local first_arg = self._cur_method_first_arg
+      if cur_cls and first_arg then
+        node.args = {{_type = "Name", id = cur_cls}, {_type = "Name", id = first_arg}}
+      end
+    end
+
+    local kw_table = self:_lower_call_keywords(node)
+    local has_starred = false
+    for _, a in ipairs(node.args or {}) do
+      if a._type == "Starred" then has_starred = true; break end
+    end
+
+    local target_fn = nil
+    local pos_args = {}
     if node.func._type == "Attribute" then
-      -- module-level / builtin functions: don't prepend self
-      -- determine root name of attribute chain
       local root = node.func.value
       while root._type == "Attribute" do root = root.value end
       if root._type == "Name" and BUILTIN_MODULES[root.id] then
-        local fn = self:lower_expr(node.func)
-        local args = {}
-        for _, a in ipairs(node.args or {}) do table.insert(args, self:lower_expr(a)) end
-        local kw_table = self:_lower_call_keywords(node)
-        return self:_emit_call(fn, args, kw_table)
+        target_fn = self:lower_expr(node.func)
+        pos_args = {}
+      else
+        local obj = self:lower_expr(node.func.value)
+        local meth = self:_new_tmp()
+        self:_emit("SUBSCR", {obj, '"' .. node.func.attr .. '"'}, meth)
+        target_fn = meth
+        pos_args = {obj}
       end
-      local obj = self:lower_expr(node.func.value)
-      local meth = self:_new_tmp()
-      self:_emit("SUBSCR", {obj, '"' .. node.func.attr .. '"'}, meth)
-      local args = {obj}
-      for _, a in ipairs(node.args or {}) do table.insert(args, self:lower_expr(a)) end
-      local kw_table = self:_lower_call_keywords(node)
-      return self:_emit_call(meth, args, kw_table)
+    else
+      target_fn = self:lower_expr(node.func)
+      pos_args = {}
     end
-    local fn = self:lower_expr(node.func)
-    local args = {}
-    for _, a in ipairs(node.args or {}) do table.insert(args, self:lower_expr(a)) end
-    local kw_table = self:_lower_call_keywords(node)
-    return self:_emit_call(fn, args, kw_table)
+
+    if has_starred then
+      local flat_args_tmp = self:_new_tmp()
+      self:_emit("MAKE_LIST", {}, flat_args_tmp)
+      for _, obj_arg in ipairs(pos_args) do
+        self:_emit("CALL", {"_seq_append", flat_args_tmp, obj_arg})
+      end
+      for _, a in ipairs(node.args or {}) do
+        if a._type == "Starred" then
+          local seq = self:lower_expr(a.value)
+          self:_emit("CALL", {"_seq_extend", flat_args_tmp, seq})
+        else
+          local val = self:lower_expr(a)
+          self:_emit("CALL", {"_seq_append", flat_args_tmp, val})
+        end
+      end
+      local res = self:_new_tmp()
+      if kw_table then
+        self:_emit("CALL", {"_luthon_call_starred", target_fn, flat_args_tmp, kw_table}, res)
+      else
+        self:_emit("CALL", {"_luthon_call_starred", target_fn, flat_args_tmp}, res)
+      end
+      return res
+    end
+
+    local all_args = {}
+    for _, a in ipairs(pos_args) do table.insert(all_args, a) end
+    for _, a in ipairs(node.args or {}) do table.insert(all_args, self:lower_expr(a)) end
+    return self:_emit_call(target_fn, all_args, kw_table)
   elseif t == "IfExp" then
     local cond = self:lower_expr(node.test)
     local res = self:_new_tmp()
@@ -1149,21 +1260,30 @@ function IRLowerer:_lower_call_keywords(node)
   local kw_table = self:_new_tmp()
   self:_emit("MAKE_TABLE", {}, kw_table)
   for _, kw in ipairs(node.keywords) do
-    local key_tmp = self:_new_tmp()
-    self:_emit("CONST", {kw.arg}, key_tmp)
-    local val_tmp = self:lower_expr(kw.value)
-    self:_emit("STORE_SUBSCR", {kw_table, key_tmp, val_tmp})
+    if kw.arg == nil then
+      local dict_tmp = self:lower_expr(kw.value)
+      self:_emit("CALL", {"_dict_update", kw_table, dict_tmp})
+    else
+      local key_tmp = self:_new_tmp()
+      self:_emit("CONST", {kw.arg}, key_tmp)
+      local val_tmp = self:lower_expr(kw.value)
+      self:_emit("STORE_SUBSCR", {kw_table, key_tmp, val_tmp})
+    end
   end
   return kw_table
 end
 
 function IRLowerer:_emit_call(fn, args, kw_table)
-  local all_args = args
-  if kw_table then
-    table.insert(all_args, kw_table)
-  end
   local t = self:_new_tmp()
-  self:_emit("CALL", {fn, unpack(all_args)}, t)
+  if kw_table then
+    local call_args = {"_luthon_call_kw", fn, kw_table}
+    for _, a in ipairs(args) do table.insert(call_args, a) end
+    self:_emit("CALL", call_args, t)
+  else
+    local call_args = {fn}
+    for _, a in ipairs(args) do table.insert(call_args, a) end
+    self:_emit("CALL", call_args, t)
+  end
   return t
 end
 

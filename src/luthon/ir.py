@@ -317,7 +317,7 @@ class IRLowerer:
             if node.args.vararg:
                 vararg_name = _safe_var(node.args.vararg.arg)
                 t_dots = self._new_tmp()
-                self._emit("CALL", ["table.pack", "..."], result=t_dots)
+                self._emit("CALL", ["_tuple_pack", "..."], result=t_dots)
                 self._emit("STORE", [vararg_name, t_dots])
             # If kwarg is present, initialize table
             if node.args.kwarg:
@@ -521,6 +521,8 @@ class IRLowerer:
             has_init = False
             has_repr = False
             has_eq = False
+            prev_cur_class = getattr(self, "_cur_class", None)
+            self._cur_class = node.name
             for stmt in node.body:
                 if isinstance(stmt, ast.FunctionDef):
                     if stmt.name == "__init__":
@@ -529,6 +531,8 @@ class IRLowerer:
                         has_repr = True
                     if stmt.name == "__eq__":
                         has_eq = True
+                    prev_method_first_arg = getattr(self, "_cur_method_first_arg", None)
+                    self._cur_method_first_arg = stmt.args.args[0].arg if stmt.args.args else None
                     params = [_safe_var(a.arg) for a in stmt.args.args]
                     if stmt.args.vararg:
                         params.append("...")
@@ -554,7 +558,7 @@ class IRLowerer:
                     if stmt.args.vararg:
                         vararg_name = _safe_var(stmt.args.vararg.arg)
                         t_dots = self._new_tmp()
-                        self._emit("CALL", ["table.pack", "..."], result=t_dots)
+                        self._emit("CALL", ["_tuple_pack", "..."], result=t_dots)
                         self._emit("STORE", [vararg_name, t_dots])
                     # If kwarg is present, initialize table
                     if stmt.args.kwarg:
@@ -569,6 +573,21 @@ class IRLowerer:
                     self.module.functions.append(fn)
                     self._cur_fn = prev_fn
                     self._cur_block = prev_block
+                    self._cur_method_first_arg = prev_method_first_arg
+
+                    # Register method parameters for keyword call resolution
+                    clean_params = [p for p in params if p != "..."]
+                    if clean_params:
+                        param_tuple = self._new_tmp()
+                        self._emit("MAKE_TUPLE", [f'"{p}"' for p in clean_params], result=param_tuple)
+                        self._emit("CALL", ["_luthon_reg_fn", f"{node.name}.{stmt.name}", param_tuple])
+                    if stmt.name == "__init__":
+                        init_params = [p for p in clean_params[1:]]
+                        if init_params:
+                            cls_param_tuple = self._new_tmp()
+                            self._emit("MAKE_TUPLE", [f'"{p}"' for p in init_params], result=cls_param_tuple)
+                            self._emit("CALL", ["_luthon_reg_fn", node.name, cls_param_tuple])
+
                     # Check for @property decorator on class method
                     is_prop = any((isinstance(d, ast.Name) and d.id == "property") for d in stmt.decorator_list)
                     if is_prop:
@@ -580,6 +599,7 @@ class IRLowerer:
                             self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
                         else:
                             self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
+            self._cur_class = prev_cur_class
 
             # Auto-generate __init__ if dataclass and not defined
             if is_dataclass and not has_init and fields:
@@ -958,6 +978,17 @@ class IRLowerer:
             self._emit("CMP", [self._cmpop(node.ops[0]), l, r], result=t)
             return t
         if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "super" and not node.args:
+                cur_cls = getattr(self, "_cur_class", None)
+                first_arg = getattr(self, "_cur_method_first_arg", None)
+                if cur_cls and first_arg:
+                    node.args = [ast.Name(id=cur_cls, ctx=ast.Load()), ast.Name(id=first_arg, ctx=ast.Load())]
+
+            kw_table = self._lower_call_keywords(node)
+            has_starred = any(isinstance(a, ast.Starred) for a in node.args)
+
+            target_fn = None
+            pos_args = []
             if isinstance(node.func, ast.Attribute):
                 # Distinguish module-level functions from instance method calls
                 is_module = False
@@ -980,20 +1011,39 @@ class IRLowerer:
                             is_module = True
 
                 if is_module:
-                    fn = self.lower_expr(node.func)
-                    args = [self.lower_expr(a) for a in node.args]
-                    kw_table = self._lower_call_keywords(node)
-                    return self._emit_call(fn, args, kw_table)
-                obj = self.lower_expr(node.func.value)
-                meth = self._new_tmp()
-                self._emit("SUBSCR", [obj, f'"{node.func.attr}"'], result=meth)
-                args = [obj] + [self.lower_expr(a) for a in node.args]
-                kw_table = self._lower_call_keywords(node)
-                return self._emit_call(meth, args, kw_table)
-            fn = self.lower_expr(node.func)
-            args = [self.lower_expr(a) for a in node.args]
-            kw_table = self._lower_call_keywords(node)
-            return self._emit_call(fn, args, kw_table)
+                    target_fn = self.lower_expr(node.func)
+                    pos_args = []
+                else:
+                    obj = self.lower_expr(node.func.value)
+                    meth = self._new_tmp()
+                    self._emit("SUBSCR", [obj, f'"{node.func.attr}"'], result=meth)
+                    target_fn = meth
+                    pos_args = [obj]
+            else:
+                target_fn = self.lower_expr(node.func)
+                pos_args = []
+
+            if has_starred:
+                flat_args_tmp = self._new_tmp()
+                self._emit("MAKE_LIST", [], result=flat_args_tmp)
+                for obj_arg in pos_args:
+                    self._emit("CALL", ["_seq_append", flat_args_tmp, obj_arg])
+                for a in node.args:
+                    if isinstance(a, ast.Starred):
+                        seq = self.lower_expr(a.value)
+                        self._emit("CALL", ["_seq_extend", flat_args_tmp, seq])
+                    else:
+                        val = self.lower_expr(a)
+                        self._emit("CALL", ["_seq_append", flat_args_tmp, val])
+                res = self._new_tmp()
+                if kw_table is not None:
+                    self._emit("CALL", ["_luthon_call_starred", target_fn, flat_args_tmp, kw_table], result=res)
+                else:
+                    self._emit("CALL", ["_luthon_call_starred", target_fn, flat_args_tmp], result=res)
+                return res
+
+            all_args = pos_args + [self.lower_expr(a) for a in node.args]
+            return self._emit_call(target_fn, all_args, kw_table)
         if isinstance(node, ast.BoolOp):
             result = self._new_tmp()
             left_tmp = self.lower_expr(node.values[0])
