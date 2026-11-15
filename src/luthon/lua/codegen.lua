@@ -414,15 +414,18 @@ function M.generate(module, skip_prelude, sourcemap)
       if not found then table.insert(tmps, t) end
     end
 
-    if #locs + #tmps <= 150 then
-      local allvars = {}
-      for _, l in ipairs(locs) do table.insert(allvars, l) end
-      for _, t in ipairs(tmps) do table.insert(allvars, t) end
-      if #allvars > 0 then
-        table.insert(out, indent .. "  local " .. table.concat(allvars, ", "))
+    local allvars = {}
+    for _, l in ipairs(locs) do table.insert(allvars, l) end
+    for _, t in ipairs(tmps) do table.insert(allvars, t) end
+    if #allvars > 0 then
+      local max_declared = math.min(#allvars, 180)
+      for chunk_start = 1, max_declared, 80 do
+        local chunk = {}
+        for i = chunk_start, math.min(chunk_start + 79, max_declared) do
+          table.insert(chunk, allvars[i])
+        end
+        table.insert(out, indent .. "  local " .. table.concat(chunk, ", "))
       end
-    elseif #locs > 0 then
-      table.insert(out, indent .. "  local " .. table.concat(locs, ", "))
     end
 
     -- Emit blocks
