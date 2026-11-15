@@ -497,8 +497,10 @@ function _luthon_call_kw(fn, kw_table, ...)
   if param_names then
     local pos_args = { ... }
     local call_args = {}
-    local max_idx = #param_names
-    for i = 1, max_idx do
+    local num_params = #param_names
+    local num_pos = #pos_args
+    local max_idx = num_params > num_pos and num_params or num_pos
+    for i = 1, num_params do
       local name = param_names[i]
       if pos_args[i] ~= nil then
         call_args[i] = pos_args[i]
@@ -506,10 +508,13 @@ function _luthon_call_kw(fn, kw_table, ...)
         call_args[i] = kw_table[name]
       end
     end
+    for i = num_params + 1, num_pos do
+      call_args[i] = pos_args[i]
+    end
     return fn(unpack(call_args, 1, max_idx))
   end
   local args = { ... }
-  if kw_table ~= nil then
+  if kw_table ~= nil and next(kw_table) ~= nil then
     table.insert(args, kw_table)
   end
   return fn(unpack(args))
@@ -517,7 +522,7 @@ end
 
 function _luthon_call_starred(fn, args, kw)
   local unpack_fn = table.unpack or unpack
-  if kw ~= nil then
+  if kw ~= nil and next(kw) ~= nil then
     return _luthon_call_kw(fn, kw, unpack_fn(args))
   else
     return fn(unpack_fn(args))
