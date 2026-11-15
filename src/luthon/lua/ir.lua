@@ -207,47 +207,66 @@ function IRLowerer:_lower_stmt_impl(node)
   if t == "Expr" then
     self:lower_expr(node.value)
   elseif t == "Assign" then
-    if node.targets and #node.targets > 0 and (node.targets[1]._type == "Tuple" or node.targets[1]._type == "List") then
-      -- Tuple/list unpacking: f, name = expr
-      local val = self:lower_expr(node.value)
-      for i, tgt in ipairs(node.targets[1].elts or {}) do
-        local idx_tmp = self:_new_tmp()
-        self:_emit("CONST", {i - 1}, idx_tmp)
-        local elem_tmp = self:_new_tmp()
-        self:_emit("SUBSCR", {val, idx_tmp}, elem_tmp)
-        if tgt._type == "Name" then
-          if _is_cell_or_free(self._cur_fn, tgt.id) then
-            self:_emit("CELL_SET", {tgt.id, elem_tmp})
-          else
-            self:_emit("STORE", {tgt.id, elem_tmp})
-          end
-        elseif tgt._type == "Subscript" then
-          local base = self:lower_expr(tgt.value)
-          local sl = self:lower_expr(tgt.slice)
-          self:_emit("STORE_SUBSCR", {base, sl, elem_tmp})
-        elseif tgt._type == "Attribute" then
-          local obj = self:lower_expr(tgt.value)
-          self:_emit("SET_ATTR", {obj, tgt.attr, elem_tmp})
+    local val = self:lower_expr(node.value)
+    local function lower_target(tgt, val_tmp)
+      if tgt._type == "Tuple" or tgt._type == "List" then
+        local star_idx = nil
+        for idx, e in ipairs(tgt.elts or {}) do
+          if e._type == "Starred" then star_idx = idx; break end
         end
-      end
-    else
-      local val = self:lower_expr(node.value)
-      for _, tgt in ipairs(node.targets or {}) do
-        if tgt._type == "Name" then
-          if _is_cell_or_free(self._cur_fn, tgt.id) then
-            self:_emit("CELL_SET", {tgt.id, val})
-          else
-            self:_emit("STORE", {tgt.id, val})
+        if not star_idx then
+          for i, e in ipairs(tgt.elts or {}) do
+            local idx_tmp = self:_new_tmp()
+            self:_emit("CONST", {i - 1}, idx_tmp)
+            local elem_tmp = self:_new_tmp()
+            self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+            lower_target(e, elem_tmp)
           end
-        elseif tgt._type == "Subscript" then
-          local base = self:lower_expr(tgt.value)
-          local sl = self:lower_expr(tgt.slice)
-          self:_emit("STORE_SUBSCR", {base, sl, val})
-        elseif tgt._type == "Attribute" then
-          local obj = self:lower_expr(tgt.value)
-          self:_emit("SET_ATTR", {obj, tgt.attr, val})
+        else
+          local elts = tgt.elts or {}
+          local num_trail = #elts - star_idx
+          for i = 1, star_idx - 1 do
+            local idx_tmp = self:_new_tmp()
+            self:_emit("CONST", {i - 1}, idx_tmp)
+            local elem_tmp = self:_new_tmp()
+            self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+            lower_target(elts[i], elem_tmp)
+          end
+          for j = 1, num_trail do
+            local idx_tmp = self:_new_tmp()
+            self:_emit("CONST", {-j}, idx_tmp)
+            local elem_tmp = self:_new_tmp()
+            self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+            lower_target(elts[#elts - j + 1], elem_tmp)
+          end
+          local star_elem = elts[star_idx]
+          local slice_tmp = self:_new_tmp()
+          if num_trail > 0 then
+            self:_emit("CALL", {"_luthon_slice", val_tmp, tostring(star_idx - 1), tostring(-num_trail)}, slice_tmp)
+          else
+            self:_emit("CALL", {"_luthon_slice", val_tmp, tostring(star_idx - 1)}, slice_tmp)
+          end
+          lower_target(star_elem.value, slice_tmp)
         end
+      elseif tgt._type == "Starred" then
+        lower_target(tgt.value, val_tmp)
+      elseif tgt._type == "Name" then
+        if _is_cell_or_free(self._cur_fn, tgt.id) then
+          self:_emit("CELL_SET", {tgt.id, val_tmp})
+        else
+          self:_emit("STORE", {tgt.id, val_tmp})
+        end
+      elseif tgt._type == "Subscript" then
+        local base = self:lower_expr(tgt.value)
+        local sl = self:lower_expr(tgt.slice)
+        self:_emit("STORE_SUBSCR", {base, sl, val_tmp})
+      elseif tgt._type == "Attribute" then
+        local obj = self:lower_expr(tgt.value)
+        self:_emit("SET_ATTR", {obj, tgt.attr, val_tmp})
       end
+    end
+    for _, tgt in ipairs(node.targets or {}) do
+      lower_target(tgt, val)
     end
   elseif t == "Delete" then
     -- del target -> set to nil (or delete attribute/item)
@@ -373,7 +392,7 @@ function IRLowerer:_lower_stmt_impl(node)
     if #self._break_stack > 0 then table.remove(self._break_stack) end
     if #self._continue_stack > 0 then table.remove(self._continue_stack) end
     self._cur_block = self:_new_block(end_lbl)
-  elseif t == "FunctionDef" then
+  elseif t == "FunctionDef" or t == "AsyncFunctionDef" then
     local fn = Function.new(node.name, {})
     for _, a in ipairs(node.args and node.args.args or {}) do table.insert(fn.params, a.arg) end
     if node.args and (node.args.vararg or node.args.kwarg) then
@@ -528,7 +547,8 @@ function IRLowerer:_lower_stmt_impl(node)
       elseif dec._type == "Attribute" and dec.attr == "dataclass" then
         is_dataclass = true
       elseif dec._type == "Call" then
-        if dec.func._type == "Name" and dec.func.id == "dataclass" then
+        local df = dec.func
+        if df._type == "Name" and df.id == "dataclass" then
           is_dataclass = true
         elseif df._type == "Attribute" and df.attr == "dataclass" then
           is_dataclass = true
@@ -580,7 +600,7 @@ function IRLowerer:_lower_stmt_impl(node)
     local prev_cur_class = self._cur_class
     self._cur_class = node.name
     for _, stmt in ipairs(node.body or {}) do
-      if stmt._type == "FunctionDef" then
+      if stmt._type == "FunctionDef" or stmt._type == "AsyncFunctionDef" then
         if stmt.name == "__init__" then has_init = true end
         if stmt.name == "__repr__" then has_repr = true end
         if stmt.name == "__eq__" then has_eq = true end
@@ -1004,16 +1024,54 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("CALL", {"_luthon_slice", unpack(args)}, res)
     return res
   elseif t == "List" then
+    local has_starred = false
+    for _, e in ipairs(node.elts or {}) do
+      if e._type == "Starred" then has_starred = true; break end
+    end
+    if not has_starred then
+      local res = self:_new_tmp()
+      local els = {}
+      for _, e in ipairs(node.elts or {}) do table.insert(els, self:lower_expr(e)) end
+      self:_emit("MAKE_LIST", els, res)
+      return res
+    end
     local res = self:_new_tmp()
-    local els = {}
-    for _, e in ipairs(node.elts or {}) do table.insert(els, self:lower_expr(e)) end
-    self:_emit("MAKE_LIST", els, res)
+    self:_emit("MAKE_LIST", {}, res)
+    for _, e in ipairs(node.elts or {}) do
+      if e._type == "Starred" then
+        local seq = self:lower_expr(e.value)
+        self:_emit("CALL", {"_seq_extend", res, seq})
+      else
+        local val = self:lower_expr(e)
+        self:_emit("LIST_APPEND", {res, val})
+      end
+    end
     return res
   elseif t == "Tuple" then
+    local has_starred = false
+    for _, e in ipairs(node.elts or {}) do
+      if e._type == "Starred" then has_starred = true; break end
+    end
+    if not has_starred then
+      local res = self:_new_tmp()
+      local els = {}
+      for _, e in ipairs(node.elts or {}) do table.insert(els, self:lower_expr(e)) end
+      self:_emit("MAKE_TUPLE", els, res)
+      return res
+    end
+    local list_tmp = self:_new_tmp()
+    self:_emit("MAKE_LIST", {}, list_tmp)
+    for _, e in ipairs(node.elts or {}) do
+      if e._type == "Starred" then
+        local seq = self:lower_expr(e.value)
+        self:_emit("CALL", {"_seq_extend", list_tmp, seq})
+      else
+        local val = self:lower_expr(e)
+        self:_emit("LIST_APPEND", {list_tmp, val})
+      end
+    end
     local res = self:_new_tmp()
-    local els = {}
-    for _, e in ipairs(node.elts or {}) do table.insert(els, self:lower_expr(e)) end
-    self:_emit("MAKE_TUPLE", els, res)
+    self:_emit("CALL", {"tuple", list_tmp}, res)
     return res
   elseif t == "ListComp" then
     -- basic: build list from first generator
@@ -1143,11 +1201,15 @@ function IRLowerer:_lower_expr_impl(node)
     local args = {}
     if node.args and node.args.args then
       for _, a in ipairs(node.args.args) do table.insert(args, a.arg or a) end
+      if node.args.vararg or node.args.kwarg then
+        table.insert(args, "...")
+      end
     elseif type(node.args) == "table" then
       for _, a in ipairs(node.args) do table.insert(args, type(a) == "table" and (a.arg or a.id) or tostring(a)) end
     end
     -- Create a nested function for the lambda body
     local lambda_name = "_lambda_" .. self._tmp
+    self._tmp = self._tmp + 1
     local fn = Function.new(lambda_name, args)
     local sc = node._scope
     if sc then
@@ -1169,6 +1231,18 @@ function IRLowerer:_lower_expr_impl(node)
     local b = Block.new("entry")
     table.insert(fn.blocks, b)
     self._cur_block = b
+    if node.args and node.args.vararg then
+      local vararg_name = node.args.vararg.arg
+      local t_dots = self:_new_tmp()
+      self:_emit("CALL", {"_tuple_pack", "..."}, t_dots)
+      self:_emit("STORE", {vararg_name, t_dots})
+    end
+    if node.args and node.args.kwarg then
+      local kwarg_name = node.args.kwarg.arg
+      local t_kw = self:_new_tmp()
+      self:_emit("MAKE_DICT", {}, t_kw)
+      self:_emit("STORE", {kwarg_name, t_kw})
+    end
     local body_tmp = self:lower_expr(node.body)
     self:_emit("RETURN", {body_tmp})
     table.insert(self.module.functions, fn)

@@ -148,48 +148,61 @@ class IRLowerer:
             else:
                 self.lower_expr(node.value)
         elif isinstance(node, ast.Assign):
-            if isinstance(node.targets[0], (ast.Tuple, ast.List)):
-                # Tuple unpacking: f, name = expr
-                val = self.lower_expr(node.value)
-                for i, t in enumerate(node.targets[0].elts):
-                    idx_tmp = self._new_tmp()
-                    self._emit("CONST", [i], result=idx_tmp)
-                    elem_tmp = self._new_tmp()
-                    self._emit("SUBSCR", [val, idx_tmp], result=elem_tmp)
-                    if isinstance(t, ast.Name):
-                        safe_name = _safe_var(t.id)
-                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
-                            self._emit("CELL_SET", [safe_name, elem_tmp])
+            val = self.lower_expr(node.value)
+            def lower_target(tgt, val_tmp):
+                if isinstance(tgt, (ast.Tuple, ast.List)):
+                    has_starred = any(isinstance(e, ast.Starred) for e in tgt.elts)
+                    if not has_starred:
+                        for i, e in enumerate(tgt.elts):
+                            idx_tmp = self._new_tmp()
+                            self._emit("CONST", [i], result=idx_tmp)
+                            elem_tmp = self._new_tmp()
+                            self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                            lower_target(e, elem_tmp)
+                    else:
+                        star_idx = next(i for i, e in enumerate(tgt.elts) if isinstance(e, ast.Starred))
+                        num_trail = len(tgt.elts) - 1 - star_idx
+                        for i in range(star_idx):
+                            idx_tmp = self._new_tmp()
+                            self._emit("CONST", [i], result=idx_tmp)
+                            elem_tmp = self._new_tmp()
+                            self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                            lower_target(tgt.elts[i], elem_tmp)
+                        for j in range(1, num_trail + 1):
+                            idx_tmp = self._new_tmp()
+                            self._emit("CONST", [-j], result=idx_tmp)
+                            elem_tmp = self._new_tmp()
+                            self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                            lower_target(tgt.elts[len(tgt.elts) - j], elem_tmp)
+                        star_elem = tgt.elts[star_idx]
+                        slice_tmp = self._new_tmp()
+                        if num_trail > 0:
+                            self._emit("CALL", ["_luthon_slice", val_tmp, str(star_idx), str(-num_trail)], result=slice_tmp)
                         else:
-                            self._emit("STORE", [safe_name, elem_tmp])
-                    elif isinstance(t, ast.Subscript):
-                        base = self.lower_expr(t.value)
-                        sl = self.lower_expr(t.slice)
-                        self._emit("STORE_SUBSCR", [base, sl, elem_tmp])
-                    elif isinstance(t, ast.Attribute):
-                        obj = self.lower_expr(t.value)
-                        attr = t.attr
-                        self._emit("SET_ATTR", [obj, attr, elem_tmp])
-            else:
-                val = self.lower_expr(node.value)
-                for t in node.targets:
-                    if isinstance(t, ast.Name):
-                        safe_name = _safe_var(t.id)
-                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
-                            self._emit("CELL_SET", [safe_name, val])
-                        else:
-                            self._emit("STORE", [safe_name, val])
-                    elif isinstance(t, ast.Subscript):
-                        base = self.lower_expr(t.value)
-                        sl = self.lower_expr(t.slice)
-                        self._emit("STORE_SUBSCR", [base, sl, val])
-                    elif isinstance(t, ast.Attribute):
-                        obj = self.lower_expr(t.value)
-                        attr = t.attr
-                        if attr in LUA_RESERVED_KEYWORDS:
-                            self._emit("STORE_SUBSCR", [obj, f'"{attr}"', val])
-                        else:
-                            self._emit("SET_ATTR", [obj, attr, val])
+                            self._emit("CALL", ["_luthon_slice", val_tmp, str(star_idx)], result=slice_tmp)
+                        lower_target(star_elem.value, slice_tmp)
+                elif isinstance(tgt, ast.Starred):
+                    lower_target(tgt.value, val_tmp)
+                elif isinstance(tgt, ast.Name):
+                    safe_name = _safe_var(tgt.id)
+                    if self._cur_fn is not None and (tgt.id in getattr(self._cur_fn, "cellvars", []) or tgt.id in getattr(self._cur_fn, "freevars", [])):
+                        self._emit("CELL_SET", [safe_name, val_tmp])
+                    else:
+                        self._emit("STORE", [safe_name, val_tmp])
+                elif isinstance(tgt, ast.Subscript):
+                    base = self.lower_expr(tgt.value)
+                    sl = self.lower_expr(tgt.slice)
+                    self._emit("STORE_SUBSCR", [base, sl, val_tmp])
+                elif isinstance(tgt, ast.Attribute):
+                    obj = self.lower_expr(tgt.value)
+                    attr = tgt.attr
+                    if attr in LUA_RESERVED_KEYWORDS:
+                        self._emit("STORE_SUBSCR", [obj, f'"{attr}"', val_tmp])
+                    else:
+                        self._emit("SET_ATTR", [obj, attr, val_tmp])
+
+            for t in node.targets:
+                lower_target(t, val)
         elif isinstance(node, ast.AugAssign):
             lhs = self.lower_expr(node.target)
             rhs = self.lower_expr(node.value)
@@ -1262,9 +1275,12 @@ class IRLowerer:
                     self._emit("DICT_SET", [t, k_tmp, v_tmp])
             return t
         if isinstance(node, ast.Lambda):
-            args = [a.arg for a in node.args.args]
+            args = [_safe_var(a.arg) for a in node.args.args]
+            if node.args.vararg or node.args.kwarg:
+                args.append("...")
             # Create a nested function for the lambda body
             lambda_name = "_lambda_%d" % self._tmp
+            self._tmp += 1
             fn = Function(name=lambda_name, params=args)
             sc = getattr(node, "_scope", None)
             if sc is not None:
@@ -1278,6 +1294,16 @@ class IRLowerer:
             b = Block(label="entry")
             fn.blocks.append(b)
             self._cur_block = b
+            if node.args.vararg:
+                vararg_name = _safe_var(node.args.vararg.arg)
+                t_dots = self._new_tmp()
+                self._emit("CALL", ["_tuple_pack", "..."], result=t_dots)
+                self._emit("STORE", [vararg_name, t_dots])
+            if node.args.kwarg:
+                kwarg_name = _safe_var(node.args.kwarg.arg)
+                t_kw = self._new_tmp()
+                self._emit("MAKE_DICT", [], result=t_kw)
+                self._emit("STORE", [kwarg_name, t_kw])
             body_tmp = self.lower_expr(node.body)
             self._emit("RETURN", [body_tmp])
             self.module.functions.append(fn)
