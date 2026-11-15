@@ -315,6 +315,32 @@ print("PROXY_DECORATORS_PASSED")
 """
         self._run_both(py_code, "PROXY_DECORATORS_PASSED")
 
+    def test_types_module_proxies_and_namespaces(self):
+        """Test types.MappingProxyType and types.SimpleNamespace in both pipelines."""
+        py_code = """
+import types
+
+data = {"a": 1, "b": 2}
+proxy = types.MappingProxyType(data)
+assert proxy["a"] == 1
+assert proxy["b"] == 2
+
+try:
+    proxy["a"] = 10
+    failed = False
+except TypeError:
+    failed = True
+assert failed
+
+ns = types.SimpleNamespace(x=10, y=20)
+assert ns.x == 10
+assert ns.y == 20
+ns.z = 30
+assert ns.z == 30
+print("TYPES_PROXIES_AND_NAMESPACES_PASSED")
+"""
+        self._run_both(py_code, "TYPES_PROXIES_AND_NAMESPACES_PASSED")
+
 
 if __name__ == "__main__":
     unittest.main()
