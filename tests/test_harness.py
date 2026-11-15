@@ -99,6 +99,32 @@ PROGRAMS = {
         for x in result:
             print(x)
     """),
+    "unpacking_subscript": textwrap.dedent("""\
+        d = {}
+        d["a"], x = (10, 20)
+        print(d["a"], x)
+        pair = (30, 40)
+        d["b"], y = pair
+        print(d["b"], y)
+    """),
+    "string_methods": textwrap.dedent("""\
+        s = "hello world hello"
+        print(s.find("world"))
+        print(s.find("missing"))
+        print(s.index("world"))
+        print(s.count("hello"))
+        print(s.replace("hello", "bye"))
+        print(repr("quoted"))
+    """),
+    "types_and_sorting": textwrap.dedent("""\
+        print(type("abc") == str)
+        print(type(123) == int)
+        print(type([]) == list)
+        print(isinstance("hello", (int, str)))
+        items = [(2, "b"), (1, "a"), (2, "a")]
+        for k, v in sorted(items):
+            print(k, v)
+    """),
 }
 
 
