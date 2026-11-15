@@ -519,7 +519,9 @@ function Parser:newline_or_eof()
 end
 
 function Parser:new_suite()
-  -- expects NEWLINE already consumed, now expect INDENT
+  while self:check(TT.NEWLINE) or self:check(TT.NL) or self:check(TT.COMMENT) do
+    self:advance()
+  end
   self:expect(TT.INDENT)
   local stmts = {}
   while not self:check(TT.DEDENT) and not self:check(TT.EOF)
@@ -720,17 +722,49 @@ end
 function Parser:arguments()
   local args = {}
   local defaults = {}
+  local vararg = nil
+  local kwonlyargs = {}
+  local kw_defaults = {}
+  local kwarg = nil
+  local in_kwonly = false
+
   while not self:check(TT.OP, ")") do
-    local arg_name = self:expect(TT.NAME).value
-    local annotation = nil
-    if self:match(TT.OP, ":") then annotation = self:expr() end
-    local default = nil
-    if self:match(TT.OP, "=") then default = self:expr() end
-    table.insert(args, {arg = arg_name, annotation = annotation, default = default, lineno = 0, col_offset = 0, _type = "arg"})
-    if default then table.insert(defaults, default) end
-    if not self:match(TT.OP, ",") then break end
+    if self:match(TT.OP, "**") then
+      local kw_name = self:expect(TT.NAME).value
+      local annotation = nil
+      if self:match(TT.OP, ":") then annotation = self:expr() end
+      kwarg = {arg = kw_name, annotation = annotation, lineno = 0, col_offset = 0, _type = "arg"}
+      self:match(TT.OP, ",")
+      break
+    elseif self:match(TT.OP, "*") then
+      if self:check(TT.NAME) then
+        local va_name = self:advance().value
+        local annotation = nil
+        if self:match(TT.OP, ":") then annotation = self:expr() end
+        vararg = {arg = va_name, annotation = annotation, lineno = 0, col_offset = 0, _type = "arg"}
+      end
+      in_kwonly = true
+      if not self:match(TT.OP, ",") then break end
+    elseif self:match(TT.OP, "/") then
+      if not self:match(TT.OP, ",") then break end
+    else
+      local arg_name = self:expect(TT.NAME).value
+      local annotation = nil
+      if self:match(TT.OP, ":") then annotation = self:expr() end
+      local default = nil
+      if self:match(TT.OP, "=") then default = self:expr() end
+      local arg_node = {arg = arg_name, annotation = annotation, default = default, lineno = 0, col_offset = 0, _type = "arg"}
+      if in_kwonly then
+        table.insert(kwonlyargs, arg_node)
+        table.insert(kw_defaults, default)
+      else
+        table.insert(args, arg_node)
+        if default then table.insert(defaults, default) end
+      end
+      if not self:match(TT.OP, ",") then break end
+    end
   end
-  return {args = args, vararg = nil, kwonlyargs = {}, kw_defaults = {}, kwarg = nil, defaults = defaults, _type = "arguments"}
+  return {args = args, vararg = vararg, kwonlyargs = kwonlyargs, kw_defaults = kw_defaults, kwarg = kwarg, defaults = defaults, _type = "arguments"}
 end
 
 function Parser:class_def()
@@ -1211,6 +1245,49 @@ function Parser:genexp_body(elt)
   return node(NT.GeneratorExp, {elt = elt, generators = clauses, lineno = 0, col_offset = 0})
 end
 
+function Parser:parse_call_args()
+  local args = {}
+  local keywords = {}
+  if not self:check(TT.OP, ")") then
+    local function parse_one_arg()
+      if self:match(TT.OP, "**") then
+        local kw_val = self:expr()
+        table.insert(keywords, {arg = nil, value = kw_val})
+      elseif self:match(TT.OP, "*") then
+        local val = self:expr()
+        table.insert(args, node(NT.Starred, {value = val, lineno = 0, col_offset = 0}))
+      else
+        local arg_expr = self:expr()
+        if self:match(TT.OP, "=") then
+          local kw_name = arg_expr.id or tostring(arg_expr)
+          local kw_val = self:expr()
+          table.insert(keywords, {arg = kw_name, value = kw_val})
+        else
+          table.insert(args, arg_expr)
+          if #args == 1 and self:check(TT.NAME, "for") then
+            local clauses = self:comp_clauses()
+            self:expect(TT.OP, ")")
+            local gen = node(NT.GeneratorExp, {elt = args[1], generators = clauses, lineno = 0, col_offset = 0})
+            return {gen}, {}
+          end
+        end
+      end
+    end
+
+    local gen_args, gen_kw = parse_one_arg()
+    if gen_args then return gen_args, gen_kw end
+    while self:match(TT.OP, ",") do
+      if self:check(TT.OP, ")") then break end
+      local g_args, g_kw = parse_one_arg()
+      if g_args then return g_args, g_kw end
+    end
+  end
+  if self:check(TT.OP, ")") then
+    self:expect(TT.OP, ")")
+  end
+  return args, keywords
+end
+
 function Parser:power()
   local base = self:atom()
   -- postfix trailers: attribute access, subscript, call (bind tighter than **)
@@ -1260,39 +1337,7 @@ function Parser:power()
       end
     elseif t2.type == TT.OP and t2.value == "(" then
       self:advance()
-      local args = {}
-      local keywords = {}
-      if not self:check(TT.OP, ")") then
-        local first_arg = self:expr_or_starred()
-        if self:match(TT.OP, "=") then
-          local kw_name = first_arg.id or tostring(first_arg)
-          local kw_val = self:expr()
-          table.insert(keywords, {arg = kw_name, value = kw_val})
-        else
-          table.insert(args, first_arg)
-          -- Generator expression as call argument: f(elt for target in iter [if cond])
-          if self:check(TT.NAME, "for") then
-            local clauses = self:comp_clauses()
-            self:expect(TT.OP, ")")
-            local gen = node(NT.GeneratorExp, {elt = args[1], generators = clauses, lineno = 0, col_offset = 0})
-            base = node(NT.Call, {func = base, args = {gen}, lineno = 0, col_offset = 0})
-          end
-        end
-        while self:match(TT.OP, ",") do
-          if self:check(TT.OP, ")") then break end
-          local arg_expr = self:expr_or_starred()
-          if self:match(TT.OP, "=") then
-            local kw_name = arg_expr.id or tostring(arg_expr)
-            local kw_val = self:expr()
-            table.insert(keywords, {arg = kw_name, value = kw_val})
-          else
-            table.insert(args, arg_expr)
-          end
-        end
-      end
-      if self:check(TT.OP, ")") then
-        self:expect(TT.OP, ")")
-      end
+      local args, keywords = self:parse_call_args()
       local call_node = node(NT.Call, {func = base, args = args, lineno = 0, col_offset = 0})
       if #keywords > 0 then
         call_node.keywords = keywords
@@ -1375,37 +1420,7 @@ function Parser:atom()
     -- Check for function call: name(args)
     if self:check(TT.OP, "(") then
       self:advance() -- consume (
-      local args = {}
-      local keywords = {}
-      if not self:check(TT.OP, ")") then
-        local first_arg = self:expr()
-        if self:match(TT.OP, "=") then
-          local kw_name = first_arg.id or tostring(first_arg)
-          local kw_val = self:expr()
-          table.insert(keywords, {arg = kw_name, value = kw_val})
-        else
-          table.insert(args, first_arg)
-        end
-        if self:check(TT.NAME, "for") then
-          -- generator expression as call argument: f(elt for target in iter [if cond])
-          local clauses = self:comp_clauses()
-          self:expect(TT.OP, ")")
-          local gen = node(NT.GeneratorExp, {elt = args[1], generators = clauses, lineno = 0, col_offset = 0})
-          return node(NT.Call, {func = name_node, args = {gen}, lineno = tok.line, col_offset = tok.col})
-        end
-        while self:match(TT.OP, ",") do
-          if self:check(TT.OP, ")") then break end
-          local arg_expr = self:expr()
-          if self:match(TT.OP, "=") then
-            local kw_name = arg_expr.id or tostring(arg_expr)
-            local kw_val = self:expr()
-            table.insert(keywords, {arg = kw_name, value = kw_val})
-          else
-            table.insert(args, arg_expr)
-          end
-        end
-      end
-      self:expect(TT.OP, ")")
+      local args, keywords = self:parse_call_args()
       local call_node = node(NT.Call, {func = name_node, args = args, lineno = tok.line, col_offset = tok.col})
       if #keywords > 0 then
         call_node.keywords = keywords
