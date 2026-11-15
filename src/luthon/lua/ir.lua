@@ -195,28 +195,46 @@ function IRLowerer:lower_stmt(node)
   self._cur_node = prev_node
 end
 
+local function _is_cell_or_free(fn, name)
+  if not fn then return false end
+  for _, v in ipairs(fn.cellvars or {}) do if v == name then return true end end
+  for _, v in ipairs(fn.freevars or {}) do if v == name then return true end end
+  return false
+end
+
 function IRLowerer:_lower_stmt_impl(node)
   local t = node._type
   if t == "Expr" then
     self:lower_expr(node.value)
   elseif t == "Assign" then
-    if node.targets and #node.targets > 0 and node.targets[1]._type == "Tuple" then
-      -- Tuple unpacking: f, name = expr
+    if node.targets and #node.targets > 0 and (node.targets[1]._type == "Tuple" or node.targets[1]._type == "List") then
+      -- Tuple/list unpacking: f, name = expr
       local val = self:lower_expr(node.value)
       for i, tgt in ipairs(node.targets[1].elts or {}) do
+        local idx_tmp = self:_new_tmp()
+        self:_emit("CONST", {i - 1}, idx_tmp)
+        local elem_tmp = self:_new_tmp()
+        self:_emit("SUBSCR", {val, idx_tmp}, elem_tmp)
         if tgt._type == "Name" then
-          local idx_tmp = self:_new_tmp()
-          self:_emit("CONST", {i}, idx_tmp)
-          local elem_tmp = self:_new_tmp()
-          self:_emit("SUBSCR", {val, idx_tmp}, elem_tmp)
-          self:_emit("STORE", {tgt.id, elem_tmp})
+          if _is_cell_or_free(self._cur_fn, tgt.id) then
+            self:_emit("CELL_SET", {tgt.id, elem_tmp})
+          else
+            self:_emit("STORE", {tgt.id, elem_tmp})
+          end
+        elseif tgt._type == "Subscript" then
+          local base = self:lower_expr(tgt.value)
+          local sl = self:lower_expr(tgt.slice)
+          self:_emit("STORE_SUBSCR", {base, sl, elem_tmp})
+        elseif tgt._type == "Attribute" then
+          local obj = self:lower_expr(tgt.value)
+          self:_emit("SET_ATTR", {obj, tgt.attr, elem_tmp})
         end
       end
     else
       local val = self:lower_expr(node.value)
       for _, tgt in ipairs(node.targets or {}) do
         if tgt._type == "Name" then
-          if self._cur_fn and self._cur_fn.cellvars and self._cur_fn.cellvars[tgt.id] then
+          if _is_cell_or_free(self._cur_fn, tgt.id) then
             self:_emit("CELL_SET", {tgt.id, val})
           else
             self:_emit("STORE", {tgt.id, val})
@@ -337,6 +355,16 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     if node.target._type == "Name" then
       self:_emit("STORE", {node.target.id, nxt})
+    elseif node.target._type == "Tuple" or node.target._type == "List" then
+      for i, t in ipairs(node.target.elts or {}) do
+        if t._type == "Name" then
+          local idx_tmp = self:_new_tmp()
+          self:_emit("CONST", {i - 1}, idx_tmp)
+          local elem_tmp = self:_new_tmp()
+          self:_emit("SUBSCR", {nxt, idx_tmp}, elem_tmp)
+          self:_emit("STORE", {t.id, elem_tmp})
+        end
+      end
     end
     self:_emit("JUMP", {body_lbl})
     self._cur_block = self:_new_block(body_lbl)
@@ -348,9 +376,12 @@ function IRLowerer:_lower_stmt_impl(node)
   elseif t == "FunctionDef" then
     local fn = Function.new(node.name, {})
     for _, a in ipairs(node.args.args or {}) do table.insert(fn.params, a.arg) end
-    -- upvalues from semantic scope if available
+    -- upvalues and locals from semantic scope if available
     local sc = node._scope
     if sc then
+      fn.locals = {}
+      for k in pairs(sc.locals or {}) do table.insert(fn.locals, k) end
+      table.sort(fn.locals)
       fn.freevars = {}
       for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, k) end
       table.sort(fn.freevars)
@@ -521,6 +552,20 @@ function IRLowerer:_lower_stmt_impl(node)
         if stmt.name == "__eq__" then has_eq = true end
         local fn = Function.new(node.name .. "." .. stmt.name, {})
         for _, a in ipairs(stmt.args.args or {}) do table.insert(fn.params, a.arg) end
+        local sc = stmt._scope
+        if sc then
+          fn.locals = {}
+          for k in pairs(sc.locals or {}) do table.insert(fn.locals, k) end
+          table.sort(fn.locals)
+          fn.freevars = {}
+          for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, k) end
+          table.sort(fn.freevars)
+          fn.cellvars = {}
+          for k in pairs(sc.cellvars or {}) do table.insert(fn.cellvars, k) end
+          table.sort(fn.cellvars)
+          fn.upvalues = {}
+          for _, fv in ipairs(fn.freevars) do table.insert(fn.upvalues, fv) end
+        end
         local prev_fn = self._cur_fn
         local prev_block = self._cur_block
         self._cur_fn = fn
@@ -720,13 +765,17 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("GET_ATTR", {obj, node.attr}, res)
     return res
   elseif t == "Name" then
-    if self._cur_fn and self._cur_fn.cellvars and self._cur_fn.cellvars[node.id] then
+    if _is_cell_or_free(self._cur_fn, node.id) then
       local res = self:_new_tmp()
       self:_emit("CELL_GET", {node.id}, res)
       return res
     end
     local res = self:_new_tmp()
-    self:_emit("LOAD", {node.id}, res)
+    local name = node.id
+    if name == "type" and (not self._cur_fn or ((not self._cur_fn.params or not self._cur_fn.params[name]) and (not self._cur_fn.locals or not self._cur_fn.locals[name]))) then
+      name = "_luthon_type"
+    end
+    self:_emit("LOAD", {name}, res)
     return res
   elseif t == "BinOp" and node.left._type == "List" and node.op._type == "Mult" then
     local l = self:lower_expr(node.left)
@@ -813,7 +862,7 @@ function IRLowerer:_lower_expr_impl(node)
       end
       local obj = self:lower_expr(node.func.value)
       local meth = self:_new_tmp()
-      self:_emit("GET_ATTR", {obj, node.func.attr}, meth)
+      self:_emit("SUBSCR", {obj, '"' .. node.func.attr .. '"'}, meth)
       local args = {obj}
       for _, a in ipairs(node.args or {}) do table.insert(args, self:lower_expr(a)) end
       local kw_table = self:_lower_call_keywords(node)
@@ -989,6 +1038,20 @@ function IRLowerer:_lower_expr_impl(node)
     -- Create a nested function for the lambda body
     local lambda_name = "_lambda_" .. self._tmp
     local fn = Function.new(lambda_name, args)
+    local sc = node._scope
+    if sc then
+      fn.locals = {}
+      for k in pairs(sc.locals or {}) do table.insert(fn.locals, k) end
+      table.sort(fn.locals)
+      fn.freevars = {}
+      for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, k) end
+      table.sort(fn.freevars)
+      fn.cellvars = {}
+      for k in pairs(sc.cellvars or {}) do table.insert(fn.cellvars, k) end
+      table.sort(fn.cellvars)
+      fn.upvalues = {}
+      for _, fv in ipairs(fn.freevars) do table.insert(fn.upvalues, fv) end
+    end
     local prev_fn = self._cur_fn
     local prev_block = self._cur_block
     self._cur_fn = fn

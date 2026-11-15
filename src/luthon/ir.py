@@ -148,20 +148,28 @@ class IRLowerer:
             else:
                 self.lower_expr(node.value)
         elif isinstance(node, ast.Assign):
-            if isinstance(node.targets[0], ast.Tuple):
+            if isinstance(node.targets[0], (ast.Tuple, ast.List)):
                 # Tuple unpacking: f, name = expr
                 val = self.lower_expr(node.value)
                 for i, t in enumerate(node.targets[0].elts):
+                    idx_tmp = self._new_tmp()
+                    self._emit("CONST", [i], result=idx_tmp)
+                    elem_tmp = self._new_tmp()
+                    self._emit("SUBSCR", [val, idx_tmp], result=elem_tmp)
                     if isinstance(t, ast.Name):
                         safe_name = _safe_var(t.id)
-                        idx_tmp = self._new_tmp()
-                        self._emit("CONST", [i], result=idx_tmp)
-                        elem_tmp = self._new_tmp()
-                        self._emit("SUBSCR", [val, idx_tmp], result=elem_tmp)
                         if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
                             self._emit("CELL_SET", [safe_name, elem_tmp])
                         else:
                             self._emit("STORE", [safe_name, elem_tmp])
+                    elif isinstance(t, ast.Subscript):
+                        base = self.lower_expr(t.value)
+                        sl = self.lower_expr(t.slice)
+                        self._emit("STORE_SUBSCR", [base, sl, elem_tmp])
+                    elif isinstance(t, ast.Attribute):
+                        obj = self.lower_expr(t.value)
+                        attr = t.attr
+                        self._emit("SET_ATTR", [obj, attr, elem_tmp])
             else:
                 val = self.lower_expr(node.value)
                 for t in node.targets:
@@ -921,7 +929,10 @@ class IRLowerer:
                 self._emit("CELL_GET", [safe_name], result=t)
                 return t
             t = self._new_tmp()
-            self._emit("LOAD", [safe_name], result=t)
+            if node.id == "type" and (self._cur_fn is None or (node.id not in getattr(self._cur_fn, "params", []) and node.id not in getattr(self._cur_fn, "locals", []))):
+                self._emit("LOAD", ["_luthon_type"], result=t)
+            else:
+                self._emit("LOAD", [safe_name], result=t)
             return t
         if isinstance(node, ast.BinOp) and isinstance(node.left, ast.List) and isinstance(node.op, ast.Mult):
             l = self.lower_expr(node.left)
