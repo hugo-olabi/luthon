@@ -948,13 +948,26 @@ class IRLowerer:
             return t
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
-                # module-level / builtin functions: don't prepend self
-                # determine root name of attribute chain
-                root = node.func.value
-                while isinstance(root, ast.Attribute):
-                    root = root.value
+                # Distinguish module-level functions from instance method calls
+                is_module = False
                 known_modules = ("math","os","sys","json","random","re","string","hashlib","base64","struct","io","collections","itertools","functools","pathlib","datetime","typing","site","tempfile","subprocess","ast","ffi","bit","table","operator","six","packaging","websockets","asyncio","socket","http","requests","sqlite3","numpy","PIL")
-                is_module = (isinstance(root, ast.Name) and root.id in known_modules) or (hasattr(self, "_imported_modules") and isinstance(root, ast.Name) and root.id in self._imported_modules)
+                known_submodules = ("os.path", "urllib.parse", "urllib.request", "urllib.error", "http.client", "http.server", "collections.abc", "ffi.C", "math.simd")
+
+                if isinstance(node.func.value, ast.Name):
+                    if node.func.value.id in known_modules or (hasattr(self, "_imported_modules") and node.func.value.id in self._imported_modules):
+                        is_module = True
+                elif isinstance(node.func.value, ast.Attribute):
+                    parts = []
+                    curr = node.func.value
+                    while isinstance(curr, ast.Attribute):
+                        parts.append(curr.attr)
+                        curr = curr.value
+                    if isinstance(curr, ast.Name):
+                        parts.append(curr.id)
+                        dotted = ".".join(reversed(parts))
+                        if dotted in known_submodules or (hasattr(self, "_imported_modules") and dotted in self._imported_modules):
+                            is_module = True
+
                 if is_module:
                     fn = self.lower_expr(node.func)
                     args = [self.lower_expr(a) for a in node.args]
