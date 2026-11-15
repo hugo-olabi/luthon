@@ -393,7 +393,9 @@ function IRLowerer:_lower_stmt_impl(node)
     if #self._continue_stack > 0 then table.remove(self._continue_stack) end
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "FunctionDef" or t == "AsyncFunctionDef" then
+    local is_nested = (self._cur_fn ~= nil and not self._cur_fn.is_entry_point)
     local fn = Function.new(node.name, {})
+    fn.is_nested = is_nested
     for _, a in ipairs(node.args and node.args.args or {}) do table.insert(fn.params, a.arg) end
     if node.args and (node.args.vararg or node.args.kwarg) then
       table.insert(fn.params, "...")
@@ -447,15 +449,15 @@ function IRLowerer:_lower_stmt_impl(node)
     -- Switch back to enclosing block before applying decorators
     self._cur_fn = prev_fn
     self._cur_block = prev_block
-    -- Apply decorators (innermost first)
-    for i = #node.decorator_list, 1, -1 do
-      local dec = node.decorator_list[i]
-      local dec_tmp = self:lower_expr(dec)
+
+    local fn_ref = fn.name
+    if is_nested then
       local fn_tmp = self:_new_tmp()
-      self:_emit("LOAD", {fn.name}, fn_tmp)
-      local result_tmp = self:_new_tmp()
-      self:_emit("CALL", {dec_tmp, fn_tmp}, result_tmp)
-      self:_emit("STORE", {fn.name, result_tmp})
+      self:_emit("MAKE_FUNCTION", {fn.name}, fn_tmp)
+      self:_emit("STORE", {fn.name, fn_tmp})
+      fn_ref = fn_tmp
+    else
+      self:_emit("STORE", {fn.name, fn.name})
     end
     local clean_params = {}
     for _, p in ipairs(fn.params) do
@@ -464,7 +466,17 @@ function IRLowerer:_lower_stmt_impl(node)
     if #clean_params > 0 then
       local param_tuple = self:_new_tmp()
       self:_emit("MAKE_TUPLE", clean_params, param_tuple)
-      self:_emit("CALL", {"_luthon_reg_fn", fn.name, param_tuple})
+      self:_emit("CALL", {"_luthon_reg_fn", fn_ref, param_tuple})
+    end
+    -- Apply decorators (innermost first)
+    for i = #(node.decorator_list or {}), 1, -1 do
+      local dec = node.decorator_list[i]
+      local dec_tmp = self:lower_expr(dec)
+      local fn_tmp = self:_new_tmp()
+      self:_emit("LOAD", {fn.name}, fn_tmp)
+      local result_tmp = self:_new_tmp()
+      self:_emit("CALL", {dec_tmp, fn_tmp}, result_tmp)
+      self:_emit("STORE", {fn.name, result_tmp})
     end
   elseif t == "Import" then
     for _, alias in ipairs(node.names or {}) do
@@ -670,6 +682,24 @@ function IRLowerer:_lower_stmt_impl(node)
             local cls_param_tuple = self:_new_tmp()
             self:_emit("MAKE_TUPLE", init_params, cls_param_tuple)
             self:_emit("CALL", {"_luthon_reg_fn", node.name, cls_param_tuple})
+          end
+        end
+
+        -- Apply decorators on class method (innermost first)
+        for i = #(stmt.decorator_list or {}), 1, -1 do
+          local dec = stmt.decorator_list[i]
+          if dec._type == "Name" and dec.id == "property" then
+            local prop_tmp = self:_new_tmp()
+            local prop_ref = node.name .. "." .. stmt.name
+            self:_emit("CALL", {"property", prop_ref}, prop_tmp)
+            self:_emit("SET_ATTR", {node.name, stmt.name, prop_tmp})
+          else
+            local dec_tmp = self:lower_expr(dec)
+            local m_tmp = self:_new_tmp()
+            self:_emit("GET_ATTR", {node.name, stmt.name}, m_tmp)
+            local res_tmp = self:_new_tmp()
+            self:_emit("CALL", {dec_tmp, m_tmp}, res_tmp)
+            self:_emit("SET_ATTR", {node.name, stmt.name, res_tmp})
           end
         end
       end
@@ -1211,6 +1241,7 @@ function IRLowerer:_lower_expr_impl(node)
     local lambda_name = "_lambda_" .. self._tmp
     self._tmp = self._tmp + 1
     local fn = Function.new(lambda_name, args)
+    fn.is_nested = true
     local sc = node._scope
     if sc then
       fn.locals = {}

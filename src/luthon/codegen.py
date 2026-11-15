@@ -280,6 +280,7 @@ def generate(module, sourcemap=None):
         "  }",
         "end",
     ]
+    fn_map = {fn.name: fn for fn in module.functions}
     _fnames = {f.name for f in module.functions}
     # hoist class tables for dotted method names and MAKE_CLASS statements
     classes = set()
@@ -287,8 +288,9 @@ def generate(module, sourcemap=None):
     for fn in module.functions:
         if "." in fn.name:
             classes.add(fn.name.split(".", 1)[0])
-        for uv in getattr(fn, "upvalues", []) or []:
-            all_upvalues.add(uv)
+        if not getattr(fn, "is_nested", False):
+            for uv in getattr(fn, "upvalues", []) or []:
+                all_upvalues.add(uv)
         for b in fn.blocks:
             for ins in b.instrs:
                 if ins.op == "MAKE_CLASS" and ins.args:
@@ -303,22 +305,26 @@ def generate(module, sourcemap=None):
         if hoisted:
             out.append("local " + ", ".join(hoisted))
             hoisted_set = set(hoisted)
-    for fn in module.functions:
-        if "." in fn.name:
+
+    def _emit_func_lines(fn, fn_map, classes, builtins, _fnames, hoisted_set, sourcemap=None, indent="", is_anon=False, anon_res=None, base_line_offset=0):
+        lines = []
+        if is_anon:
+            lines.append(f"{indent}{anon_res} = function(" + ", ".join(fn.params) + ")")
+        elif "." in fn.name:
             prefix, meth = fn.name.split(".", 1)
             if meth in ("and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"):
-                out.append(prefix + '["' + meth + '"] = function(' + ", ".join(fn.params) + ")")
+                lines.append(f"{indent}{prefix}[\"{meth}\"] = function(" + ", ".join(fn.params) + ")")
             else:
-                out.append(prefix + "." + meth + " = function(" + ", ".join(fn.params) + ")")
+                lines.append(f"{indent}{prefix}.{meth} = function(" + ", ".join(fn.params) + ")")
         elif fn.name == "main" and getattr(fn, "is_entry_point", False):
-            out.append("local function _luthon_module_entry(" + ", ".join(fn.params) + ")")
+            lines.append(f"{indent}local function _luthon_module_entry(" + ", ".join(fn.params) + ")")
         elif fn.name == "main":
-            out.append("local function " + fn.name + "(" + ", ".join(fn.params) + ")")
+            lines.append(f"{indent}local function {fn.name}(" + ", ".join(fn.params) + ")")
         else:
-            out.append("function " + fn.name + "(" + ", ".join(fn.params) + ")")
+            lines.append(f"{indent}function {fn.name}(" + ", ".join(fn.params) + ")")
         if getattr(fn, "upvalues", None):
-            out.append("  -- upvalues: " + ", ".join(fn.upvalues))
-        builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","bytes","type","_luthon_type","callable","issubclass","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib","repr"}
+            lines.append(f"{indent}  -- upvalues: " + ", ".join(fn.upvalues))
+
         _classes = set(classes)
         uv_set = set(getattr(fn, "upvalues", []) or [])
         param_set = set(fn.params or [])
@@ -326,8 +332,8 @@ def generate(module, sourcemap=None):
             locs = []
         else:
             locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set and l not in param_set]
-        # Find tmps that belong exclusively to a try block so they can be declared
-        # inside the pcall closure instead of outer locals, preventing LuaJIT 60-upvalue limit errors.
+
+        # Find tmps that belong exclusively to a try block
         try_stack = []
         try_map = {}
         outside_tmps = set()
@@ -371,7 +377,6 @@ def generate(module, sourcemap=None):
             ins.args = exclusive
             try_exclusive_all.update(exclusive)
 
-        # Ensure register allocation is applied if variables threaten LuaJIT's 200 local limit
         total_var_count = len(locs) + len(getattr(fn, "tmps", []))
         if total_var_count > 100:
             try:
@@ -382,29 +387,46 @@ def generate(module, sourcemap=None):
                 pass
 
         tmps = [t for t in getattr(fn, "tmps", []) if t not in locs and t not in param_set and t not in _classes and t not in try_exclusive_all]
-        # Guarantee all variables are declared local to prevent global leaks,
-        # trace aborts, and variable clobbering across re-entrancy.
         allvars = locs + tmps
         if allvars:
-            # Chunk declarations in batches if large
             for chunk_start in range(0, len(allvars), 80):
                 chunk = allvars[chunk_start:chunk_start + 80]
-                out.append("  local " + ", ".join(chunk))
+                lines.append(f"{indent}  local " + ", ".join(chunk))
+
         for b in fn.blocks:
-            out.append("  ::" + b.label + "::")
+            lines.append(f"{indent}  ::{b.label}::")
             for ins in b.instrs:
-                gen_line = len(out) + 1
-                if sourcemap is not None and getattr(ins, "src_line", 0) > 0:
-                    src_file = sourcemap.file or (sourcemap.sources[0] if sourcemap.sources else "")
-                    sourcemap.add(
-                        gen_line=gen_line,
-                        gen_col=2,
-                        src_line=ins.src_line,
-                        src_col=getattr(ins, "src_col", 0),
-                        src_file=src_file,
+                if ins.op == "MAKE_FUNCTION" and ins.args and ins.args[0] in fn_map and getattr(fn_map[ins.args[0]], "is_nested", False):
+                    child_fn = fn_map[ins.args[0]]
+                    child_lines = _emit_func_lines(
+                        child_fn, fn_map, classes, builtins, _fnames, hoisted_set,
+                        sourcemap=sourcemap, indent=indent + "  ", is_anon=True, anon_res=ins.result,
+                        base_line_offset=base_line_offset + len(lines)
                     )
-                out.append("  " + _emit(ins))
-        out.append("end")
+                    lines.extend(child_lines)
+                else:
+                    gen_line = base_line_offset + len(lines) + 1
+                    if sourcemap is not None and getattr(ins, "src_line", 0) > 0:
+                        src_file = sourcemap.file or (sourcemap.sources[0] if sourcemap.sources else "")
+                        sourcemap.add(
+                            gen_line=gen_line,
+                            gen_col=len(indent) + 2,
+                            src_line=ins.src_line,
+                            src_col=getattr(ins, "src_col", 0),
+                            src_file=src_file,
+                        )
+                    lines.append(f"{indent}  " + _emit(ins))
+        lines.append(f"{indent}end")
+        return lines
+
+    for fn in module.functions:
+        if getattr(fn, "is_nested", False):
+            continue
+        fn_lines = _emit_func_lines(
+            fn, fn_map, classes, builtins, _fnames, hoisted_set,
+            sourcemap=sourcemap, base_line_offset=len(out)
+        )
+        out.extend(fn_lines)
     # Fixed-layout C-struct compilation (Phase 18)
     struct_classes = set()
     for s_name, s_cdef, s_fields in getattr(module, "native_structs", []):

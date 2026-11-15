@@ -36,6 +36,7 @@ class Function:
     upvalues: List[str] = field(default_factory=list)
     nonlocals: List[str] = field(default_factory=list)
     is_entry_point: bool = False
+    is_nested: bool = False
     param_annotations: dict = field(default_factory=dict)
     param_types: dict = field(default_factory=dict)
 
@@ -306,7 +307,9 @@ class IRLowerer:
             params = [_safe_var(a.arg) for a in node.args.args]
             if node.args.vararg:
                 params.append("...")
+            is_nested = (self._cur_fn is not None and not getattr(self._cur_fn, "is_entry_point", False))
             fn = Function(name=unique_fn_name, params=params)
+            fn.is_nested = is_nested
             fn.param_annotations = {_safe_var(a.arg): a.annotation for a in node.args.args if getattr(a, "annotation", None) is not None}
             sc = getattr(node, "_scope", None)
             if sc is not None:
@@ -373,10 +376,12 @@ class IRLowerer:
                 wrapper_type = "make_generator" if is_gen else "make_coroutine"
                 impl_name = fn.name + "_impl"
                 fn.name = impl_name
+                fn.is_nested = is_nested
                 self.module.functions.append(fn)
 
                 # Create wrapper function that returns a generator or coroutine thread
                 wrapper_fn = Function(name=unique_fn_name, params=[_safe_var(a.arg) for a in node.args.args])
+                wrapper_fn.is_nested = is_nested
                 sc = getattr(node, "_scope", None)
                 if sc is not None:
                     wrapper_fn.freevars = sorted(getattr(sc, "freevars", set()))
@@ -400,18 +405,28 @@ class IRLowerer:
                 self.module.functions.append(fn)
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
-            self._emit("STORE", [_safe_var(fn_sym), unique_fn_name])
-            if params:
+
+            if is_nested:
+                fn_tmp = self._new_tmp()
+                self._emit("MAKE_FUNCTION", [unique_fn_name], result=fn_tmp)
+                self._emit("STORE", [_safe_var(fn_sym), fn_tmp])
+                fn_ref = fn_tmp
+            else:
+                self._emit("STORE", [_safe_var(fn_sym), unique_fn_name])
+                fn_ref = unique_fn_name
+
+            clean_params = [p for p in params if p != "..."]
+            if clean_params:
                 param_tuple = self._new_tmp()
-                self._emit("MAKE_TUPLE", [f'"{p}"' for p in params if p != "..."], result=param_tuple)
-                self._emit("CALL", ["_luthon_reg_fn", unique_fn_name, param_tuple])
+                self._emit("MAKE_TUPLE", [f'"{p}"' for p in clean_params], result=param_tuple)
+                self._emit("CALL", ["_luthon_reg_fn", fn_ref, param_tuple])
             # Apply decorators (innermost first)
             for dec in reversed(node.decorator_list):
                 dec_tmp = self.lower_expr(dec)
-                fn_tmp = self._new_tmp()
-                self._emit("LOAD", [_safe_var(fn_sym)], result=fn_tmp)
+                dec_target = self._new_tmp()
+                self._emit("LOAD", [_safe_var(fn_sym)], result=dec_target)
                 result_tmp = self._new_tmp()
-                self._emit("CALL", [dec_tmp, fn_tmp], result=result_tmp)
+                self._emit("CALL", [dec_tmp, dec_target], result=result_tmp)
                 self._emit("STORE", [_safe_var(fn_sym), result_tmp])
         elif isinstance(node, ast.Import):
             for alias in node.names:
@@ -601,17 +616,29 @@ class IRLowerer:
                             self._emit("MAKE_TUPLE", [f'"{p}"' for p in init_params], result=cls_param_tuple)
                             self._emit("CALL", ["_luthon_reg_fn", node.name, cls_param_tuple])
 
-                    # Check for @property decorator on class method
-                    is_prop = any((isinstance(d, ast.Name) and d.id == "property") for d in stmt.decorator_list)
-                    if is_prop:
-                        # Wrap as property object
-                        prop_tmp = self._new_tmp()
-                        prop_ref = f'{node.name}["{stmt.name}"]' if stmt.name in LUA_RESERVED_KEYWORDS else f"{node.name}.{stmt.name}"
-                        self._emit("CALL", ["property", prop_ref], result=prop_tmp)
-                        if stmt.name in LUA_RESERVED_KEYWORDS:
-                            self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
+                    # Apply decorators on class method (innermost first)
+                    for dec in reversed(stmt.decorator_list):
+                        if isinstance(dec, ast.Name) and dec.id == "property":
+                            prop_tmp = self._new_tmp()
+                            prop_ref = f'{node.name}["{stmt.name}"]' if stmt.name in LUA_RESERVED_KEYWORDS else f"{node.name}.{stmt.name}"
+                            self._emit("CALL", ["property", prop_ref], result=prop_tmp)
+                            if stmt.name in LUA_RESERVED_KEYWORDS:
+                                self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
+                            else:
+                                self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
                         else:
-                            self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
+                            dec_tmp = self.lower_expr(dec)
+                            m_tmp = self._new_tmp()
+                            if stmt.name in LUA_RESERVED_KEYWORDS:
+                                self._emit("SUBSCR", [node.name, f'"{stmt.name}"'], result=m_tmp)
+                            else:
+                                self._emit("GET_ATTR", [node.name, stmt.name], result=m_tmp)
+                            res_tmp = self._new_tmp()
+                            self._emit("CALL", [dec_tmp, m_tmp], result=res_tmp)
+                            if stmt.name in LUA_RESERVED_KEYWORDS:
+                                self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', res_tmp])
+                            else:
+                                self._emit("SET_ATTR", [node.name, stmt.name, res_tmp])
             self._cur_class = prev_cur_class
 
             # Auto-generate __init__ if dataclass and not defined
@@ -1282,6 +1309,7 @@ class IRLowerer:
             lambda_name = "_lambda_%d" % self._tmp
             self._tmp += 1
             fn = Function(name=lambda_name, params=args)
+            fn.is_nested = True
             sc = getattr(node, "_scope", None)
             if sc is not None:
                 fn.locals = sorted(_safe_var(k) for k in sc.locals.keys())

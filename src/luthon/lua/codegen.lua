@@ -277,11 +277,18 @@ function M.generate(module, skip_prelude, sourcemap)
   local builtins_set = {}
   for _, b in ipairs(builtins) do builtins_set[b] = true end
 
+  local fn_map = {}
+  for _, fn in ipairs(module.functions or {}) do
+    fn_map[fn.name] = fn
+  end
+
   -- Hoist module-level and cross-function locals that are captured as upvalues
   local all_upvalues = {}
   for _, fn in ipairs(module.functions or {}) do
-    for _, uv in ipairs(fn.upvalues or {}) do
-      all_upvalues[uv] = true
+    if not fn.is_nested then
+      for _, uv in ipairs(fn.upvalues or {}) do
+        all_upvalues[uv] = true
+      end
     end
   end
   local hoisted_set = {}
@@ -297,28 +304,31 @@ function M.generate(module, skip_prelude, sourcemap)
     table.insert(out, "local " .. table.concat(hoisted, ", "))
   end
 
-  -- Emit functions
-  for _, fn in ipairs(module.functions or {}) do
-    local dot = fn.name:find("%.")
-    if dot then
-      local prefix = fn.name:sub(1, dot - 1)
-      local meth = fn.name:sub(dot + 1)
-      local kw = {["and"]=true,["break"]=true,["do"]=true,["else"]=true,["elseif"]=true,["end"]=true,["false"]=true,["for"]=true,["function"]=true,["goto"]=true,["if"]=true,["in"]=true,["local"]=true,["nil"]=true,["not"]=true,["or"]=true,["repeat"]=true,["return"]=true,["then"]=true,["true"]=true,["until"]=true,["while"]=true}
-      if kw[meth] then
-        table.insert(out, prefix .. "[\"" .. meth .. "\"] = function(" .. table.concat(fn.params, ", ") .. ")")
-      else
-        table.insert(out, prefix .. "." .. meth .. " = function(" .. table.concat(fn.params, ", ") .. ")")
-      end
-    elseif fn.name == "main" and fn.is_entry_point then
-      -- Module entry point: use a distinct name to avoid recursion with user-defined main()
-      table.insert(out, "local function _luthon_module_entry(" .. table.concat(fn.params, ", ") .. ")")
-    elseif fn.name == "main" then
-      table.insert(out, "local function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
+  local function emit_func_lines(fn, indent, is_anon, anon_res)
+    if is_anon then
+      table.insert(out, indent .. anon_res .. " = function(" .. table.concat(fn.params, ", ") .. ")")
     else
-      table.insert(out, "function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
+      local dot = fn.name:find("%.")
+      if dot then
+        local prefix = fn.name:sub(1, dot - 1)
+        local meth = fn.name:sub(dot + 1)
+        local kw = {["and"]=true,["break"]=true,["do"]=true,["else"]=true,["elseif"]=true,["end"]=true,["false"]=true,["for"]=true,["function"]=true,["goto"]=true,["if"]=true,["in"]=true,["local"]=true,["nil"]=true,["not"]=true,["or"]=true,["repeat"]=true,["return"]=true,["then"]=true,["true"]=true,["until"]=true,["while"]=true}
+        if kw[meth] then
+          table.insert(out, indent .. prefix .. "[\"" .. meth .. "\"] = function(" .. table.concat(fn.params, ", ") .. ")")
+        else
+          table.insert(out, indent .. prefix .. "." .. meth .. " = function(" .. table.concat(fn.params, ", ") .. ")")
+        end
+      elseif fn.name == "main" and fn.is_entry_point then
+        -- Module entry point: use a distinct name to avoid recursion with user-defined main()
+        table.insert(out, indent .. "local function _luthon_module_entry(" .. table.concat(fn.params, ", ") .. ")")
+      elseif fn.name == "main" then
+        table.insert(out, indent .. "local function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
+      else
+        table.insert(out, indent .. "function " .. fn.name .. "(" .. table.concat(fn.params, ", ") .. ")")
+      end
     end
     if fn.upvalues and #fn.upvalues > 0 then
-      table.insert(out, "  -- upvalues: " .. table.concat(fn.upvalues, ", "))
+      table.insert(out, indent .. "  -- upvalues: " .. table.concat(fn.upvalues, ", "))
     end
 
     -- Emit locals (excluding builtins and function names)
@@ -409,24 +419,36 @@ function M.generate(module, skip_prelude, sourcemap)
       for _, l in ipairs(locs) do table.insert(allvars, l) end
       for _, t in ipairs(tmps) do table.insert(allvars, t) end
       if #allvars > 0 then
-        table.insert(out, "  local " .. table.concat(allvars, ", "))
+        table.insert(out, indent .. "  local " .. table.concat(allvars, ", "))
       end
     elseif #locs > 0 then
-      table.insert(out, "  local " .. table.concat(locs, ", "))
+      table.insert(out, indent .. "  local " .. table.concat(locs, ", "))
     end
 
     -- Emit blocks
     for _, b in ipairs(fn.blocks or {}) do
-      table.insert(out, "  ::" .. b.label .. "::")
+      table.insert(out, indent .. "  ::" .. b.label .. "::")
       for _, ins in ipairs(b.instrs or {}) do
-        if sourcemap and ins.lineno and ins.lineno > 0 then
-          local src_file = sourcemap.file or (sourcemap.sources and sourcemap.sources[1] or "")
-          sourcemap:add(#out + 1, 2, ins.lineno, ins.col_offset or 0, src_file)
+        if ins.op == "MAKE_FUNCTION" and ins.args and fn_map[ins.args[1]] and fn_map[ins.args[1]].is_nested then
+          local child_fn = fn_map[ins.args[1]]
+          emit_func_lines(child_fn, indent .. "  ", true, ins.result)
+        else
+          if sourcemap and ins.lineno and ins.lineno > 0 then
+            local src_file = sourcemap.file or (sourcemap.sources and sourcemap.sources[1] or "")
+            sourcemap:add(#out + 1, #indent + 2, ins.lineno, ins.col_offset or 0, src_file)
+          end
+          table.insert(out, indent .. "  " .. _emit(ins))
         end
-        table.insert(out, "  " .. _emit(ins))
       end
     end
-    table.insert(out, "end")
+    table.insert(out, indent .. "end")
+  end
+
+  -- Emit functions
+  for _, fn in ipairs(module.functions or {}) do
+    if not fn.is_nested then
+      emit_func_lines(fn, "", false, nil)
+    end
   end
 
   -- Set up class metatables for __call (constructor emulation)
