@@ -405,6 +405,7 @@ local _dict_methods = {
   end,
 }
 local _dict_mt = {
+  __dict__ = true,
   __index = function(t, k)
     return _dict_methods[k]
   end
@@ -514,6 +515,31 @@ function _luthon_call_kw(fn, kw_table, ...)
   return fn(unpack(args))
 end
 
+function _luthon_call_starred(fn, args, kw)
+  local unpack_fn = table.unpack or unpack
+  if kw ~= nil then
+    return _luthon_call_kw(fn, kw, unpack_fn(args))
+  else
+    return fn(unpack_fn(args))
+  end
+end
+
+function _tuple_pack(...)
+  return setmetatable({...}, _tuple_mt or {})
+end
+
+function _seq_append(seq, val)
+  seq[#seq + 1] = val
+end
+
+function _seq_extend(seq, other)
+  if type(other) == "table" then
+    for i = 1, #other do
+      seq[#seq + 1] = other[i]
+    end
+  end
+end
+
 function __luthon_set(t, i, v)
   if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
     t[i] = v
@@ -613,6 +639,27 @@ function _luthon_cmp(op, a, b)
       if (op == ">=" or op == "ge") and type(cls.__ge__) == "function" then return cls.__ge__(a, b) end
       if (op == "==" or op == "eq") and type(cls.__eq__) == "function" then return cls.__eq__(a, b) end
       if (op == "~=" or op == "ne") and type(cls.__ne__) == "function" then return cls.__ne__(a, b) end
+    end
+    if a == b then
+      if op == "==" or op == "eq" then return true end
+      if op == "~=" or op == "ne" or op == "!=" then return false end
+    end
+    local mtb = getmetatable(b)
+    local is_a_dict = (mta and (mta.__dict__ == true or (_dict_methods ~= nil and mta.__index == _dict_methods))) or rawget(a, "_dict") or (mta ~= nil and ((_dict_mt ~= nil and mta == _dict_mt) or (_G._dict_mt ~= nil and mta == _G._dict_mt)))
+    local is_b_dict = (mtb and (mtb.__dict__ == true or (_dict_methods ~= nil and mtb.__index == _dict_methods))) or rawget(b, "_dict") or (mtb ~= nil and ((_dict_mt ~= nil and mtb == _dict_mt) or (_G._dict_mt ~= nil and mtb == _G._dict_mt)))
+    if is_a_dict or is_b_dict then
+      if op == "==" or op == "eq" then
+        if not (is_a_dict and is_b_dict) then return false end
+        for k, v in pairs(a) do
+          if not _luthon_cmp("==", v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+          if a[k] == nil then return false end
+        end
+        return true
+      elseif op == "~=" or op == "ne" or op == "!=" then
+        return not _luthon_cmp("==", a, b)
+      end
     end
     local na, nb = #a, #b
     local min_n = math.min(na, nb)
@@ -1094,7 +1141,8 @@ local _dict_methods = {
     return r
   end,
 }
-local _dict_mt = {__index = _dict_methods}
+local _dict_mt = {__dict__ = true, __index = _dict_methods}
+_G._dict_mt = _dict_mt
 
 function dict(t)
   local d = setmetatable({}, _dict_mt)
@@ -1249,6 +1297,42 @@ for k, v in pairs(_str_methods) do
     string[k] = v
   end
 end
+local function _str_format_map(fmt, map)
+  return (fmt:gsub("%%%(([%a%w_]+)%)([-+0 #]*%d*%.?%d*[a-zA-Z%%])", function(k, spec)
+    local v = map[k]
+    if v == nil and type(map) == "table" and map[k] == nil then
+      error("KeyError: " .. tostring(k))
+    end
+    if spec == "s" then
+      return tostring(v)
+    else
+      return string.format("%" .. spec, v)
+    end
+  end))
+end
+
+local function _str_mod(fmt, args)
+  if type(fmt) ~= "string" then
+    error("TypeError: unsupported operand type(s) for %")
+  end
+  if type(args) == "table" then
+    if fmt:find("%%%([%a%w_]+%)") then
+      return _str_format_map(fmt, args)
+    end
+    local t = {}
+    for i = 1, #args do
+      t[i] = args[i]
+    end
+    if #t > 0 then
+      return string.format(fmt, unpack(t))
+    else
+      return string.format(fmt, args)
+    end
+  else
+    return string.format(fmt, args)
+  end
+end
+
 debug.setmetatable("", {
   __index = string,
   __add = function(a, b) return tostring(a) .. tostring(b) end,
@@ -1259,7 +1343,8 @@ debug.setmetatable("", {
       return string.rep(b, a)
     end
     error("TypeError: can only multiply string by integer")
-  end
+  end,
+  __mod = _str_mod
 })
 
 local _fn_attrs = {}
@@ -1696,26 +1781,39 @@ function classmethod(f)
 end
 
 function super(cls, obj)
-  local base = cls and (cls.__base__ or (getmetatable(cls) and getmetatable(cls).__index))
+  local base = cls and cls.__base__
   local proxy = {}
   local mt = {
     __index = function(_, k)
       local target = base
-      while target do
+      local visited = {}
+      while target and type(target) == "table" and not visited[target] do
+        visited[target] = true
         if target[k] ~= nil then
           local m = target[k]
           if type(m) == "function" then
-            return function(first_arg, ...)
-              if first_arg == proxy or first_arg == obj then
+            local wrapper = function(first_arg, ...)
+              if first_arg == proxy then
+                local arg1 = ...
+                if arg1 == obj then
+                  return m(...)
+                else
+                  return m(obj, ...)
+                end
+              elseif first_arg == obj then
                 return m(obj, ...)
               else
                 return m(obj, first_arg, ...)
               end
             end
+            if _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[m] then
+              _G.__LUTHON_FN_PARAMS[wrapper] = _G.__LUTHON_FN_PARAMS[m]
+            end
+            return wrapper
           end
           return m
         end
-        target = target.__base__ or (getmetatable(target) and getmetatable(target).__index)
+        target = target.__base__
       end
       return function(...) end
     end
@@ -1814,7 +1912,110 @@ end
 
 types = types or {}
 types.ModuleType = types.ModuleType or { __name__ = "ModuleType" }
-object = object or { __name__ = "object" }
+object = object or {}
+object.__name__ = "object"
+object.__index = object
+object.__new__ = function(cls, ...)
+  local mt = cls and cls.__instance_mt or {__index = cls}
+  return setmetatable({__class__ = cls}, mt)
+end
+object.__init__ = function(self, ...) end
+object.__str__ = function(self)
+  local cls = rawget(self, "__class__")
+  local name = cls and (cls.__name__ or rawget(cls, "__name__")) or "object"
+  return "<" .. tostring(name) .. " object>"
+end
+object.__repr__ = object.__str__
+setmetatable(object, {
+  __call = function(cls, ...)
+    local self = setmetatable({__class__ = cls}, cls.__instance_mt or {__index = cls})
+    if cls.__init__ then cls.__init__(self, ...) end
+    return self
+  end
+})
+
+local _exc_inst_mt = {
+  __tostring = function(e)
+    local s = rawget(e, "__str__") or (e.__class__ and e.__class__.__str__)
+    if type(s) == "function" then return s(e) end
+    if e.message ~= nil then return tostring(e.message) end
+    if e.__msg ~= nil then return tostring(e.__msg) end
+    if e.args and #e.args == 1 then return tostring(e.args[1]) end
+    return (e.__class__ and e.__class__.__name__) or e.__type or "Exception"
+  end
+}
+
+Exception = Exception or {}
+Exception.__name__ = "Exception"
+Exception.__type = "Exception"
+Exception.__base__ = object
+Exception.__index = Exception
+Exception.__new__ = object.__new__
+Exception.__init__ = function(self, msg, ...)
+  if type(self) == "table" then
+    self.message = msg
+    self.__msg = msg
+    self.args = setmetatable({msg, ...}, _tuple_mt or {})
+  end
+end
+Exception.__str__ = _exc_inst_mt.__tostring
+Exception.__repr__ = function(self)
+  local name = (self.__class__ and self.__class__.__name__) or self.__type or "Exception"
+  local m = self.message or self.__msg
+  return name .. "(" .. (m and string.format("%q", tostring(m)) or "") .. ")"
+end
+Exception.__instance_mt = {
+  __index = Exception,
+  __tostring = _exc_inst_mt.__tostring
+}
+setmetatable(Exception, {
+  __index = object,
+  __call = function(c, msg, ...)
+    local inst = setmetatable({__class__ = c, __type = c.__name or "Exception"}, c.__instance_mt or _exc_inst_mt)
+    if c.__init__ then c.__init__(inst, msg, ...) end
+    return inst
+  end
+})
+_G.Exception = Exception
+if _G.__LUTHON_FN_PARAMS then
+  _G.__LUTHON_FN_PARAMS[Exception.__init__] = setmetatable({"self", "message"}, _tuple_mt or {})
+  _G.__LUTHON_FN_PARAMS[Exception] = setmetatable({"message"}, _tuple_mt or {})
+end
+
+local _STD_EXCEPTIONS = {
+  "BaseException", "ValueError", "TypeError", "AssertionError",
+  "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+  "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
+  "ImportError"
+}
+
+for _, cls_name in ipairs(_STD_EXCEPTIONS) do
+  local exc = _G[cls_name] or {}
+  exc.__name__ = cls_name
+  exc.__type = cls_name
+  exc.__base__ = Exception
+  exc.__index = exc
+  exc.__new__ = object.__new__
+  exc.__init__ = Exception.__init__
+  exc.__str__ = Exception.__str__
+  exc.__repr__ = Exception.__repr__
+  exc.__instance_mt = {
+    __index = exc,
+    __tostring = _exc_inst_mt.__tostring
+  }
+  setmetatable(exc, {
+    __index = Exception,
+    __call = function(c, msg, ...)
+      local inst = setmetatable({__class__ = c, __type = c.__name or cls_name}, c.__instance_mt or _exc_inst_mt)
+      if c.__init__ then c.__init__(inst, msg, ...) end
+      return inst
+    end
+  })
+  _G[cls_name] = exc
+  if _G.__LUTHON_FN_PARAMS then
+    _G.__LUTHON_FN_PARAMS[exc] = setmetatable({"message"}, _tuple_mt or {})
+  end
+end
 _G["exec"] = _G["exec"] or function(...) end
 __name__ = __name__ or "__main__"
 os.path = os.path or {}
