@@ -493,6 +493,12 @@ function _luthon_reg_fn(fn, params)
 end
 
 function _luthon_call_kw(fn, kw_table, ...)
+  if fn == nil then
+    return function(...)
+      local args = { ... }
+      return args[1]
+    end
+  end
   local param_names = _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[fn]
   if param_names then
     local pos_args = { ... }
@@ -1917,6 +1923,33 @@ end
 
 types = types or {}
 types.ModuleType = types.ModuleType or { __name__ = "ModuleType" }
+types.MappingProxyType = function(d)
+  local proxy = {}
+  return setmetatable(proxy, {
+    __index = d,
+    __newindex = function(t, k, v)
+      error("TypeError: 'mappingproxy' object does not support item assignment", 2)
+    end,
+    __len = function() return (type(d) == "table" and (d.__len and d:__len() or #d)) or 0 end,
+    __tostring = function() return "mappingproxy(" .. tostring(d) .. ")" end,
+    __class__ = { __name__ = "mappingproxy" }
+  })
+end
+types.SimpleNamespace = function(kwargs)
+  local ns = kwargs or {}
+  return setmetatable(ns, {
+    __tostring = function()
+      local parts = {}
+      for k, v in pairs(ns) do
+        if type(k) == "string" and not tostring(k):match("^__") then
+          table.insert(parts, tostring(k) .. "=" .. tostring(v))
+        end
+      end
+      return "namespace(" .. table.concat(parts, ", ") .. ")"
+    end,
+    __class__ = { __name__ = "SimpleNamespace" }
+  })
+end
 object = object or {}
 object.__name__ = "object"
 object.__index = object
