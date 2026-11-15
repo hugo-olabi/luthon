@@ -247,6 +247,74 @@ print("BLANK_LINES_PASSED")
 """
         self._run_both(py_code, "BLANK_LINES_PASSED")
 
+    def test_nested_closures_multiple_instances(self):
+        """Test nested functions and closures with multiple active instances."""
+        py_code = """
+def make_adder(x):
+    def adder(y):
+        return x + y
+    return adder
+
+a1 = make_adder(10)
+a2 = make_adder(20)
+
+assert a1(1) == 11
+assert a2(1) == 21
+assert a1(5) == 15
+assert a2(5) == 25
+print("CLOSURE_INSTANCES_PASSED")
+"""
+        self._run_both(py_code, "CLOSURE_INSTANCES_PASSED")
+
+    def test_nested_proxy_decorators_and_class_methods(self):
+        """Test multi-layer nested proxy decorators on functions and class methods."""
+        py_code = """
+def proxy(proxy_func):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            return proxy_func(func, *args, **kwargs)
+        return wrapper
+    return decorator
+
+def negate(func, *args, **kwargs):
+    return not func(*args, **kwargs)
+
+@proxy(negate)
+def something(_bool):
+    return _bool
+
+@proxy(negate)
+@proxy(negate)
+def double_nothing(_bool):
+    return _bool
+
+assert something(False) == True
+assert something(True) == False
+assert double_nothing(True) == True
+assert double_nothing(False) == False
+
+def negate_num(func, *args, **kwargs):
+    return -func(*args, **kwargs)
+
+class Calc:
+    def __init__(self, base):
+        self.base = base
+
+    @proxy(negate_num)
+    def diff(self, n):
+        return self.base - n
+
+    @proxy(negate_num)
+    def no_diff(self, n):
+        return self.diff(n)
+
+c = Calc(5)
+assert c.diff(1) == -4
+assert c.no_diff(1) == 4
+print("PROXY_DECORATORS_PASSED")
+"""
+        self._run_both(py_code, "PROXY_DECORATORS_PASSED")
+
 
 if __name__ == "__main__":
     unittest.main()
