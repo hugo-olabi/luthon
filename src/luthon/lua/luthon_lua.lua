@@ -18,7 +18,7 @@ function M.transpile_file(source_path)
   f:close()
 
   local tree = parser.parse(source)
-  local scope = semantic.analyze(source)
+  local scope = semantic.analyze(tree)
   local lowerer = ir.IRLowerer.new()
   local module = lowerer:lower_module(tree, scope)
   local lua = codegen.generate(module, true)

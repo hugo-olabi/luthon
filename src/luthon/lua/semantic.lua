@@ -106,9 +106,22 @@ function SemanticAnalyzer:_module()
   return s
 end
 
-function SemanticAnalyzer:analyze(source)
-  local parser = dofile("src/luthon/lua/parser.lua")
-local tree = parser.parse(source)
+function SemanticAnalyzer:analyze(source_or_tree)
+  local tree
+  if type(source_or_tree) == "table" then
+    tree = source_or_tree
+  else
+    local parser = nil
+    for _, mod in ipairs({"parser", "src/luthon/lua/parser", "luthon.lua.parser"}) do
+      local ok, p = pcall(require, mod)
+      if ok and p then parser = p; break end
+    end
+    if not parser then
+      local ok, p = pcall(dofile, "src/luthon/lua/parser.lua")
+      if ok then parser = p end
+    end
+    tree = parser.parse(source_or_tree)
+  end
   self:visit(tree)
   self:_resolve_up(self.root)
   return self.root
@@ -450,9 +463,20 @@ function SemanticAnalyzer:_resolve(name, node)
   local first = true
   while s ~= nil do
     if s.locals[name] then
-      if s ~= scope then
-        scope.freevars[name] = true
-        s.cellvars[name] = true
+      if s ~= scope and s.kind ~= "module" then
+        if scope.kind ~= "comprehension" then
+          scope.freevars[name] = true
+          s.cellvars[name] = true
+        else
+          local enc = scope.parent
+          while enc ~= nil and enc.kind == "comprehension" do
+            enc = enc.parent
+          end
+          if enc ~= nil and enc ~= s and enc.kind ~= "module" then
+            enc.freevars[name] = true
+            s.cellvars[name] = true
+          end
+        end
       end
       return s.locals[name]
     end
@@ -505,14 +529,19 @@ function SemanticAnalyzer:_resolve_up(scope)
   for _, child in ipairs(scope.children or {}) do
     self:_resolve_up(child)
     for fv in pairs(child.freevars or {}) do
-      if scope.locals[fv] then
+      if scope.locals[fv] and scope.kind ~= "module" then
         scope.cellvars[fv] = true
+      elseif not scope.locals[fv] and scope.kind ~= "module" then
+        scope.freevars[fv] = true
       end
-    end  end
-  if scope.parent ~= nil then
+    end
+  end
+  if scope.parent ~= nil and scope.parent.kind ~= "module" then
     for fv in pairs(scope.freevars or {}) do
       if scope.parent.locals[fv] then
         scope.parent.cellvars[fv] = true
+      elseif not scope.parent.locals[fv] and scope.parent.kind ~= "module" then
+        scope.parent.freevars[fv] = true
       end
     end
   end
