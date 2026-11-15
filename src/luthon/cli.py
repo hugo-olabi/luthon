@@ -154,8 +154,50 @@ def run_file(
             pass
 
 
+def run_code(
+    code: str,
+    script_args: list[str] | None = None,
+    use_ir: bool = True,
+    optimize: bool = False,
+    profile: bool = False,
+    dump_traces: bool = False,
+    pure: bool = False,
+    dump_vectorization: bool = False,
+) -> int:
+    """Compiles and runs a code string directly under LuaJIT."""
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp_py:
+        tmp_py.write(code)
+        tmp_py_path = Path(tmp_py.name)
+    try:
+        return run_file(
+            input_path=tmp_py_path,
+            script_args=script_args,
+            use_ir=use_ir,
+            optimize=optimize,
+            no_cache=True,
+            profile=profile,
+            dump_traces=dump_traces,
+            pure=pure,
+            dump_vectorization=dump_vectorization,
+        )
+    finally:
+        try:
+            if tmp_py_path.exists():
+                tmp_py_path.unlink()
+        except OSError:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
+
+    # Direct -c code execution check: `luthon -c "print(1)"`
+    if raw_argv and raw_argv[0] == "-c":
+        code = raw_argv[1] if len(raw_argv) > 1 else ""
+        script_args = raw_argv[2:] if len(raw_argv) > 2 else []
+        is_pure = "--pure" in script_args
+        filtered_args = [a for a in script_args if a != "--pure"]
+        return run_code(code=code, script_args=filtered_args, pure=is_pure)
 
     # Direct execution check: if first argument is a .py file or an existing file (not a known command or option flag)
     # e.g.: `luthon ./main.py` or `luthon script.py arg1 arg2` or `luthon script.py --pure`
@@ -202,9 +244,10 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("venv", help="Create a local isolated Luthon virtual environment")
     v.add_argument("env_dir", nargs="?", default=".luthon_env", help="Directory for the environment (default: .luthon_env)")
 
-    # run command: `luthon run <file.py> [args...]`
+    # run command: `luthon run <file.py> [args...]` or `luthon run -c <code> [args...]`
     r = sub.add_parser("run", help="Compile and run a Python file under LuaJIT")
-    r.add_argument("input", help="Input .py file")
+    r.add_argument("input", nargs="?", default=None, help="Input .py file")
+    r.add_argument("-c", "--code", default=None, help="Program passed in as string")
     r.add_argument("args", nargs=argparse.REMAINDER, help="Arguments passed to the script")
     r.add_argument("--ir", action="store_true", default=True, help="Use IR pipeline (default: True)")
     r.add_argument("--no-ir", dest="ir", action="store_false", help="Use direct AST visitor pipeline")
@@ -257,6 +300,19 @@ def main(argv: list[str] | None = None) -> int:
     args, extra = parser.parse_known_args(raw_argv)
 
     if args.command == "run":
+        if args.code is not None:
+            return run_code(
+                code=args.code,
+                script_args=(args.args or []) + extra,
+                use_ir=args.ir,
+                optimize=args.optimize,
+                profile=args.profile,
+                dump_traces=args.dump_traces,
+                pure=getattr(args, "pure", False),
+                dump_vectorization=getattr(args, "dump_vectorization", False),
+            )
+        if not args.input:
+            parser.error("either input file or -c <code> must be specified")
         inp = Path(args.input)
         script_args = (args.args or []) + extra
         return run_file(
