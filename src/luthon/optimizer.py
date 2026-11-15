@@ -43,6 +43,13 @@ _CMP_EVAL = {
     "ge": lambda a, b: a >= b,
 }
 
+def _is_tmp(s: Any) -> bool:
+    if not isinstance(s, str):
+        return False
+    if len(s) >= 3 and s[0] == "_" and s[1] in ("t", "r", "v"):
+        return s[2:].isdigit()
+    return False
+
 # Operations with no side effects whose results can be dropped if unused
 _PURE_OPS = {"CONST", "LOAD", "BINOP", "UNOP", "CMP", "GET_ATTR"}
 
@@ -160,9 +167,9 @@ def copy_propagate_function(fn: Function) -> bool:
             ins.args = new_args
 
             # Check for LOAD: _t2 = _t1
-            if ins.op == "LOAD" and ins.result and ins.result.startswith("_t"):
+            if ins.op == "LOAD" and ins.result and _is_tmp(ins.result):
                 src = ins.args[0]
-                if isinstance(src, str) and (src.startswith("_t") or src in aliases):
+                if _is_tmp(src) or (isinstance(src, str) and src in aliases):
                     target = aliases.get(src, src)
                     aliases[ins.result] = target
                     # Keep instruction for now; DCE will remove if unused
@@ -253,7 +260,7 @@ def eliminate_dead_code_function(fn: Function) -> bool:
     for block in fn.blocks:
         surviving: List[Instr] = []
         for ins in block.instrs:
-            if ins.op in _PURE_OPS and ins.result and ins.result.startswith("_t"):
+            if ins.op in _PURE_OPS and ins.result and _is_tmp(ins.result):
                 if ins.result not in used_vars:
                     changed = True
                     continue  # drop dead instruction
@@ -264,10 +271,10 @@ def eliminate_dead_code_function(fn: Function) -> bool:
     active_tmps = set()
     for block in fn.blocks:
         for ins in block.instrs:
-            if ins.result and ins.result.startswith("_t"):
+            if ins.result and _is_tmp(ins.result):
                 active_tmps.add(ins.result)
             for a in ins.args:
-                if isinstance(a, str) and a.startswith("_t"):
+                if _is_tmp(a):
                     active_tmps.add(a)
     fn.tmps = [t for t in fn.tmps if t in active_tmps]
 
@@ -617,7 +624,7 @@ def loop_invariant_code_motion_function(fn: Function) -> bool:
                     continue
                 retained: List[Instr] = []
                 for ins in b.instrs:
-                    if ins.op in hoist_ops and ins.result and ins.result.startswith("_t"):
+                    if ins.op in hoist_ops and ins.result and _is_tmp(ins.result):
                         # Check whether all input operands are loop-invariant (not in loop_defs)
                         is_invariant = True
                         if ins.op == "LOAD" and ins.args:
@@ -809,10 +816,10 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
     # Also scan instructions for any undeclared _t... or _r... temporaries
     for b in fn.blocks:
         for ins in b.instrs:
-            if ins.result and (ins.result.startswith("_t") or ins.result.startswith("_r")) and ins.result not in protected:
+            if ins.result and _is_tmp(ins.result) and ins.result not in protected:
                 poolable.add(ins.result)
             for a in ins.args:
-                if isinstance(a, str) and (a.startswith("_t") or a.startswith("_r")) and a not in protected:
+                if _is_tmp(a) and a not in protected:
                     poolable.add(a)
 
     if not poolable:
