@@ -128,5 +128,125 @@ print("MATCH_SEQUENCE_GUARD_PASSED")
         self.assertIn("MATCH_SEQUENCE_GUARD_PASSED", proc.stdout)
 
 
+    def _run_pure_lua(self, py_code: str) -> subprocess.CompletedProcess:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as py_f:
+            py_f.write(py_code)
+            py_path = Path(py_f.name)
+        lua_path = py_path.with_suffix(".lua")
+        try:
+            trans_res = subprocess.run(
+                ["luajit", "src/luthon/lua/luthon_lua.lua", str(py_path), str(lua_path)],
+                capture_output=True, text=True
+            )
+            assert trans_res.returncode == 0, f"Pure Lua transpile failed: {trans_res.stderr}"
+            return subprocess.run(["luajit", str(lua_path)], capture_output=True, text=True)
+        finally:
+            if py_path.exists():
+                py_path.unlink()
+            if lua_path.exists():
+                lua_path.unlink()
+
+    def _run_both(self, py_code: str, expected_marker: str):
+        cp_proc = self._run_lua(py_code)
+        self.assertEqual(cp_proc.returncode, 0, f"CPython pipeline failed: {cp_proc.stderr}")
+        self.assertIn(expected_marker, cp_proc.stdout)
+
+        lua_proc = self._run_pure_lua(py_code)
+        self.assertEqual(lua_proc.returncode, 0, f"Pure-Lua pipeline failed: {lua_proc.stderr}")
+        self.assertIn(expected_marker, lua_proc.stdout)
+
+    def test_chained_assignment(self):
+        """Test chained assignment a = b = c = value in both pipelines."""
+        py_code = """
+a = b = c = 42
+assert a == 42
+assert b == 42
+assert c == 42
+d = {}
+d['x'] = d['y'] = 'chained'
+assert d['x'] == 'chained'
+assert d['y'] == 'chained'
+print("CHAINED_ASSIGN_PASSED")
+"""
+        self._run_both(py_code, "CHAINED_ASSIGN_PASSED")
+
+    def test_extended_iterable_unpacking(self):
+        """Test PEP 3132 extended unpacking and nested target unpacking."""
+        py_code = """
+(first, second), *rest = [(1, 2), 3, 4, 5]
+assert first == 1
+assert second == 2
+assert rest == [3, 4, 5]
+print("EXTENDED_UNPACKING_PASSED")
+"""
+        self._run_both(py_code, "EXTENDED_UNPACKING_PASSED")
+
+    def test_lambda_varargs_and_kwargs(self):
+        """Test lambda functions with *args and bare colons."""
+        py_code = """
+f = lambda *args: len(args)
+assert f() == 0
+assert f(1, 2, 3) == 3
+g = lambda: 42
+assert g() == 42
+print("LAMBDA_VARARGS_PASSED")
+"""
+        self._run_both(py_code, "LAMBDA_VARARGS_PASSED")
+
+    def test_implicit_string_concatenation_across_lines(self):
+        """Test implicit string concatenation of f-strings and string literals."""
+        py_code = """
+val = "test"
+s = (
+    f"header {val}"
+    " extra1"
+    " extra2"
+)
+assert s == "header test extra1 extra2", f"Got {s}"
+print("IMPLICIT_CONCAT_PASSED")
+"""
+        self._run_both(py_code, "IMPLICIT_CONCAT_PASSED")
+
+    def test_augmented_bitshift_assignment(self):
+        """Test >>= and <<= augmented bitwise shifts."""
+        py_code = """
+x = 64
+x >>= 2
+assert x == 16, f"Expected 16, got {x}"
+x <<= 3
+assert x == 128, f"Expected 128, got {x}"
+print("AUG_BITSHIFT_PASSED")
+"""
+        self._run_both(py_code, "AUG_BITSHIFT_PASSED")
+
+    def test_raise_from_none(self):
+        """Test raise ... from None syntax."""
+        py_code = """
+caught = False
+try:
+    raise ValueError("custom error") from None
+except ValueError:
+    caught = True
+assert caught
+print("RAISE_FROM_PASSED")
+"""
+        self._run_both(py_code, "RAISE_FROM_PASSED")
+
+    def test_blank_lines_in_block_headers(self):
+        """Test blank lines between colon headers and indented suites."""
+        py_code = """
+x = 10
+if x > 5:
+
+    y = 20
+else:
+
+    y = 30
+assert y == 20
+print("BLANK_LINES_PASSED")
+"""
+        self._run_both(py_code, "BLANK_LINES_PASSED")
+
+
 if __name__ == "__main__":
     unittest.main()
