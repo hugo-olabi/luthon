@@ -343,6 +343,8 @@ class IRLowerer:
             fn.nonlocals = sorted(fn_nonlocals)
             prev_fn = self._cur_fn
             prev_block = self._cur_block
+            prev_try_depth = self._try_depth
+            self._try_depth = 0
             self._cur_fn = fn
             b = Block(label="entry")
             fn.blocks.append(b)
@@ -426,6 +428,7 @@ class IRLowerer:
                 self.module.functions.append(fn)
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
+            self._try_depth = prev_try_depth
 
             if is_nested:
                 fn_tmp = self._new_tmp()
@@ -504,7 +507,7 @@ class IRLowerer:
                 self._emit("FINALLY_END", [], result=self._new_tmp())
                 end_label = self._new_label("end_try")
                 self._cur_block = self._new_block(end_label)
-                self._emit("TRY_UNWIND", [])
+                self._emit("TRY_UNWIND", [str(self._try_depth)])
                 return
 
             try_label = self._new_label("try")
@@ -538,7 +541,7 @@ class IRLowerer:
             self._emit("TRY_CLOSE", [], result=self._new_tmp())
             end_label = self._new_label("end_try")
             self._cur_block = self._new_block(end_label)
-            self._emit("TRY_UNWIND", [])
+            self._emit("TRY_UNWIND", [str(self._try_depth)])
         elif isinstance(node, ast.ClassDef):
             # Check for @dataclass or @struct / @native_struct decorator
             is_dataclass = False
@@ -624,6 +627,8 @@ class IRLowerer:
                         fn.upvalues = list(fn.freevars)
                     prev_fn = self._cur_fn
                     prev_block = self._cur_block
+                    prev_try_depth = self._try_depth
+                    self._try_depth = 0
                     self._cur_fn = fn
                     b = Block(label="entry")
                     fn.blocks.append(b)
@@ -681,6 +686,7 @@ class IRLowerer:
                         self.module.functions.append(fn)
                         self._cur_fn = prev_fn
                         self._cur_block = prev_block
+                    self._try_depth = prev_try_depth
                     self._cur_method_first_arg = prev_method_first_arg
 
                     # Register method parameters for keyword call resolution
@@ -823,7 +829,7 @@ class IRLowerer:
 
             for mgr_tmp in reversed(mgrs):
                 self._emit("WITH_END", [mgr_tmp])
-            self._emit("TRY_UNWIND", [])
+            self._emit("TRY_UNWIND", [str(self._try_depth)])
         elif isinstance(node, ast.Raise):
             if node.exc:
                 exc_tmp = self.lower_expr(node.exc)
@@ -1400,6 +1406,8 @@ class IRLowerer:
                 fn.upvalues = list(fn.freevars)
             prev_fn = self._cur_fn
             prev_block = self._cur_block
+            prev_try_depth = self._try_depth
+            self._try_depth = 0
             self._cur_fn = fn
             b = Block(label="entry")
             fn.blocks.append(b)
@@ -1419,6 +1427,7 @@ class IRLowerer:
             self.module.functions.append(fn)
             self._cur_fn = prev_fn
             self._cur_block = prev_block
+            self._try_depth = prev_try_depth
             # Emit MAKE_FUNCTION that references the nested function
             t = self._new_tmp()
             self._emit("MAKE_FUNCTION", [fn.name], result=t)

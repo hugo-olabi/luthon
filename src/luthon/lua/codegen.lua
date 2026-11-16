@@ -146,6 +146,10 @@ local function _emit(ins)
     local ret_val = args[1] or "nil"
     return "_luthon_ret_val = " .. ret_val .. "; _luthon_has_ret = true; do return end"
   elseif o == "TRY_UNWIND" then
+    local depth = (args and args[1]) and tonumber(args[1]) or 0
+    if depth > 0 then
+      return "if _luthon_has_ret then do return end end"
+    end
     return "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end"
   elseif o == "JUMP" then
     return "goto " .. args[1]
@@ -208,8 +212,6 @@ local function _emit(ins)
     return "end)"
   elseif o == "FINALLY_END" then
     return "if not ok then error(err, 0) end\nend"
-  elseif o == "TRY_UNWIND" then
-    return "-- try_unwind"
   elseif o == "DO" then
     return "do"
   elseif o == "END" then

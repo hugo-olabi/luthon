@@ -478,6 +478,8 @@ function IRLowerer:_lower_stmt_impl(node)
     end
     local prev_fn = self._cur_fn
     local prev_block = self._cur_block
+    local prev_try_depth = self._try_depth
+    self._try_depth = 0
     self._cur_fn = fn
     local b = Block.new("entry")
     table.insert(fn.blocks, b)
@@ -575,6 +577,7 @@ function IRLowerer:_lower_stmt_impl(node)
       self._cur_block = prev_block
       fn_ref = fn.name
     end
+    self._try_depth = prev_try_depth
 
     if is_nested then
       local fn_tmp = self:_new_tmp()
@@ -678,7 +681,7 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("FINALLY_END", {}, self:_new_tmp())
       local end_label = self:_new_label("end_try")
       self._cur_block = self:_new_block(end_label)
-      self:_emit("TRY_UNWIND", {})
+      self:_emit("TRY_UNWIND", {tostring(self._try_depth)})
       return
     end
 
@@ -720,7 +723,7 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("TRY_CLOSE", {}, self:_new_tmp())
     local end_label = self:_new_label("end_try")
     self._cur_block = self:_new_block(end_label)
-    self:_emit("TRY_UNWIND", {})
+    self:_emit("TRY_UNWIND", {tostring(self._try_depth)})
   elseif t == "Pass" then
     -- no-op
   elseif t == "AnnAssign" then
@@ -821,6 +824,8 @@ function IRLowerer:_lower_stmt_impl(node)
         end
         local prev_fn = self._cur_fn
         local prev_block = self._cur_block
+        local prev_try_depth = self._try_depth
+        self._try_depth = 0
         self._cur_fn = fn
         local b = Block.new("entry")
         table.insert(fn.blocks, b)
@@ -909,6 +914,7 @@ function IRLowerer:_lower_stmt_impl(node)
           self._cur_fn = prev_fn
           self._cur_block = prev_block
         end
+        self._try_depth = prev_try_depth
         self._cur_method_first_arg = prev_method_first_arg
 
         local clean_params = {}
@@ -1075,7 +1081,7 @@ function IRLowerer:_lower_stmt_impl(node)
     for i = #mgrs, 1, -1 do
       self:_emit("WITH_END", {mgrs[i]})
     end
-    self:_emit("TRY_UNWIND", {})
+    self:_emit("TRY_UNWIND", {tostring(self._try_depth)})
   elseif t == "Yield" then
     local val_tmp = node.value and self:lower_expr(node.value) or nil
     local args = {"coroutine.yield"}
@@ -1560,6 +1566,8 @@ function IRLowerer:_lower_expr_impl(node)
     end
     local prev_fn = self._cur_fn
     local prev_block = self._cur_block
+    local prev_try_depth = self._try_depth
+    self._try_depth = 0
     self._cur_fn = fn
     local b = Block.new("entry")
     table.insert(fn.blocks, b)
@@ -1581,6 +1589,7 @@ function IRLowerer:_lower_expr_impl(node)
     table.insert(self.module.functions, fn)
     self._cur_fn = prev_fn
     self._cur_block = prev_block
+    self._try_depth = prev_try_depth
     -- Emit MAKE_FUNCTION that references the nested function
     local res = self:_new_tmp()
     self:_emit("MAKE_FUNCTION", {fn.name}, res)

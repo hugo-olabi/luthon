@@ -55,6 +55,9 @@ def _emit(ins):
         ret_val = ins.args[0] if ins.args and ins.args[0] else "nil"
         return f"_luthon_ret_val = {ret_val}; _luthon_has_ret = true; do return end"
     if o == "TRY_UNWIND":
+        depth = int(ins.args[0]) if (ins.args and ins.args[0]) else 0
+        if depth > 0:
+            return "if _luthon_has_ret then do return end end"
         return "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end"
     if o == "JUMP":
         return "goto " + ins.args[0]
@@ -124,8 +127,6 @@ end"""
         return "end)"
     if o == "FINALLY_END":
         return "if not ok then error(err, 0) end\nend"
-    if o == "TRY_UNWIND":
-        return "-- try_unwind"
     if o == "CELL_GET":
         return ins.result + " = " + ins.args[0] + ".value"
     if o == "CELL_SET":
