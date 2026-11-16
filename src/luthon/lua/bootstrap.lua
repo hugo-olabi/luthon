@@ -4891,6 +4891,7 @@ local _socket_mod = {
   SOCK_DGRAM = 2,
   SOL_SOCKET = 1,
   SO_REUSEADDR = 2,
+  SO_REUSEPORT = 15,
   IPPROTO_TCP = 6,
 }
 
