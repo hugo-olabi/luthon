@@ -7,6 +7,22 @@
 
 local M = {}
 
+local function make_fixture_decorator(...)
+  local args = {...}
+  if #args == 1 and type(args[1]) == "function" then
+    return args[1]
+  end
+  return function(fn)
+    return fn
+  end
+end
+
+M.async_yield_fixture = make_fixture_decorator
+M.async_fixture = make_fixture_decorator
+M.fixture = make_fixture_decorator
+M.ensureDeferred = function(fn) return fn end
+M.use_asyncio = function(...) return make_fixture_decorator(...) end
+
 M.inlineCallbacks = function(fn)
   local ok, pb = pcall(require, "src/luthon/lua/pybridge")
   if not ok or not pb then

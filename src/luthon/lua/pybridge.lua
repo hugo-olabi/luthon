@@ -194,6 +194,20 @@ for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
     local_sp = os.path.abspath(os.path.join(".", ".venv", "lib", f"python{ver}", "site-packages"))
     if os.path.isdir(local_sp) and local_sp not in sys.path:
         sys.path.insert(0, local_sp)
+try:
+    import inspect
+    _orig_inspect_stack = inspect.stack
+    def _safe_inspect_stack(*args, **kwargs):
+        try:
+            res = _orig_inspect_stack(*args, **kwargs)
+        except (ValueError, IndexError):
+            res = []
+        while len(res) < 4:
+            res.append(inspect.FrameInfo(None, '<luthon>', 1, '<module>', None, None))
+        return res
+    inspect.stack = _safe_inspect_stack
+except Exception:
+    pass
 ]])
     end)
   end
@@ -309,7 +323,7 @@ PyProxy.__index = function(self, key)
   if py_attr ~= nil then
     local res = py_to_lua(py_attr)
     decref(py_attr)
-    if type(res) == "table" and res._py and libpy.PyCallable_Check(res._py) ~= 0 then
+    if type(res) == "table" and rawget(res, "_py") and libpy.PyCallable_Check(res._py) ~= 0 then
       if not cache then
         cache = {}
         rawset(self, "__attr_cache__", cache)
@@ -363,7 +377,7 @@ PyProxy.__call = function(self, ...)
   local dropped_self = false
   local self_obj = libpy.PyObject_GetAttrString(self._py, "__self__")
   if self_obj ~= nil then
-    if total_args > 0 and type(args[1]) == "table" and args[1]._py == self_obj then
+    if total_args > 0 and type(args[1]) == "table" and rawget(args[1], "_py") == self_obj then
       table.remove(args, 1)
       total_args = total_args - 1
       dropped_self = true
@@ -408,7 +422,7 @@ PyProxy.__call = function(self, ...)
   local py_kwargs = nil
   local last_arg = total_args > 0 and args[total_args] or nil
   local last_mt = type(last_arg) == "table" and getmetatable(last_arg) or nil
-  if total_args >= 2 and type(last_arg) == "table" and not last_arg._py and not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__)) then
+  if total_args >= 2 and type(last_arg) == "table" and last_arg ~= _G._luthon_none and not rawget(last_arg, "_py") and not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__)) then
     local pos_count = 0
     for i = 1, total_args - 1 do
       if args[i] ~= nil then pos_count = i end
@@ -622,9 +636,19 @@ lua_to_py = function(v, visited)
     local is_class = (rawget(v, "__class__") == nil and (rawget(v, "__instance_mt") ~= nil or rawget(v, "__index") == v) and type(rawget(v, "__name__")) == "string")
     if is_class then
       local cls_name = rawget(v, "__name__") or "CustomClass"
+      local builtins_mod = libpy.PyImport_ImportModule("builtins")
+      if builtins_mod ~= nil then
+        local builtin_cls = libpy.PyObject_GetAttrString(builtins_mod, cls_name)
+        decref(builtins_mod)
+        if builtin_cls ~= nil then
+          visited[v] = builtin_cls
+          return builtin_cls
+        end
+        libpy.PyErr_Clear()
+      end
       local dotted_name = cls_name:find("%.") and cls_name or ("_luthon." .. cls_name)
       local base_cls = rawget(v, "__base__")
-      local is_exc = (cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") or (type(base_cls) == "table" and tostring(base_cls.__name__):match("Exception|Error|Failure")))
+      local is_exc = (cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") or cls_name:match("Warning$") or (type(base_cls) == "table" and tostring(base_cls.__name__):match("Exception|Error|Failure|Warning")))
       local py_base = nil
       if base_cls ~= nil and base_cls ~= _G.object then
         py_base = lua_to_py(base_cls, visited)
@@ -708,7 +732,7 @@ lua_to_py = function(v, visited)
       return tup
     end
     -- Check if this is an io.BytesIO or stream object with getvalue / read
-    if type(v.getvalue) == "function" then
+    if rawget(v, "getvalue") and type(v.getvalue) == "function" then
       local val = v:getvalue()
       local io_mod = libpy.PyImport_ImportModule("io")
       local bio_cls = libpy.PyObject_GetAttrString(io_mod, "BytesIO")
@@ -875,7 +899,16 @@ function pybridge.import(name)
     check_py_error()
     error("pybridge: failed to import module '" .. name .. "'", 2)
   end
-  if libpy.PyObject_HasAttrString(mod, "__file__") == 0 and libpy.PyObject_HasAttrString(mod, "__version__") == 0 and libpy.PyObject_HasAttrString(mod, "__all__") == 0 then
+  local file_attr = libpy.PyObject_GetAttrString(mod, "__file__")
+  local has_file = false
+  if file_attr ~= nil then
+    if file_attr ~= none_ptr then has_file = true end
+    decref(file_attr)
+  else
+    libpy.PyErr_Clear()
+  end
+
+  if not has_file and libpy.PyObject_HasAttrString(mod, "__version__") == 0 and libpy.PyObject_HasAttrString(mod, "__all__") == 0 then
     local is_empty_ns = (libpy.PyObject_HasAttrString(mod, "__path__") ~= 0)
     if is_empty_ns and name == "libtorrent" then
       decref(mod)
