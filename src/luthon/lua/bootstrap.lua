@@ -1,5 +1,4 @@
--- Complete runtime prelude
-
+-- Luthon stdlib
 -- CData Memory Anchor Registry (Phase 19)
 local _CDATA_ANCHORS = {}
 local _CDATA_REF_COUNTS = {}
@@ -42,8 +41,107 @@ pcall(function()
     double cos(double x);
     double exp(double x);
     void *memcpy(void *dest, const void *src, size_t n);
+
+    typedef struct __dirstream DIR;
+    struct dirent {
+      unsigned long  d_ino;
+      long           d_off;
+      unsigned short d_reclen;
+      unsigned char  d_type;
+      char           d_name[256];
+    };
+    DIR *opendir(const char *name);
+    struct dirent *readdir(DIR *dirp);
+    int closedir(DIR *dirp);
+
+    typedef struct stat {
+      unsigned long  st_dev;
+      unsigned long  st_ino;
+      unsigned long  st_nlink;
+      unsigned int   st_mode;
+      unsigned int   st_uid;
+      unsigned int   st_gid;
+      unsigned int   __pad0;
+      unsigned long  st_rdev;
+      long           st_size;
+      long           st_blksize;
+      long           st_blocks;
+      long           st_atime;
+      unsigned long  st_atime_nsec;
+      long           st_mtime;
+      unsigned long  st_mtime_nsec;
+      long           st_ctime;
+      unsigned long  st_ctime_nsec;
+      long           __unused[3];
+    } stat_t;
+    int stat(const char *pathname, stat_t *statbuf);
+    int mkdir(const char *pathname, unsigned int mode);
+
+    /* Luthon Native C Stdlib Declarations */
+    typedef struct {
+      int64_t current;
+      int64_t stop;
+      int64_t step;
+      int64_t length;
+    } LuthonRange;
+
+    LuthonRange luthon_range_init(int64_t start, int64_t stop, int64_t step);
+    bool        luthon_range_next(LuthonRange *r, int64_t *out_val);
+    int64_t     luthon_range_len(const LuthonRange *r);
+
+    int64_t     luthon_math_ipow(int64_t base, int64_t exp);
+    void        luthon_math_divmod(int64_t a, int64_t b, int64_t *out_div, int64_t *out_mod);
+
+    size_t      luthon_b64_decoded_size(const char *src, size_t src_len);
+    size_t      luthon_b64_decode(const char *src, size_t src_len, uint8_t *dst);
+    size_t      luthon_b64_encode(const uint8_t *src, size_t src_len, char *dst);
+
+    size_t      luthon_hex_decode(const char *src, size_t src_len, uint8_t *dst);
+    size_t      luthon_hex_encode(const uint8_t *src, size_t src_len, char *dst);
+
+    size_t      luthon_path_join(const char *p1, const char *p2, char *dst, size_t max_len);
+    const char* luthon_path_basename(const char *path);
+    size_t      luthon_path_dirname(const char *path, char *dst, size_t max_len);
+    bool        luthon_path_exists(const char *path);
+    bool        luthon_path_isdir(const char *path);
+    size_t      luthon_path_getsize(const char *path);
+
+    typedef struct {
+      int64_t start;
+      int64_t stop;
+      int64_t step;
+      int64_t length;
+    } LuthonSlice;
+
+    LuthonSlice luthon_slice_calc(int64_t length, int64_t start, int64_t stop, int64_t step, bool has_start, bool has_stop, bool has_step);
+    int         luthon_fast_memcmp(const void *s1, size_t n1, const void *s2, size_t n2);
+    int64_t     luthon_memfind(const void *haystack, size_t h_len, const void *needle, size_t n_len);
+
+    bool        luthon_png_read_mem(const uint8_t *data, size_t size, int *out_w, int *out_h, int *out_channels, uint8_t **out_buf);
+    bool        luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
+    void        luthon_png_free(void *ptr);
+    void        luthon_img_mer_to_orm_emission(const uint8_t *src_rgba, int w, int h, uint8_t *dst_orm_rgb, uint8_t *dst_em_l, bool *out_has_emission);
   ]]
 end)
+
+local _luthon_native_lib = nil
+pcall(function()
+  local candidates = {
+    "src/luthon/native/libluthon_capi.so",
+    "./libluthon_capi.so",
+    "libluthon_capi.so"
+  }
+  for _, cand in ipairs(candidates) do
+    local ok, lib = pcall(ffi.load, cand)
+    if ok and lib then
+      _luthon_native_lib = lib
+      break
+    end
+  end
+end)
+
+local _LUTHON_STAT_BUF = nil
+pcall(function() _LUTHON_STAT_BUF = ffi.new("stat_t") end)
 
 local _ARRAY_TYPE_MAP = {
   ["b"] = "int8_t",
@@ -129,7 +227,13 @@ function _Array_methods:add(other)
     for i = 0, len - 1 do b[i] = buf1[i] + other end
   elseif type(other) == "table" and rawget(other, "_buf") then
     local buf2 = rawget(other, "_buf")
-    for i = 0, len - 1 do b[i] = buf1[i] + buf2[i] end
+    if _simd_lib and self.typecode == "d" then
+      _simd_lib.luthon_simd_add_f64(b, buf1, buf2, len)
+    elseif _simd_lib and self.typecode == "f" then
+      _simd_lib.luthon_simd_add_f32(b, buf1, buf2, len)
+    else
+      for i = 0, len - 1 do b[i] = buf1[i] + buf2[i] end
+    end
   end
   return res
 end
@@ -146,7 +250,13 @@ function _Array_methods:mul(other)
     for i = 0, len - 1 do b[i] = buf1[i] * other end
   elseif type(other) == "table" and rawget(other, "_buf") then
     local buf2 = rawget(other, "_buf")
-    for i = 0, len - 1 do b[i] = buf1[i] * buf2[i] end
+    if _simd_lib and self.typecode == "d" then
+      _simd_lib.luthon_simd_mul_f64(b, buf1, buf2, len)
+    elseif _simd_lib and self.typecode == "f" then
+      _simd_lib.luthon_simd_mul_f32(b, buf1, buf2, len)
+    else
+      for i = 0, len - 1 do b[i] = buf1[i] * buf2[i] end
+    end
   end
   return res
 end
@@ -197,8 +307,10 @@ function matrix(rows, cols, initializer)
   return arr
 end
 
-local _Array_mt = {
+_Array_mt = {
   __index = function(self, k)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
     if type(k) == "number" then
       local len = rawget(self, "_len")
       if k < 0 then k = len + k end
@@ -247,6 +359,57 @@ function array(typecode, initializer)
   return arr
 end
 
+local _dict_methods = {
+  get = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
+    return default
+  end,
+  setdefault = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then return v end
+    rawset(self, k, default)
+    return default
+  end,
+  pop = function(self, k, default)
+    local v = rawget(self, k)
+    if v ~= nil then
+      rawset(self, k, nil)
+      return v
+    end
+    if default ~= nil then return default end
+    error("KeyError: " .. tostring(k))
+  end,
+  popitem = function(self)
+    for k, v in pairs(self) do
+      rawset(self, k, nil)
+      return {k, v}
+    end
+    error("KeyError: popitem(): dictionary is empty")
+  end,
+  keys = function(self)
+    local r = setmetatable({}, _list_mt)
+    for k in pairs(self) do table.insert(r, k) end
+    return r
+  end,
+  values = function(self)
+    local r = setmetatable({}, _list_mt)
+    for _, v in pairs(self) do table.insert(r, v) end
+    return r
+  end,
+  items = function(self)
+    local r = setmetatable({}, _list_mt)
+    for k, v in pairs(self) do table.insert(r, {k, v}) end
+    return r
+  end,
+}
+local _dict_mt = {
+  __dict__ = true,
+  __index = function(t, k)
+    return _dict_methods[k]
+  end
+}
+
 local function _luthon_key_repr(k)
   if type(k) == "table" and (k.__tuple__ or (getmetatable(k) and getmetatable(k).__tuple__)) then
     for idx = 1, #k do
@@ -261,9 +424,26 @@ local function _luthon_key_repr(k)
   return k
 end
 
--- Luthon stdlib
+_G._luthon_none = _G._luthon_none or setmetatable({
+  __is_none__ = true,
+  __bool__ = function() return false end,
+  __tostring = function() return "None" end,
+}, {
+  __tostring = function() return "None" end,
+  __call = function() error("TypeError: 'NoneType' object is not callable") end,
+  __index = function(t, k)
+    if k == "__is_none__" then return true end
+    if k == "__bool__" then return function() return false end end
+    error("AttributeError: 'NoneType' object has no attribute '" .. tostring(k) .. "'")
+  end
+})
+
+True = true
+False = false
+None = _G._luthon_none
+
 function __luthon_get(t, i)
-  if t == nil then return nil end
+  if t == nil or t == _G._luthon_none or (type(t) == "table" and rawget(t, "__is_none__") == true) then return nil end
   if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
     return t[i]
   end
@@ -282,16 +462,27 @@ function __luthon_get(t, i)
     if string[i] ~= nil then
       return string[i]
     end
-    return string.sub(t, 1, 0)
+    return nil
   end
   if type(t) ~= "table" and type(t) ~= "userdata" and type(t) ~= "cdata" then
     return t
+  end
+  local mt = getmetatable(t)
+  if type(t) == "table" and (rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt)))) then
+    return t[i]
   end
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
     return t[i]
   end
-  return t[i]
+  local val = t[i]
+  if val == nil and type(t) == "table" and _dict_methods[i] ~= nil then
+    return _dict_methods[i]
+  end
+  if type(val) == "table" and type(val.__get__) == "function" then
+    return val:__get__(t, t.__class__)
+  end
+  return val
 end
 
 function _dict_update(target, src)
@@ -327,6 +518,38 @@ function _luthon_call_kw(fn, kw_table, ...)
     return function(...)
       local args = { ... }
       return args[1]
+    end
+  end
+  if type(fn) == "table" and rawget(fn, "_py") then
+    local ok_pb, pb = pcall(require, "src/luthon/lua/pybridge")
+    if not ok_pb or not pb then ok_pb, pb = pcall(require, "luthon.lua.pybridge") end
+    if ok_pb and pb and pb.get_lib then
+      local libpy = pb.get_lib()
+      local pos_args = { ... }
+      local num_pos = select("#", ...)
+      local tuple = libpy.PyTuple_New(num_pos)
+      for i = 1, num_pos do
+        local py_v = pb.lua_to_py(pos_args[i])
+        libpy.PyTuple_SetItem(tuple, i - 1, py_v)
+      end
+      local py_kw = nil
+      if type(kw_table) == "table" and next(kw_table) ~= nil then
+        py_kw = libpy.PyDict_New()
+        for k, v in pairs(kw_table) do
+          local py_v = pb.lua_to_py(v)
+          libpy.PyDict_SetItemString(py_kw, tostring(k), py_v)
+          libpy.Py_DecRef(py_v)
+        end
+      end
+      local res = libpy.PyObject_Call(fn._py, tuple, py_kw)
+      libpy.Py_DecRef(tuple)
+      if py_kw ~= nil then libpy.Py_DecRef(py_kw) end
+      if res == nil then
+        pb.check_py_error()
+      end
+      local lua_res = pb.py_to_lua(res)
+      libpy.Py_DecRef(res)
+      return lua_res
     end
   end
   local param_names = _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[fn]
@@ -369,6 +592,84 @@ function _tuple_pack(...)
   return setmetatable({...}, _tuple_mt or {})
 end
 
+local function _is_callable(x)
+  if type(x) == "function" then return true end
+  if type(x) == "table" or type(x) == "userdata" then
+    local mt = getmetatable(x)
+    if mt and (type(mt.__call) == "function" or type(mt.__call) == "table") then return true end
+    if type(x.__call) == "function" then return true end
+  end
+  return false
+end
+
+function _luthon_with_enter(mgr)
+  if mgr == nil then return nil end
+  local enter = type(mgr) == "table" and (mgr.__enter__ or mgr.__aenter__ or mgr.enter)
+  if _is_callable(enter) then
+    return enter(mgr)
+  end
+  return mgr
+end
+
+function _luthon_with_exit(mgr, exc)
+  if mgr == nil then return false end
+  local exit_fn = type(mgr) == "table" and (mgr.__exit__ or mgr.__aexit__ or mgr.exit)
+  if _is_callable(exit_fn) then
+    if exc ~= nil then
+      local exc_type = (type(exc) == "table" and (exc.__class__ or exc)) or "Exception"
+      if type(exc) == "string" then
+        local name = exc:match("^(%w+Error):") or exc:match("^(%w+Exception):") or exc:match("^(%w+Failure):") or "Exception"
+        exc_type = _G[name] or name
+      end
+      local res = exit_fn(mgr, exc_type, exc, nil)
+      return res and res ~= false and res ~= 0
+    else
+      exit_fn(mgr, nil, nil, nil)
+      return false
+    end
+  end
+  return false
+end
+
+function _luthon_exc_match(exc, cls)
+  if cls == nil then return false end
+  if type(cls) == "table" and (rawget(cls, "__is_tuple") or (cls[1] and rawget(cls, "__class__") == nil)) then
+    for i = 1, #cls do
+      if _luthon_exc_match(exc, cls[i]) then return true end
+    end
+    return false
+  end
+  local tname = type(cls) == "string" and cls or (cls.__name or cls.__name__ or cls.__type or tostring(cls))
+  if tname == "Exception" or tname == "BaseException" or cls == Exception or cls == BaseException then return true end
+  if type(exc) ~= "table" then
+    local str_exc = tostring(exc)
+    if str_exc:find(tname, 1, true) then return true end
+    if (tname == "ImportError" or cls == ImportError) and str_exc:find("ModuleNotFoundError", 1, true) then return true end
+    if (tname == "OSError" or cls == OSError) and (str_exc:find("IOError", 1, true) or str_exc:find("FileNotFoundError", 1, true)) then return true end
+    return false
+  end
+  if exc.__type == tname or exc.__name == tname or exc.__name__ == tname then return true end
+  local exc_cls = exc.__class__ or exc
+  if type(cls) == "table" and issubclass and issubclass(exc_cls, cls) then return true end
+  local curr = exc_cls
+  while type(curr) == "table" do
+    if curr == cls or curr.__name == tname or curr.__type == tname or curr.__name__ == tname then return true end
+    curr = rawget(curr, "__base__")
+  end
+  return false
+end
+
+function _luthon_assert_fail(test, msg)
+  if not test then
+    if AssertionError then
+      error(AssertionError(tostring(msg or "")), 0)
+    else
+      error("AssertionError: " .. tostring(msg or ""), 0)
+    end
+  end
+  return true
+end
+
 function _seq_append(seq, val)
   seq[#seq + 1] = val
 end
@@ -391,6 +692,11 @@ function __luthon_set(t, i, v)
     return
   end
   i = _luthon_key_repr(i)
+  local mt = getmetatable(t)
+  if type(t) == "table" and (rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt)))) then
+    t[i] = v
+    return
+  end
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
     t[i] = v
@@ -399,7 +705,102 @@ function __luthon_set(t, i, v)
   end
 end
 
+function _luthon_slice_desc(lower, upper, step)
+  return {__slice__ = true, lower = lower, upper = upper, step = step}
+end
+
+function _luthon_slice(obj, lower, upper, step)
+  if type(obj) == "string" then
+    local n = #obj
+    local l = 1
+    if lower ~= nil then
+      if lower >= 0 then l = lower + 1
+      else l = n + lower + 1; if l < 1 then l = 1 end end
+    end
+    local u = n
+    if upper ~= nil then
+      if upper >= 0 then u = upper
+      else u = n + upper; if u < 0 then u = 0 end end
+    end
+    if l > u then return "" end
+    return string.sub(obj, l, u)
+  elseif type(obj) == "table" then
+    -- High-performance unboxed array slice view via ffi.copy
+    if rawget(obj, "_buf") and rawget(obj, "_len") then
+      return obj:slice(lower, upper, step)
+    end
+    if rawget(obj, "_dict") or rawget(obj, "__class__") == dict or (getmetatable(obj) and getmetatable(obj).__dict__) or (#obj == 0 and next(obj) ~= nil) then
+      if TypeError then error(TypeError("unhashable type: 'slice'"), 0)
+      else error("TypeError: unhashable type: 'slice'", 0) end
+    end
+    local n = #obj
+    lower = lower or 0
+    if lower < 0 then lower = n + lower end
+    lower = lower + 1
+    if upper == nil then
+      upper = n
+    else
+      if upper < 0 then upper = n + upper end
+    end
+    step = step or 1
+    local r = {}
+    if step == 1 and lower <= upper and table.move then
+      -- Vectorized slice copy via table.move (fast native C loop in LuaJIT)
+      table.move(obj, lower, upper, 1, r)
+    elseif step > 0 then
+      for i = lower, upper, step do table.insert(r, obj[i]) end
+    else
+      for i = lower, upper, step do table.insert(r, obj[i]) end
+    end
+    return setmetatable(r, _list_mt)
+  end
+  return obj
+end
+
+function _luthon_add(a, b)
+  local ta = type(a)
+  local tb = type(b)
+  if (ta == "number" or ta == "cdata") and (tb == "number" or tb == "cdata") then
+    return a + b
+  end
+  if ta == "string" and tb == "string" then
+    return a .. b
+  end
+  if ta == "table" then
+    local mt = getmetatable(a)
+    if mt and mt.__add then
+      return a + b
+    end
+    if type(a.__add__) == "function" then
+      return a:__add__(b)
+    end
+  end
+  if tb == "table" then
+    local mt = getmetatable(b)
+    if mt and mt.__add then
+      return a + b
+    end
+    if type(b.__radd__) == "function" then
+      return b:__radd__(a)
+    end
+  end
+  return a + b
+end
+
 function _luthon_cmp(op, a, b)
+  local a_is_none = (a == nil) or (a == _G._luthon_none) or (type(a) == "table" and a.__is_none__)
+  local b_is_none = (b == nil) or (b == _G._luthon_none) or (type(b) == "table" and b.__is_none__)
+  if a_is_none or b_is_none then
+    if a_is_none and b_is_none then
+      if op == "==" or op == "eq" or op == "is" then return true end
+      if op == "~=" or op == "ne" or op == "!=" or op == "isnot" then return false end
+      return false
+    else
+      if op == "==" or op == "eq" or op == "is" then return false end
+      if op == "~=" or op == "ne" or op == "!=" or op == "isnot" then return true end
+      return false
+    end
+  end
   if (type(a) == "table" and rawget(a, "_py")) or (type(b) == "table" and rawget(b, "_py")) then
     local ok, pybridge = pcall(require, "luthon.lua.pybridge")
     if not ok or not pybridge then ok, pybridge = pcall(require, "src/luthon/lua/pybridge") end
@@ -424,14 +825,38 @@ function _luthon_cmp(op, a, b)
   end
   if type(a) == "table" and type(b) == "table" then
     local mta = getmetatable(a)
-    local cls = a.__class__ or (mta and mta.__index)
-    if type(cls) == "table" then
-      if (op == "<" or op == "lt") and type(cls.__lt__) == "function" then return cls.__lt__(a, b) end
-      if (op == "<=" or op == "le") and type(cls.__le__) == "function" then return cls.__le__(a, b) end
-      if (op == ">" or op == "gt") and type(cls.__gt__) == "function" then return cls.__gt__(a, b) end
-      if (op == ">=" or op == "ge") and type(cls.__ge__) == "function" then return cls.__ge__(a, b) end
-      if (op == "==" or op == "eq") and type(cls.__eq__) == "function" then return cls.__eq__(a, b) end
-      if (op == "~=" or op == "ne") and type(cls.__ne__) == "function" then return cls.__ne__(a, b) end
+    local mtb = getmetatable(b)
+    local clsa = a.__class__ or (mta and (type(mta.__index) == "table" and mta.__index or mta))
+    local clsb = b.__class__ or (mtb and (type(mtb.__index) == "table" and mtb.__index or mtb))
+    local has_clsa = type(clsa) == "table"
+    local has_clsb = type(clsb) == "table"
+    if op == "<" or op == "lt" then
+      if has_clsa and type(clsa.__lt__) == "function" then return clsa.__lt__(a, b) end
+      if has_clsb and type(clsb.__gt__) == "function" then return clsb.__gt__(b, a) end
+      if has_clsa and type(clsa.__ge__) == "function" then return not clsa.__ge__(a, b) end
+    elseif op == "<=" or op == "le" then
+      if has_clsa and type(clsa.__le__) == "function" then return clsa.__le__(a, b) end
+      if has_clsb and type(clsb.__ge__) == "function" then return clsb.__ge__(b, a) end
+      if has_clsb and type(clsb.__lt__) == "function" then return not clsb.__lt__(b, a) end
+      if has_clsa and type(clsa.__gt__) == "function" then return not clsa.__gt__(a, b) end
+    elseif op == ">" or op == "gt" then
+      if has_clsa and type(clsa.__gt__) == "function" then return clsa.__gt__(a, b) end
+      if has_clsb and type(clsb.__lt__) == "function" then return clsb.__lt__(b, a) end
+      if has_clsa and type(clsa.__le__) == "function" then return not clsa.__le__(a, b) end
+    elseif op == ">=" or op == "ge" then
+      if has_clsa and type(clsa.__ge__) == "function" then return clsa.__ge__(a, b) end
+      if has_clsb and type(clsb.__le__) == "function" then return clsb.__le__(b, a) end
+      if has_clsa and type(clsa.__lt__) == "function" then return not clsa.__lt__(a, b) end
+      if has_clsb and type(clsb.__gt__) == "function" then return not clsb.__gt__(b, a) end
+    elseif op == "==" or op == "eq" then
+      if has_clsa and type(clsa.__eq__) == "function" then return clsa.__eq__(a, b) end
+      if has_clsb and type(clsb.__eq__) == "function" then return clsb.__eq__(b, a) end
+    elseif op == "~=" or op == "ne" or op == "!=" then
+      if has_clsa and type(clsa.__ne__) == "function" then return clsa.__ne__(a, b) end
+      if has_clsb and type(clsb.__ne__) == "function" then return clsb.__ne__(b, a) end
+      if (has_clsa and type(clsa.__eq__) == "function") or (has_clsb and type(clsb.__eq__) == "function") then
+        return not _luthon_cmp("==", a, b)
+      end
     end
     if a == b then
       if op == "==" or op == "eq" then return true end
@@ -455,24 +880,31 @@ function _luthon_cmp(op, a, b)
       end
     end
     local na, nb = #a, #b
+    if op == "==" or op == "eq" then
+      if na ~= nb then return false end
+      for i = 1, na do
+        if not _luthon_cmp("==", a[i], b[i]) then return false end
+      end
+      return true
+    end
+    if op == "~=" or op == "ne" or op == "!=" then
+      return not _luthon_cmp("==", a, b)
+    end
     local min_n = math.min(na, nb)
     for i = 1, min_n do
       local va, vb = a[i], b[i]
-      if va ~= vb then
-        if op == "<" or op == "lt" then return _luthon_cmp("<", va, vb) end
-        if op == "<=" or op == "le" then return _luthon_cmp("<=", va, vb) end
-        if op == ">" or op == "gt" then return _luthon_cmp(">", va, vb) end
-        if op == ">=" or op == "ge" then return _luthon_cmp(">=", va, vb) end
-        if op == "==" or op == "eq" then return false end
-        if op == "~=" or op == "ne" then return true end
+      if not _luthon_cmp("==", va, vb) then
+        if op == "<" or op == "lt" or op == "<=" or op == "le" then
+          return _luthon_cmp("<", va, vb)
+        else
+          return _luthon_cmp(">", va, vb)
+        end
       end
     end
     if op == "<" or op == "lt" then return na < nb end
     if op == "<=" or op == "le" then return na <= nb end
     if op == ">" or op == "gt" then return na > nb end
     if op == ">=" or op == "ge" then return na >= nb end
-    if op == "==" or op == "eq" then return na == nb end
-    if op == "~=" or op == "ne" then return na ~= nb end
   end
   if type(a) == "table" then
     local mta = getmetatable(a)
@@ -503,13 +935,117 @@ function _luthon_cmp(op, a, b)
   return false
 end
 
+function _luthon_in(a, b)
+  a = _luthon_key_repr(a)
+  if type(b) == "table" then
+    if b[a] ~= nil then return true end
+    local n = #b
+    for i = 1, n do
+      if b[i] == a then return true end
+    end
+    return false
+  elseif type(b) == "string" then
+    if type(a) == "string" then
+      return string.find(b, a, 1, true) ~= nil
+    end
+    return false
+  end
+  return false
+end
+
+function _luthon_not_in(a, b)
+  return not _luthon_in(a, b)
+end
+
+local _set_methods = {
+  add = function(self, x) self[x] = true end,
+  remove = function(self, x) self[x] = nil end,
+  discard = function(self, x) self[x] = nil end,
+  clear = function(self) for k in pairs(self) do self[k] = nil end end,
+  pop = function(self)
+    for k in pairs(self) do
+      self[k] = nil
+      return k
+    end
+    error("KeyError: 'pop from an empty set'")
+  end,
+  issuperset = function(self, other)
+    if type(other) == "string" then
+      for i = 1, #other do
+        local ch = string.sub(other, i, i)
+        if not self[ch] then return false end
+      end
+      return true
+    elseif type(other) == "table" then
+      for _, v in ipairs(other) do
+        if not self[v] then return false end
+      end
+      for k in pairs(other) do
+        if not self[k] then return false end
+      end
+      return true
+    end
+    return false
+  end,
+  issubset = function(self, other)
+    local o_set = (type(other) == "table" and getmetatable(other) == _set_mt) and other or set(other)
+    for k in pairs(self) do
+      if not o_set[k] then return false end
+    end
+    return true
+  end,
+}
+local _set_mt = {__index = _set_methods}
+
+function set(t)
+  local s = setmetatable({}, _set_mt)
+  if t then
+    if type(t) == "table" then
+      for _, v in ipairs(t) do s[v] = true end
+    elseif type(t) == "string" then
+      for i = 1, #t do s[string.sub(t, i, i)] = true end
+    end
+  end
+  return s
+end
+
+local _frozenset_mt = {
+  __index = _set_methods,
+  __newindex = function() error("frozenset is immutable") end
+}
+
+function frozenset(t)
+  local s = {}
+  if t then
+    if type(t) == "table" then
+      for _, v in ipairs(t) do s[v] = true end
+    elseif type(t) == "string" then
+      for i = 1, #t do s[string.sub(t, i, i)] = true end
+    end
+  end
+  return setmetatable(s, _frozenset_mt)
+end
+
 function range(a, b, step)
   if b == nil then a, b = 0, a; step = 1 end
   if step == nil then step = 1 end
+  if _luthon_native_lib ~= nil then
+    local r_struct = _luthon_native_lib.luthon_range_init(a, b, step)
+    local n = tonumber(r_struct.length)
+    local r = {}
+    local val_buf = ffi.new("int64_t[1]")
+    local idx = 1
+    while _luthon_native_lib.luthon_range_next(r_struct, val_buf) do
+      r[idx] = tonumber(val_buf[0])
+      idx = idx + 1
+    end
+    rawset(r, "_len", n)
+    return setmetatable(r, _list_mt)
+  end
   local r = {}
   if step > 0 then for i = a, b - 1, step do r[#r+1] = i end
   else for i = a, b + 1, step do r[#r+1] = i end end
-  return r
+  return setmetatable(r, _list_mt)
 end
 function len(t)
   if t == nil then return 0 end
@@ -523,7 +1059,6 @@ function len(t)
   end
   return #t
 end
-
 local function _luthon_lt(a, b)
   local ta = type(a)
   local tb = type(b)
@@ -604,7 +1139,52 @@ local _list_methods = {
     error("ValueError: " .. tostring(x) .. " is not in list")
   end,
 }
-_list_mt = {__index = _list_methods, __lt = _luthon_lt}
+local function _list_add(a, b)
+  local r = setmetatable({}, _list_mt)
+  if type(a) == "table" then
+    for i = 1, #a do
+      r[#r + 1] = a[i]
+    end
+  end
+  if type(b) == "table" then
+    for i = 1, #b do
+      r[#r + 1] = b[i]
+    end
+  end
+  return r
+end
+
+local function _list_mul(a, b)
+  local lst, count
+  if type(a) == "number" then
+    count, lst = a, b
+  else
+    lst, count = a, b
+  end
+  local r = setmetatable({}, _list_mt)
+  if type(lst) == "table" and type(count) == "number" and count > 0 then
+    for _ = 1, count do
+      for i = 1, #lst do
+        r[#r + 1] = lst[i]
+      end
+    end
+  end
+  return r
+end
+
+_list_mt = {
+  __index = _list_methods,
+  __lt = _luthon_lt,
+  __add = _list_add,
+  __mul = _list_mul,
+}
+
+-- Auto-flush print for server and interactive logging
+local _raw_print = print
+function print(...)
+  _raw_print(...)
+  pcall(function() io.stdout:flush() end)
+end
 
 function make_list(...)
   local r = {...}
@@ -655,9 +1235,44 @@ function list(t)
   return r
 end
 
+local function _tuple_add(a, b)
+  local r = setmetatable({}, _tuple_mt)
+  if type(a) == "table" then
+    for i = 1, #a do
+      r[#r + 1] = a[i]
+    end
+  end
+  if type(b) == "table" then
+    for i = 1, #b do
+      r[#r + 1] = b[i]
+    end
+  end
+  return r
+end
+
+local function _tuple_mul(a, b)
+  local tup, count
+  if type(a) == "number" then
+    count, tup = a, b
+  else
+    tup, count = a, b
+  end
+  local r = setmetatable({}, _tuple_mt)
+  if type(tup) == "table" and type(count) == "number" and count > 0 then
+    for _ = 1, count do
+      for i = 1, #tup do
+        r[#r + 1] = tup[i]
+      end
+    end
+  end
+  return r
+end
+
 _tuple_mt = {
   __tuple__ = true,
   __lt = _luthon_lt,
+  __add = _tuple_add,
+  __mul = _tuple_mul,
   __index = function(t, k)
     if type(k) == "number" then
       if k < 0 then k = #t + k + 1 else k = k + 1 end
@@ -666,6 +1281,101 @@ _tuple_mt = {
     return nil
   end
 }
+
+_bytes_mt = {
+  __bytes__ = true,
+  __tostring = function(t) return t[1] or "" end,
+  __len = function(t) return #(t[1] or "") end,
+  __index = function(t, k)
+    if type(k) == "number" then
+      local s = t[1] or ""
+      if k < 0 then k = #s + k + 1 else k = k + 1 end
+      return s:byte(k)
+    end
+    return nil
+  end
+}
+
+_bytearray_mt = {
+  __bytes__ = true,
+  __tostring = function(t)
+    local chars = {}
+    local len = rawget(t, "_len") or 0
+    local buf = rawget(t, "_buf")
+    if buf then
+      return ffi.string(buf, len)
+    end
+    for i = 0, len - 1 do chars[i + 1] = string.char(t[i] or 0) end
+    return table.concat(chars)
+  end,
+  __len = function(t) return rawget(t, "_len") or 0 end,
+  __index = function(t, k)
+    if type(k) == "number" then
+      local len = rawget(t, "_len") or 0
+      if k < 0 then k = len + k end
+      local buf = rawget(t, "_buf")
+      if buf then return buf[k] end
+      return rawget(t, k) or 0
+    end
+    return nil
+  end,
+  __newindex = function(t, k, v)
+    if type(k) == "number" then
+      local len = rawget(t, "_len") or 0
+      if k < 0 then k = len + k end
+      local buf = rawget(t, "_buf")
+      if buf then
+        buf[k] = v
+        return
+      end
+      rawset(t, k, v)
+    else
+      rawset(t, k, v)
+    end
+  end
+}
+
+function bytearray(init)
+  local len = 0
+  local obj = setmetatable({}, _bytearray_mt)
+  if type(init) == "number" then
+    len = math.floor(init)
+    if ffi and ffi.new then
+      rawset(obj, "_buf", ffi.new("uint8_t[?]", math.max(1, len)))
+    end
+    rawset(obj, "_len", len)
+  elseif type(init) == "string" then
+    len = #init
+    if ffi and ffi.new then
+      local buf = ffi.new("uint8_t[?]", math.max(1, len))
+      ffi.copy(buf, init, len)
+      rawset(obj, "_buf", buf)
+    else
+      for i = 0, len - 1 do rawset(obj, i, init:byte(i + 1)) end
+    end
+    rawset(obj, "_len", len)
+  elseif type(init) == "table" then
+    len = #init
+    if ffi and ffi.new then
+      local buf = ffi.new("uint8_t[?]", math.max(1, len))
+      for i = 0, len - 1 do buf[i] = (init[i + 1] or init[i] or 0) end
+      rawset(obj, "_buf", buf)
+    else
+      for i = 0, len - 1 do rawset(obj, i, init[i + 1] or init[i] or 0) end
+    end
+    rawset(obj, "_len", len)
+  else
+    rawset(obj, "_len", 0)
+  end
+  return obj
+end
+
+function bytes(s)
+  if type(s) == "table" and getmetatable(s) == _bytearray_mt then
+    return setmetatable({tostring(s)}, _bytes_mt)
+  end
+  return setmetatable({tostring(s or "")}, _bytes_mt)
+end
 
 function tuple(t)
   local r = setmetatable({}, _tuple_mt)
@@ -764,9 +1474,23 @@ _str_methods = {
     return table.concat(parts, sep)
   end,
   startswith = function(s, prefix)
+    if type(prefix) == "table" then
+      for i = 1, #prefix do
+        local p = prefix[i]
+        if string.sub(s, 1, #p) == p then return true end
+      end
+      return false
+    end
     return string.sub(s, 1, #prefix) == prefix
   end,
   endswith = function(s, suffix)
+    if type(suffix) == "table" then
+      for i = 1, #suffix do
+        local suf = suffix[i]
+        if suf == "" or string.sub(s, -#suf) == suf then return true end
+      end
+      return false
+    end
     return suffix == "" or string.sub(s, -#suffix) == suffix
   end,
   split = function(s, sep, maxsplit)
@@ -795,6 +1519,81 @@ _str_methods = {
       pos = s_end + 1
     end
     return r
+  end,
+  rsplit = function(s, sep, maxsplit)
+    sep = sep or "%s+"
+    maxsplit = maxsplit or -1
+    if maxsplit == 0 then
+      return setmetatable({s}, _list_mt)
+    end
+    if maxsplit < 0 then
+      return _str_methods.split(s, sep)
+    end
+    local r = setmetatable({}, _list_mt)
+    if sep == "%s+" then
+      local words = {}
+      for w in string.gmatch(s, "%S+") do table.insert(words, w) end
+      if #words <= maxsplit + 1 then return _str_methods.split(s, sep) end
+      local result = setmetatable({}, _list_mt)
+      local right_items = {}
+      for i = 1, maxsplit do
+        table.insert(right_items, 1, table.remove(words))
+      end
+      table.insert(result, table.concat(words, " "))
+      for _, w in ipairs(right_items) do table.insert(result, w) end
+      return result
+    end
+    local pos = 1
+    local len = #s
+    local indices = {}
+    while pos <= len do
+      local s_start, s_end = _lua_raw_str_find(s, sep, pos, true)
+      if not s_start then break end
+      table.insert(indices, {s_start, s_end})
+      pos = s_end + 1
+    end
+    if #indices == 0 then
+      return setmetatable({s}, _list_mt)
+    end
+    local split_count = math.min(#indices, maxsplit)
+    local cut_from = #indices - split_count + 1
+    local res = setmetatable({}, _list_mt)
+    table.insert(res, string.sub(s, 1, indices[cut_from][1] - 1))
+    for i = cut_from, #indices do
+      local seg_start = indices[i][2] + 1
+      local seg_end = (i < #indices) and (indices[i+1][1] - 1) or len
+      table.insert(res, string.sub(s, seg_start, seg_end))
+    end
+    return res
+  end,
+  partition = function(s, sep)
+    if sep == nil or sep == "" then error("ValueError: empty separator") end
+    local s_start, s_end = _lua_raw_str_find(s, sep, 1, true)
+    if not s_start then
+      return setmetatable({s, "", ""}, _tuple_mt)
+    end
+    local before = string.sub(s, 1, s_start - 1)
+    local match = string.sub(s, s_start, s_end)
+    local after = string.sub(s, s_end + 1)
+    return setmetatable({before, match, after}, _tuple_mt)
+  end,
+  rpartition = function(s, sep)
+    if sep == nil or sep == "" then error("ValueError: empty separator") end
+    local last_start, last_end = nil, nil
+    local init = 1
+    while true do
+      local s_start, s_end = _lua_raw_str_find(s, sep, init, true)
+      if not s_start then break end
+      last_start, last_end = s_start, s_end
+      init = s_start + 1
+    end
+    if not last_start then
+      return setmetatable({"", "", s}, _tuple_mt)
+    end
+    local before = string.sub(s, 1, last_start - 1)
+    local match = string.sub(s, last_start, last_end)
+    local after = string.sub(s, last_end + 1)
+    return setmetatable({before, match, after}, _tuple_mt)
   end,
   format = function(s, ...)
     local args = {...}
@@ -899,25 +1698,50 @@ local function _str_format_map(fmt, map)
   end))
 end
 
+local function _expand_dynamic_format(fmt, t)
+  if not fmt:find("%*") then return fmt, t end
+  local new_t = {}
+  local in_idx = 1
+  local out_fmt = fmt:gsub("%%([%-+0 #]*)(%*?)%.?(%*?)([a-zA-Z%%])", function(flags, w_star, p_star, spec)
+    if spec == "%" then return "%%" end
+    local w = ""
+    local p = ""
+    if w_star == "*" then
+      w = tostring(t[in_idx] or "")
+      in_idx = in_idx + 1
+    end
+    if p_star == "*" then
+      p = "." .. tostring(t[in_idx] or "0")
+      in_idx = in_idx + 1
+    end
+    return "%" .. flags .. w .. p .. spec
+  end)
+  for i = in_idx, #t do
+    new_t[#new_t + 1] = t[i]
+  end
+  return out_fmt, new_t
+end
+
 local function _str_mod(fmt, args)
   if type(fmt) ~= "string" then
     error("TypeError: unsupported operand type(s) for %")
   end
+  local t = {}
   if type(args) == "table" then
     if fmt:find("%%%([%a%w_]+%)") then
       return _str_format_map(fmt, args)
     end
-    local t = {}
     for i = 1, #args do
       t[i] = args[i]
     end
-    if #t > 0 then
-      return string.format(fmt, unpack(t))
-    else
-      return string.format(fmt, args)
-    end
   else
-    return string.format(fmt, args)
+    t = {args}
+  end
+  local f2, t2 = _expand_dynamic_format(fmt, t)
+  if #t2 > 0 then
+    return string.format(f2, unpack(t2))
+  else
+    return f2
   end
 end
 
@@ -956,19 +1780,70 @@ function make_generator(fn, ...)
   local co = coroutine.create(function() return fn(unpack(args)) end)
   local gen = {}
   gen.__next__ = function()
+    if coroutine.status(co) == "dead" then return nil end
     local ok, val = coroutine.resume(co)
     if not ok then error(val) end
-    if coroutine.status(co) == "dead" and val == nil then return nil end
-    return val
+    if coroutine.status(co) == "dead" then return nil end
+    return (val == nil) and _G._luthon_none or val
   end
+  gen.__iter__ = function() return gen end
   setmetatable(gen, {
     __call = function() return gen.__next__() end
   })
   return gen
 end
 
+function make_coroutine(fn, ...)
+  local args = {...}
+  local co = coroutine.create(function()
+    return fn(unpack(args))
+  end)
+  return co
+end
+
 function iter(t)
-  if type(t) == "table" and t.__next__ then return t end
+  if type(t) == "table" and t.__anext__ then
+    return function() return t:__anext__() end
+  end
+  if type(t) == "table" and t.__aiter__ then
+    local it = t:__aiter__()
+    if type(it) == "table" and it.__anext__ then
+      return function() return it:__anext__() end
+    end
+    return it
+  end
+  if type(t) == "table" and rawget(t, "_py") then
+    local ok, pb = pcall(require, "luthon.lua.pybridge")
+    if not ok or not pb then ok, pb = pcall(require, "src/luthon/lua/pybridge") end
+    if ok and pb and pb.get_lib then
+      local lib = pb.get_lib()
+      local it = lib.PyObject_GetIter(t._py)
+      if it ~= nil then
+        return function()
+          local item = lib.PyIter_Next(it)
+          if item == nil then
+            lib.Py_DecRef(it)
+            return nil
+          end
+          local res = pb.py_to_lua(item)
+          lib.Py_DecRef(item)
+          return res
+        end
+      end
+    end
+  end
+  if type(t) == "table" and t.__iter__ then
+    local it = t:__iter__()
+    if type(it) == "table" and it.__next__ then
+      return function() return it:__next__() end
+    end
+    return it
+  end
+  if type(t) == "table" and t.__next__ then
+    return function() return t:__next__() end
+  end
+  if type(t) == "userdata" and io.type(t) == "file" then return t:lines() end
+  if type(t) == "table" and t.lines then return t:lines() end
   if type(t) == "function" then return t end
   local i = 0
   return function()
@@ -981,10 +1856,10 @@ function unpack_list(t)
   return t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10]
 end
 function list_repeat(t, n) local r={}; for i=1,n do for _,v in ipairs(t) do r[#r+1]=v end end; return r end
-True = true
-False = false
-None = nil
-local _raw_str = function(x) return tostring(x or "") end
+local _raw_str = function(x)
+  if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return "None" end
+  return tostring(x or "")
+end
 local _raw_int = function(x, base)
   if x == nil then return 0 end
   if base then return tonumber(x, base) end
@@ -993,7 +1868,7 @@ end
 local _raw_float = function(x) return tonumber(x or 0.0) end
 function abs(x) return math.abs(x) end
 function repr(x)
-  if x == nil then return "None" end
+  if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return "None" end
   if type(x) == "string" then
     return string.format("%q", x)
   elseif type(x) == "boolean" then
@@ -1027,7 +1902,7 @@ function repr(x)
   return tostring(x)
 end
 local _raw_bool = function(x)
-  if x == nil or x == false then return false end
+  if x == nil or x == false or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return false end
   if type(x) == "number" then return x ~= 0 end
   if type(x) == "string" then return #x > 0 end
   if type(x) == "table" then
@@ -1036,71 +1911,6 @@ local _raw_bool = function(x)
     return next(x) ~= nil
   end
   return true
-end
-
-local _set_methods = {
-  add = function(self, x) self[x] = true end,
-  remove = function(self, x) if self[x] then self[x] = nil else error("KeyError: " .. tostring(x)) end end,
-  discard = function(self, x) self[x] = nil end,
-  clear = function(self) for k in pairs(self) do self[k] = nil end end,
-  pop = function(self)
-    for k in pairs(self) do
-      self[k] = nil
-      return k
-    end
-    error("KeyError: 'pop from an empty set'")
-  end
-}
-local _set_mt = {__index = _set_methods}
-
-local _frozenset_mt = {
-  __index = _set_methods,
-  __newindex = function() error("frozenset is immutable") end
-}
-
-local function _raw_set(t)
-  local s = setmetatable({}, _set_mt)
-  if t then
-    if type(t) == "table" then
-      for _, v in ipairs(t) do s[v] = true end
-    elseif type(t) == "string" then
-      for i = 1, #t do s[string.sub(t, i, i)] = true end
-    end
-  end
-  return s
-end
-
-local function _raw_frozenset(t)
-  local s = {}
-  if t then
-    if type(t) == "table" then
-      for _, v in ipairs(t) do s[v] = true end
-    elseif type(t) == "string" then
-      for i = 1, #t do s[string.sub(t, i, i)] = true end
-    end
-  end
-  return setmetatable(s, _frozenset_mt)
-end
-
-_bytes_mt = {
-  __bytes__ = true,
-  __tostring = function(t) return t[1] or "" end,
-  __len = function(t) return #(t[1] or "") end,
-  __index = function(t, k)
-    if type(k) == "number" then
-      local s = t[1] or ""
-      if k < 0 then k = #s + k + 1 else k = k + 1 end
-      return s:byte(k)
-    end
-    return nil
-  end
-}
-
-local function _raw_bytes(s)
-  if type(s) == "table" and getmetatable(s) == _bytearray_mt then
-    return setmetatable({tostring(s)}, _bytes_mt)
-  end
-  return setmetatable({tostring(s or "")}, _bytes_mt)
 end
 
 local _builtin_types = {}
@@ -1122,6 +1932,9 @@ end
 local _raw_list = list
 local _raw_dict = dict
 local _raw_tuple = tuple
+local _raw_set = set
+local _raw_frozenset = frozenset
+local _raw_bytes = bytes
 
 str = _create_builtin_type("str", _raw_str)
 int = _create_builtin_type("int", _raw_int)
@@ -1133,12 +1946,14 @@ tuple = _create_builtin_type("tuple", _raw_tuple)
 set = _create_builtin_type("set", _raw_set)
 frozenset = _create_builtin_type("frozenset", _raw_frozenset)
 bytes = _create_builtin_type("bytes", _raw_bytes)
+NoneType = _create_builtin_type("NoneType", function() return None end)
+object = _create_builtin_type("object", function() return {} end)
 
 _luthon_type = _create_builtin_type("type", function(...)
   local n = select("#", ...)
   if n == 1 then
     local x = select(1, ...)
-    if x == nil then return _builtin_types["NoneType"] end
+    if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return _builtin_types["NoneType"] end
     local lt = type(x)
     if lt == "number" then
       if math.floor(x) == x and not (x == 1/0 or x == -1/0) then
@@ -1151,6 +1966,10 @@ _luthon_type = _create_builtin_type("type", function(...)
     elseif lt == "boolean" then
       return bool
     elseif lt == "table" then
+      if rawget(x, "_py") then
+        local c = x.__class__
+        if c then return c end
+      end
       local c = rawget(x, "__class__") or (getmetatable(x) and getmetatable(x).__class)
       if c then return c end
       if rawget(x, "_bytes") or (getmetatable(x) and getmetatable(x) == _bytes_mt) then
@@ -1238,8 +2057,87 @@ function issubclass(sub, sup)
   return false
 end
 function round(x, n) n=n or 0; local f=10^n; return math.floor(x*f+0.5)/f end
-function min(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]<m then m=a[i] end end; return m end
-function max(...) local a={...}; local m=a[1]; for i=2,#a do if a[i]>m then m=a[i] end end; return m end
+function min(...)
+  local argc = select("#", ...)
+  local a = select(1, ...)
+  local key_fn = nil
+  for i = argc, 2, -1 do
+    local arg = select(i, ...)
+    if type(arg) == "table" and arg.key ~= nil then
+      key_fn = arg.key
+      break
+    end
+  end
+
+  if type(a) ~= "table" or a._py then
+    local args_list = {}
+    for i = 1, argc do
+      local arg = select(i, ...)
+      if type(arg) == "table" and arg.key ~= nil and i >= 2 then break end
+      table.insert(args_list, arg)
+    end
+    a = args_list
+  elseif type(a) == "table" and #a == 0 then
+    -- Table/dict with non-sequential or string keys: collect keys
+    local keys = {}
+    for k in pairs(a) do table.insert(keys, k) end
+    a = keys
+  end
+
+  local best_item = a[1]
+  local best_score = key_fn and key_fn(best_item) or best_item
+  local n = #a
+  for i = 2, n do
+    local item = a[i]
+    local score = key_fn and key_fn(item) or item
+    if _luthon_cmp("<", score, best_score) then
+      best_item = item
+      best_score = score
+    end
+  end
+  return best_item
+end
+
+function max(...)
+  local argc = select("#", ...)
+  local a = select(1, ...)
+  local key_fn = nil
+  for i = argc, 2, -1 do
+    local arg = select(i, ...)
+    if type(arg) == "table" and arg.key ~= nil then
+      key_fn = arg.key
+      break
+    end
+  end
+
+  if type(a) ~= "table" or a._py then
+    local args_list = {}
+    for i = 1, argc do
+      local arg = select(i, ...)
+      if type(arg) == "table" and arg.key ~= nil and i >= 2 then break end
+      table.insert(args_list, arg)
+    end
+    a = args_list
+  elseif type(a) == "table" and #a == 0 then
+    -- Table/dict with non-sequential or string keys: collect keys
+    local keys = {}
+    for k in pairs(a) do table.insert(keys, k) end
+    a = keys
+  end
+
+  local best_item = a[1]
+  local best_score = key_fn and key_fn(best_item) or best_item
+  local n = #a
+  for i = 2, n do
+    local item = a[i]
+    local score = key_fn and key_fn(item) or item
+    if _luthon_cmp(">", score, best_score) then
+      best_item = item
+      best_score = score
+    end
+  end
+  return best_item
+end
 function sum(t) local s=0; local n=#t; for i=1,n do s=s+t[i] end; return s end
 function sorted(...)
   local argc = select("#", ...)
@@ -1281,8 +2179,35 @@ function sorted(...)
   end)
   return r
 end
+function ord(c)
+  if type(c) == "string" then return string.byte(c) end
+  if type(c) == "number" then return c end
+  return tonumber(c) or 0
+end
+function chr(n)
+  return string.char(tonumber(n) or 0)
+end
 function reversed(t) local r={}; for i=#t,1,-1 do r[#r+1]=t[i] end; return r end
-function enumerate(t) local r={}; local n=#t; for i=1,n do r[#r+1]={i-1,t[i]} end; return r end
+function enumerate(t, start)
+  start = start or 0
+  local r = setmetatable({}, _list_mt)
+  if type(t) == "table" and rawget(t, "_py") ~= nil then
+    local n = #t
+    for i = 1, n do
+      r[#r + 1] = setmetatable({start + i - 1, t[i - 1]}, _tuple_mt)
+    end
+    return r
+  end
+  local it = iter(t)
+  local idx = start
+  while true do
+    local val = it()
+    if val == nil then break end
+    r[#r + 1] = setmetatable({idx, val}, _tuple_mt)
+    idx = idx + 1
+  end
+  return r
+end
 function zip(a,b) local r={}; for i=1,math.min(#a,#b) do r[#r+1]={a[i],b[i]} end; return r end
 function map(f,t)
   local r = setmetatable({}, _list_mt)
@@ -1302,62 +2227,39 @@ function filter(f,t) local r={}; local n=#t; for i=1,n do local v=t[i]; if f(v) 
 function any(t) local n=#t; for i=1,n do if t[i] then return true end end; return false end
 function all(t) local n=#t; for i=1,n do if not t[i] then return false end end; return true end
 
-local _set_methods = {
-  add = function(self, x) self[x] = true end,
-  remove = function(self, x) self[x] = nil end,
-  discard = function(self, x) self[x] = nil end,
-  clear = function(self) for k in pairs(self) do self[k] = nil end end,
-  pop = function(self)
-    for k in pairs(self) do
-      self[k] = nil
-      return k
+local _py_builtins = nil
+_ = _ or function(s)
+  if _py_builtins == nil then
+    local ok, pb = pcall(require, "src/luthon/lua/pybridge")
+    if ok and pb and pb.is_available() then
+      local ok_b, b = pcall(pb.import, "builtins")
+      if ok_b and b then _py_builtins = b end
     end
-    error("KeyError: 'pop from an empty set'")
-  end,
-  issuperset = function(self, other)
-    if type(other) == "string" then
-      for i = 1, #other do
-        local ch = string.sub(other, i, i)
-        if not self[ch] then return false end
-      end
-      return true
-    elseif type(other) == "table" then
-      for _, v in ipairs(other) do
-        if not self[v] then return false end
-      end
-      for k in pairs(other) do
-        if not self[k] then return false end
-      end
-      return true
-    end
-    return false
-  end,
-  issubset = function(self, other)
-    local o_set = (type(other) == "table" and getmetatable(other) == _set_mt) and other or set(other)
-    for k in pairs(self) do
-      if not o_set[k] then return false end
-    end
-    return true
-  end,
-}
-local _set_mt = {__index = _set_methods}
-
-local _frozenset_mt = {
-  __index = _set_methods,
-  __newindex = function() error("frozenset is immutable") end
-}
-
-function frozenset(t)
-  local s = {}
-  if t then
-    if type(t) == "table" then
-      for _, v in ipairs(t) do s[v] = true end
-    elseif type(t) == "string" then
-      for i = 1, #t do s[string.sub(t, i, i)] = true end
-    end
+    if not _py_builtins then _py_builtins = false end
   end
-  return setmetatable(s, _frozenset_mt)
+  if _py_builtins and _py_builtins._ then
+    local ok_call, res = pcall(_py_builtins._, s)
+    if ok_call and res ~= nil then return res end
+  end
+  return s
 end
+
+_n = _n or function(singular, plural, n)
+  if _py_builtins == nil then
+    local ok, pb = pcall(require, "src/luthon/lua/pybridge")
+    if ok and pb and pb.is_available() then
+      local ok_b, b = pcall(pb.import, "builtins")
+      if ok_b and b then _py_builtins = b end
+    end
+    if not _py_builtins then _py_builtins = false end
+  end
+  if _py_builtins and _py_builtins.ngettext then
+    local ok_call, res = pcall(_py_builtins.ngettext, singular, plural, n)
+    if ok_call and res ~= nil then return res end
+  end
+  if n == 1 then return singular else return plural end
+end
+ngettext = ngettext or _n
 
 function slice(start, stop, step)
   return {start = start, stop = stop, step = step or 1}
@@ -1372,6 +2274,18 @@ function property(fget, fset, fdel)
   end
   prop.__set__ = function(self, obj, val)
     if self.fset then self.fset(obj, val) end
+  end
+  prop.__delete__ = function(self, obj)
+    if self.fdel then self.fdel(obj) end
+  end
+  prop.setter = function(f)
+    return property(prop.fget, f, prop.fdel)
+  end
+  prop.deleter = function(f)
+    return property(prop.fget, prop.fset, f)
+  end
+  prop.getter = function(f)
+    return property(f, prop.fset, prop.fdel)
   end
   return prop
 end
@@ -1419,7 +2333,8 @@ function super(cls, obj)
         end
         target = target.__base__
       end
-      return function(...) end
+      if k == "__init__" then return function(...) end end
+      return nil
     end
   }
   return setmetatable(proxy, mt)
@@ -1467,6 +2382,13 @@ function getattr(obj, name, default)
     return val:__get__(obj, obj.__class__)
   end
   if val ~= nil then return val end
+  if type(obj) == "table" and _dict_methods[name] ~= nil then
+    return _dict_methods[name]
+  end
+  local cls = obj.__class__ or (getmetatable(obj) and getmetatable(obj).__index)
+  if type(cls) == "table" and type(cls[name]) == "table" and type(cls[name].__get__) == "function" then
+    return cls[name]:__get__(obj, cls)
+  end
   if type(obj.__getattr__) == "function" then
     local ok, res = pcall(obj.__getattr__, obj, name)
     if ok and res ~= nil then return res end
@@ -1557,18 +2479,169 @@ setmetatable(object, {
     return self
   end
 })
+
+local function _exception_str_impl(e)
+  if e.message ~= nil then return tostring(e.message) end
+  if e.__msg ~= nil then return tostring(e.__msg) end
+  if e.args and #e.args == 1 then return tostring(e.args[1]) end
+  return (e.__class__ and (e.__class__.__name__ or rawget(e.__class__, "__name__"))) or e.__type or "Exception"
+end
+
+local _exc_inst_mt = {
+  __tostring = function(e)
+    local s = rawget(e, "__str__")
+    if type(s) == "function" and s ~= _exc_inst_mt.__tostring and s ~= _exception_str_impl then return s(e) end
+    return _exception_str_impl(e)
+  end
+}
+
+Exception = Exception or {}
+Exception.__name__ = "Exception"
+Exception.__type = "Exception"
+Exception.__base__ = object
+Exception.__index = Exception
+Exception.__new__ = object.__new__
+Exception.__init__ = function(self, msg, ...)
+  if type(self) == "table" then
+    self.message = msg
+    self.__msg = msg
+    self.args = setmetatable({msg, ...}, _tuple_mt or {})
+  end
+end
+Exception.__str__ = _exception_str_impl
+Exception.__repr__ = function(self)
+  local name = (self.__class__ and self.__class__.__name__) or self.__type or "Exception"
+  local m = self.message or self.__msg
+  return name .. "(" .. (m and string.format("%q", tostring(m)) or "") .. ")"
+end
+Exception.__instance_mt = {
+  __index = Exception,
+  __tostring = _exc_inst_mt.__tostring
+}
+setmetatable(Exception, {
+  __index = object,
+  __call = function(c, msg, ...)
+    local inst = setmetatable({__class__ = c, __type = c.__name or "Exception"}, c.__instance_mt or _exc_inst_mt)
+    if c.__init__ then c.__init__(inst, msg, ...) end
+    return inst
+  end
+})
+_G.Exception = Exception
+if _G.__LUTHON_FN_PARAMS then
+  _G.__LUTHON_FN_PARAMS[Exception.__init__] = setmetatable({"self", "message"}, _tuple_mt or {})
+  _G.__LUTHON_FN_PARAMS[Exception] = setmetatable({"message"}, _tuple_mt or {})
+end
+
+local _STD_EXCEPTIONS = {
+  "BaseException", "ValueError", "TypeError", "AssertionError",
+  "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+  "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
+  "ImportError", "ModuleNotFoundError"
+}
+
+for _, cls_name in ipairs(_STD_EXCEPTIONS) do
+  local exc = _G[cls_name] or {}
+  exc.__name__ = cls_name
+  exc.__type = cls_name
+  exc.__base__ = Exception
+  exc.__index = exc
+  exc.__new__ = object.__new__
+  exc.__init__ = Exception.__init__
+  exc.__str__ = Exception.__str__
+  exc.__repr__ = Exception.__repr__
+  exc.__instance_mt = {
+    __index = exc,
+    __tostring = _exc_inst_mt.__tostring
+  }
+  setmetatable(exc, {
+    __index = Exception,
+    __call = function(c, msg, ...)
+      local inst = setmetatable({__class__ = c, __type = c.__name or cls_name}, c.__instance_mt or _exc_inst_mt)
+      if c.__init__ then c.__init__(inst, msg, ...) end
+      return inst
+    end
+  })
+  _G[cls_name] = exc
+  if _G.__LUTHON_FN_PARAMS then
+    _G.__LUTHON_FN_PARAMS[exc] = setmetatable({"message"}, _tuple_mt or {})
+  end
+end
+
+if _G.ModuleNotFoundError and _G.ImportError then
+  _G.ModuleNotFoundError.__base__ = _G.ImportError
+end
+
+local function _exception_tostring(err)
+  if type(err) ~= "table" then return tostring(err) end
+  local cls_name = (err.__class__ and err.__class__.__name__) or "Exception"
+  local msg = (err.args and err.args[1]) or err.message or err.msg or ""
+  if msg ~= "" then
+    return cls_name .. ": " .. tostring(msg)
+  end
+  return cls_name
+end
+
+local _error = error
+error = function(err, level)
+  if type(err) == "table" then
+    local mt = getmetatable(err)
+    if not mt then
+      setmetatable(err, { __tostring = _exception_tostring })
+    elseif not mt.__tostring then
+      mt.__tostring = _exception_tostring
+    end
+    _error(err, level or 1)
+  else
+    _error(err, level or 1)
+  end
+end
 _G["exec"] = _G["exec"] or function(...) end
 __name__ = __name__ or "__main__"
+os.sep = "/"
+os.name = "posix"
+os.linesep = "\n"
+os.curdir = "."
+os.pardir = ".."
+os.devnull = "/dev/null"
 os.path = os.path or {}
-os.path.join = function(...) local a={...}; return table.concat(a, "/") end
-os.path.dirname = os.path.dirname or function(p)
+os.path.sep = "/"
+os.path.curdir = "."
+os.path.pardir = ".."
+os.path.devnull = "/dev/null"
+local _PATH_BUF = ffi.new("char[1024]")
+os.path.join = function(...)
+  local n = select("#", ...)
+  if n == 0 then return "" end
+  if _luthon_native_lib ~= nil then
+    local cur = tostring(select(1, ...) or "")
+    for i = 2, n do
+      local part = tostring(select(i, ...) or "")
+      local written = _luthon_native_lib.luthon_path_join(cur, part, _PATH_BUF, 1024)
+      cur = ffi.string(_PATH_BUF, written)
+    end
+    return cur
+  end
+  local a = {...}
+  return table.concat(a, "/")
+end
+
+os.path.dirname = function(p)
   p = tostring(p or "")
+  if _luthon_native_lib ~= nil then
+    local written = _luthon_native_lib.luthon_path_dirname(p, _PATH_BUF, 1024)
+    return ffi.string(_PATH_BUF, written)
+  end
   local dir = p:match("^(.*)/[^/]*$")
   if dir == "" then return "/" end
   return dir or "."
 end
-os.path.basename = os.path.basename or function(p)
+
+os.path.basename = function(p)
   p = tostring(p or "")
+  if _luthon_native_lib ~= nil then
+    local ptr = _luthon_native_lib.luthon_path_basename(p)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end
   return p:match("^.*/([^/]*)$") or p
 end
 os.path.splitext = os.path.splitext or function(p)
@@ -1591,18 +2664,68 @@ os.path.abspath = os.path.abspath or function(p)
   if p == "" or p == "." then return cwd end
   return cwd .. "/" .. p
 end
+os.path.expanduser = function(p)
+  p = tostring(p or "")
+  local home = os.getenv("HOME") or "/"
+  if p == "~" then return home end
+  if p:sub(1, 2) == "~/" then return home .. p:sub(2) end
+  return p
+end
+
+os.path.expandvars = function(p)
+  p = tostring(p or "")
+  return p:gsub("%${([%w_]+)}", function(v) return os.getenv(v) or ("${" .. v .. "}") end)
+          :gsub("%$([%w_]+)", function(v) return os.getenv(v) or ("$" .. v) end)
+end
+
 os.path.getsize = os.path.getsize or function(p)
+  p = tostring(p or "")
   local f = io.open(p, "rb")
-  if not f then return 0 end
+  if not f then
+    if FileNotFoundError then
+      error(FileNotFoundError("No such file or directory: " .. p), 0)
+    else
+      error("FileNotFoundError: No such file or directory: " .. p, 0)
+    end
+  end
   local sz = f:seek("end")
   f:close()
   return sz or 0
 end
-os.path.exists = os.path.exists or function(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
-os.path.isfile = os.path.isfile or os.path.exists
+os.path.exists = os.path.exists or function(p)
+  p = tostring(p or "")
+  if p == "" then return false end
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_exists(p)
+  end
+  if _LUTHON_STAT_BUF ~= nil then
+    return ffi.C.stat(p, _LUTHON_STAT_BUF) == 0
+  end
+  local f = io.open(p, "r"); if f then f:close(); return true end; return false
+end
+os.path.isfile = os.path.isfile or function(p)
+  p = tostring(p or "")
+  if p == "" then return false end
+  if _LUTHON_STAT_BUF ~= nil and ffi.C.stat(p, _LUTHON_STAT_BUF) == 0 then
+    local bit_ok, bit_mod = pcall(require, "bit")
+    if bit_ok and bit_mod then
+      return bit_mod.band(_LUTHON_STAT_BUF.st_mode, 0x8000) ~= 0
+    end
+  end
+  return os.path.exists(p)
+end
 os.path.isdir = os.path.isdir or function(p)
   p = tostring(p or "")
   if p == "" then return false end
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_isdir(p)
+  end
+  if _LUTHON_STAT_BUF ~= nil and ffi.C.stat(p, _LUTHON_STAT_BUF) == 0 then
+    local bit_ok, bit_mod = pcall(require, "bit")
+    if bit_ok and bit_mod then
+      return bit_mod.band(_LUTHON_STAT_BUF.st_mode, 0x4000) ~= 0
+    end
+  end
   local ok = os.execute("test -d \"" .. p .. "\"")
   return ok == true or ok == 0
 end
@@ -1622,11 +2745,39 @@ math.sqrt = math.sqrt
 os.getenv = os.getenv or function(k) return nil end
 os.makedirs = os.makedirs or function(p)
   p = tostring(p or "")
+  if p == "" or os.path.isdir(p) then return end
+  if _LUTHON_STAT_BUF ~= nil then
+    local parts = {}
+    for part in p:gmatch("[^/]+") do table.insert(parts, part) end
+    local cur = p:sub(1, 1) == "/" and "/" or ""
+    for _, part in ipairs(parts) do
+      cur = cur == "/" and ("/" .. part) or (cur == "" and part or (cur .. "/" .. part))
+      if not os.path.isdir(cur) then
+        ffi.C.mkdir(cur, 511)
+      end
+    end
+    return
+  end
   if p ~= "" then os.execute("mkdir -p \"" .. p .. "\"") end
 end
 os.listdir = os.listdir or function(p)
   p = tostring(p or ".")
   local results = setmetatable({}, _list_mt)
+  if ffi and ffi.C and ffi.C.opendir then
+    local d = ffi.C.opendir(p)
+    if d ~= nil then
+      while true do
+        local ent = ffi.C.readdir(d)
+        if ent == nil then break end
+        local name = ffi.string(ent.d_name)
+        if name ~= "." and name ~= ".." then
+          table.insert(results, name)
+        end
+      end
+      ffi.C.closedir(d)
+      return results
+    end
+  end
   local cmd = "ls -1 -a \"" .. p .. "\" 2>/dev/null"
   local pipe = io.popen(cmd)
   if not pipe then return results end
@@ -1640,6 +2791,43 @@ os.listdir = os.listdir or function(p)
 end
 os.walk = os.walk or function(top)
   local results = setmetatable({}, _list_mt)
+  if not top or not os.path.isdir(top) then return results end
+  top = tostring(top or ".")
+  if ffi and ffi.C and ffi.C.opendir and _LUTHON_STAT_BUF ~= nil then
+    local bit_ok, bit_mod = pcall(require, "bit")
+    local function walk_rec(dir)
+      local d = ffi.C.opendir(dir)
+      if d == nil then return end
+      local subdirs = setmetatable({}, _list_mt)
+      local files = setmetatable({}, _list_mt)
+      while true do
+        local ent = ffi.C.readdir(d)
+        if ent == nil then break end
+        local name = ffi.string(ent.d_name)
+        if name ~= "." and name ~= ".." then
+          local full = dir .. "/" .. name
+          if ent.d_type == 4 then
+            table.insert(subdirs, name)
+          elseif ent.d_type == 0 and bit_ok and bit_mod then
+            if ffi.C.stat(full, _LUTHON_STAT_BUF) == 0 and bit_mod.band(_LUTHON_STAT_BUF.st_mode, 0x4000) ~= 0 then
+              table.insert(subdirs, name)
+            else
+              table.insert(files, name)
+            end
+          else
+            table.insert(files, name)
+          end
+        end
+      end
+      ffi.C.closedir(d)
+      table.insert(results, setmetatable({dir, subdirs, files}, _list_mt))
+      for _, s in ipairs(subdirs) do
+        walk_rec(dir .. "/" .. s)
+      end
+    end
+    walk_rec(top)
+    return results
+  end
   local p = io.popen("find \"" .. top .. "\" 2>/dev/null")
   if not p then return results end
   local dirs_map = {}
@@ -1709,6 +2897,20 @@ random.randint = function(a,b) return math.random(a,b) end
 random.choice = function(t) return t[math.random(1,#t)] end
 random.seed = function(x) math.randomseed(x) end
 
+local _py_re = nil
+local function _get_py_re()
+  if _py_re == nil then
+    local ok, pb = pcall(require, "luthon.lua.pybridge")
+    if not ok or not pb then ok, pb = pcall(require, "src/luthon/lua/pybridge") end
+    if ok and pb and pb.is_available() then
+      local ok_r, r = pcall(pb.import, "re")
+      if ok_r and r then _py_re = r end
+    end
+    if not _py_re then _py_re = false end
+  end
+  return _py_re
+end
+
 re = {}
 re.IGNORECASE = 2
 re.I = 2
@@ -1721,6 +2923,16 @@ re.X = 64
 re.ASCII = 256
 re.A = 256
 re.compile = function(pattern, flags)
+  local pyr = _get_py_re()
+  if pyr then
+    local ok, res
+    if flags ~= nil and flags ~= 0 then
+      ok, res = pcall(pyr.compile, pattern, flags)
+    else
+      ok, res = pcall(pyr.compile, pattern)
+    end
+    if ok and res then return res end
+  end
   local obj = {
     pattern = pattern,
     flags = flags or 0,
@@ -1762,10 +2974,105 @@ re.compile = function(pattern, flags)
   }
   return obj
 end
-re.match = function(pat, s) return string.match(s, pat) end
-re.search = function(pat, s) return string.match(s, pat) end
-re.sub = function(pat, repl, s) return (string.gsub(s, pat, repl)) end
-re.findall = function(pat, s) local r={}; for m in string.gmatch(s, pat) do r[#r+1]=m end; return r end
+re.match = function(pat, s, flags)
+  if s == nil then
+    if TypeError then error(TypeError("expected string or bytes-like object, got 'NoneType'"), 0)
+    else error("TypeError: expected string or bytes-like object, got 'NoneType'", 0) end
+  end
+  -- If pat is a compiled regex (PyProxy), use its .match method
+  if type(pat) == "table" and rawget(pat, "_py") and pat.match then
+    local bound = pat.match
+    return bound(s)
+  end
+  local pyr = _get_py_re()
+  if pyr then
+    if flags ~= nil then
+      return pyr.match(pat, s, flags)
+    else
+      return pyr.match(pat, s)
+    end
+  end
+  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
+  return string.match(s, p)
+end
+re.search = function(pat, s, flags)
+  if s == nil then
+    if TypeError then error(TypeError("expected string or bytes-like object, got 'NoneType'"), 0)
+    else error("TypeError: expected string or bytes-like object, got 'NoneType'", 0) end
+  end
+  -- If pat is a compiled regex (PyProxy), use its .search method
+  if type(pat) == "table" and rawget(pat, "_py") and pat.search then
+    local bound = pat.search
+    return bound(s)
+  end
+  local pyr = _get_py_re()
+  if pyr then
+    if flags ~= nil then
+      return pyr.search(pat, s, flags)
+    else
+      return pyr.search(pat, s)
+    end
+  end
+  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
+  return string.match(s, p)
+end
+re.sub = function(pat, repl, s, count, flags)
+  -- If pat is a compiled regex (PyProxy), use its .sub method
+  if type(pat) == "table" and rawget(pat, "_py") and pat.sub then
+    local bound = pat.sub
+    local ok, res
+    if count ~= nil then
+      ok, res = pcall(bound, repl, s, count)
+    else
+      ok, res = pcall(bound, repl, s)
+    end
+    if ok then return res end
+  end
+  local pyr = _get_py_re()
+  if pyr then
+    local ok, res
+    if count ~= nil and flags ~= nil then
+      ok, res = pcall(pyr.sub, pat, repl, s, count, flags)
+    elseif count ~= nil then
+      ok, res = pcall(pyr.sub, pat, repl, s, count)
+    else
+      ok, res = pcall(pyr.sub, pat, repl, s)
+    end
+    if ok then return res end
+  end
+  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
+  return (string.gsub(s, p, repl))
+end
+re.findall = function(pat, s, flags)
+  -- If pat is a compiled regex (PyProxy), use its .findall method
+  if type(pat) == "table" and rawget(pat, "_py") and pat.findall then
+    local bound = pat.findall
+    local ok, res = pcall(bound, s)
+    if ok then return res end
+  end
+  local pyr = _get_py_re()
+  if pyr then
+    local ok, res
+    if flags ~= nil then
+      ok, res = pcall(pyr.findall, pat, s, flags)
+    else
+      ok, res = pcall(pyr.findall, pat, s)
+    end
+    if ok then return res end
+  end
+  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
+  local r = {}
+  for m in string.gmatch(s, p) do r[#r+1] = m end
+  return r
+end
+
+setmetatable(re, {
+  __index = function(t, k)
+    local pyr = _get_py_re()
+    if pyr and pyr[k] ~= nil then return pyr[k] end
+    return nil
+  end
+})
 
 -- os extended
 os.environ = os.environ or {}
@@ -1928,6 +3235,27 @@ functools.partial = function(func, ...)
     return func(unpack_list(all))
   end
 end
+functools.update_wrapper = function(wrapper, wrapped)
+  if type(wrapper) == "table" or type(wrapper) == "function" then
+    if type(wrapped) == "table" or type(wrapped) == "function" then
+      if type(wrapper) == "table" and type(wrapped) == "table" then
+        if wrapped.__name__ then wrapper.__name__ = wrapped.__name__ end
+        if wrapped.__doc__ then wrapper.__doc__ = wrapped.__doc__ end
+        if wrapped.__annotations__ then wrapper.__annotations__ = wrapped.__annotations__ end
+        if wrapped.__qualname__ then wrapper.__qualname__ = wrapped.__qualname__ end
+      end
+      if type(wrapper) == "table" then
+        wrapper.__wrapped__ = wrapped
+      end
+    end
+  end
+  return wrapper
+end
+functools.wraps = function(wrapped)
+  return function(wrapper)
+    return functools.update_wrapper(wrapper, wrapped)
+  end
+end
 functools.lru_cache = function(func)
   local cache = {}
   return function(...)
@@ -2007,7 +3335,37 @@ datetime.timedelta = function(days, seconds, microseconds, milliseconds, minutes
   return {days = days or 0, seconds = seconds or 0}
 end
 
--- string constants
+-- time
+time = time or {}
+local _time_tv = nil
+pcall(function()
+  ffi.cdef[[
+    typedef struct timeval {
+      long tv_sec;
+      long tv_usec;
+    } timeval;
+    int gettimeofday(struct timeval *tv, void *tz);
+  ]]
+  _time_tv = ffi.new("struct timeval")
+end)
+
+time.time = function()
+  if _time_tv ~= nil and ffi.C.gettimeofday then
+    ffi.C.gettimeofday(_time_tv, nil)
+    return tonumber(_time_tv.tv_sec) + tonumber(_time_tv.tv_usec) * 1e-6
+  end
+  return os.time()
+end
+time.perf_counter = time.time
+time.monotonic = time.time
+time.sleep = function(secs)
+  pcall(function()
+    ffi.cdef[[ int usleep(unsigned int usec); ]]
+    ffi.C.usleep(math.floor((secs or 0) * 1000000))
+  end)
+end
+
+-- string constants and methods
 string.ascii_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 string.ascii_lowercase = "abcdefghijklmnopqrstuvwxyz"
 string.ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -2016,6 +3374,45 @@ string.hexdigits = "0123456789abcdefABCDEF"
 string.octdigits = "01234567"
 string.punctuation = string.char(33,35,36,37,38,39,40,41,42,43,44,45,46,47,58,59,60,61,62,63,64,91,92,93,94,95,96,123,124,125,126)
 string.whitespace = " \t\n\r\f\v"
+string.strip = function(self, chars) return _str_methods.strip(self, chars) end
+string.lstrip = function(self, chars) return _str_methods.lstrip(self, chars) end
+string.rstrip = function(self, chars) return _str_methods.rstrip(self, chars) end
+string.split = function(self, sep)
+  sep = sep or "%s"
+  local r = {}
+  for part in string.gmatch(self, "([^" .. sep .. "]+)") do r[#r + 1] = part end
+  return r
+end
+string.replace = function(self, a, b) return (string.gsub(self, a, b)) end
+string.startswith = function(self, p)
+  if type(p) == "table" then
+    for i = 1, #p do
+      local pref = p[i]
+      if string.sub(self, 1, #pref) == pref then return true end
+    end
+    return false
+  end
+  return string.sub(self, 1, #p) == p
+end
+string.endswith = function(self, p)
+  if type(p) == "table" then
+    for i = 1, #p do
+      local suf = p[i]
+      if suf == "" or string.sub(self, -#suf) == suf then return true end
+    end
+    return false
+  end
+  return p == "" or string.sub(self, -#p) == p
+end
+string.find_py = function(self, p)
+  local pos = string.find(self, p, 1, true)
+  return pos and (pos - 1) or -1
+end
+string.join = function(self, t)
+  local r = {}
+  for i, v in ipairs(t or {}) do r[#r + 1] = tostring(v) end
+  return table.concat(r, self)
+end
 
 -- base64
 base64 = {}
@@ -2045,8 +3442,12 @@ base64.b64encode = function(data)
   local len = #data
   if len == 0 then return "" end
 
-  if _b64_ffi_ok and _b64_bit_ok then
+  if _luthon_native_lib ~= nil then
     local max_out = math.floor((len + 2) / 3) * 4 + 4
+    local buf = ffi.new("char[?]", max_out)
+    local n = _luthon_native_lib.luthon_b64_encode(ffi.cast("const uint8_t*", data), len, buf)
+    return ffi.string(buf, n)
+  elseif _b64_ffi_ok and _b64_bit_ok then
     local buf = _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local out_pos = 0
@@ -2109,8 +3510,12 @@ base64.b64decode = function(data)
   local len = #data
   if len == 0 then return "" end
 
-  if _b64_ffi_ok and _b64_bit_ok then
+  if _luthon_native_lib ~= nil then
     local max_out = math.floor(len * 3 / 4) + 4
+    local buf = ffi.new("uint8_t[?]", max_out)
+    local n = _luthon_native_lib.luthon_b64_decode(data, len, buf)
+    return ffi.string(buf, n)
+  elseif _b64_ffi_ok and _b64_bit_ok then
     local buf = _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local quad_idx = 0
@@ -2176,6 +3581,37 @@ base64.b64decode = function(data)
   return table.concat(result)
 end
 
+local py_base64 = nil
+local function _get_py_base64()
+  if not py_base64 then
+    local ok, pb = _G.pcall(_G.require, "src/luthon/lua/pybridge")
+    if not ok or not pb then
+      ok, pb = _G.pcall(_G.require, "luthon.lua.pybridge")
+    end
+    if ok and pb and pb.is_available() then
+      local ok_imp, mod = _G.pcall(pb.import, "base64")
+      if ok_imp and mod then
+        py_base64 = mod
+      end
+    end
+  end
+  return py_base64
+end
+
+setmetatable(base64, {
+  __index = function(t, k)
+    local py_b = _get_py_base64()
+    if py_b then
+      local val = py_b[k]
+      if val ~= nil then
+        rawset(t, k, val)
+        return val
+      end
+    end
+    return nil
+  end
+})
+
 -- io StringIO
 io.StringIO = function(initial)
   local s = {_buf = initial or "", _pos = 1}
@@ -2186,6 +3622,9 @@ io.StringIO = function(initial)
   return s
 end
 
+local _cached_py_bio_ctor = nil
+local _cached_py_libpy = nil
+local _cached_py_bridge = nil
 local _cached_capi_stream = nil
 
 io.BytesIO = function(initial)
@@ -2295,6 +3734,14 @@ io.BytesIO = function(initial)
     end
   end
 
+  -- 2. Fallback to CPython bridge if native stream unavailable
+  if _cached_py_bio_ctor ~= nil then
+    local b = _cached_py_libpy.PyBytes_FromStringAndSize(initial, #initial)
+    local proxy = _cached_py_bridge.make_proxy(b)
+    _cached_py_libpy.Py_DecRef(b)
+    return _cached_py_bio_ctor(proxy)
+  end
+
   local ok, py_bridge = pcall(require, "luthon.lua.pybridge")
   if not ok or not py_bridge then
     ok, py_bridge = pcall(require, "src/luthon/lua/pybridge")
@@ -2309,9 +3756,13 @@ io.BytesIO = function(initial)
       if ok_mod and mm and mm.load then
         local pio = mm.load("io")
         if pio and pio.BytesIO then
+          _cached_py_bridge = py_bridge
+          _cached_py_libpy = libpy
+          _cached_py_bio_ctor = pio.BytesIO
           local b = libpy.PyBytes_FromStringAndSize(initial, #initial)
           local proxy = py_bridge.make_proxy(b)
-          return pio.BytesIO(proxy)
+          libpy.Py_DecRef(b)
+          return _cached_py_bio_ctor(proxy)
         end
       end
     end
@@ -2319,41 +3770,228 @@ io.BytesIO = function(initial)
   return io.StringIO(initial)
 end
 
--- struct (minimal)
+-- struct (minimal + pybridge fallback)
 struct = {}
-struct.pack = function(fmt, ...)
-  if fmt == ">B" or fmt == "B" or fmt == ">b" or fmt == "b" then
-    local v = ...
-    return string.char(v % 256)
+struct.error = setmetatable({
+  __name__ = "error",
+  __type = "struct.error",
+  __base__ = Exception,
+  __instance_mt = {
+    __index = function(inst, k) return inst.__class__ and inst.__class__[k] or Exception[k] end,
+    __tostring = _exc_inst_mt and _exc_inst_mt.__tostring or tostring,
+  }
+}, {
+  __index = Exception,
+  __call = function(c, msg, ...)
+    local inst = setmetatable({__class__ = c, __type = "struct.error"}, c.__instance_mt or _exc_inst_mt)
+    if Exception and Exception.__init__ then Exception.__init__(inst, msg, ...) end
+    return inst
   end
-  -- minimal: only support ">i" (big-endian int32)
-  if fmt == ">i" then
-    local v = ...
-    local b4 = math.floor(v / 16777216) % 256
-    local b3 = math.floor(v / 65536) % 256
-    local b2 = math.floor(v / 256) % 256
-    local b1 = v % 256
-    return string.char(b4, b3, b2, b1)
+})
+
+local _struct_type_sizes = {
+  x = 1, c = 1, b = 1, B = 1, ["?"] = 1,
+  h = 2, H = 2,
+  i = 4, I = 4, l = 4, L = 4, f = 4,
+  q = 8, Q = 8, d = 8,
+}
+struct.calcsize = function(fmt)
+  local size = 0
+  local i = 1
+  local first = fmt:sub(1, 1)
+  if first == "@" or first == "=" or first == "<" or first == ">" or first == "!" then
+    i = 2
+  end
+  while i <= #fmt do
+    local num_str = fmt:match("^(%d+)", i)
+    local count = 1
+    if num_str then
+      count = tonumber(num_str)
+      i = i + #num_str
+    end
+    if i <= #fmt then
+      local ch = fmt:sub(i, i)
+      if ch == "s" or ch == "p" then
+        size = size + count
+      elseif _struct_type_sizes[ch] then
+        size = size + count * _struct_type_sizes[ch]
+      end
+      i = i + 1
+    end
+  end
+  return size
+end
+
+local py_struct = nil
+local function _get_py_struct()
+  if not py_struct then
+    local ok, pb = _G.pcall(_G.require, "src/luthon/lua/pybridge")
+    if not ok or not pb then
+      ok, pb = _G.pcall(_G.require, "luthon.lua.pybridge")
+    end
+    if ok and pb and pb.is_available() then
+      local ok_imp, mod = _G.pcall(pb.import, "struct")
+      if ok_imp and mod then
+        py_struct = mod
+      end
+    end
+  end
+  return py_struct
+end
+
+struct.pack = function(fmt, ...)
+  local args = {...}
+  local arg_idx = 1
+  local endian = ">"
+  local i = 1
+  local first = fmt:sub(1, 1)
+  if first == "<" or first == ">" or first == "!" or first == "=" or first == "@" then
+    if first == "<" then endian = "<" else endian = ">" end
+    i = 2
+  end
+  local out = {}
+  while i <= #fmt do
+    local num_str = fmt:match("^(%d+)", i)
+    local count = 1
+    if num_str then count = tonumber(num_str); i = i + #num_str end
+    if i <= #fmt then
+      local ch = fmt:sub(i, i)
+      if ch == "s" or ch == "p" then
+        local val = args[arg_idx]
+        if type(val) == "table" and val[1] and type(val[1]) == "string" then val = val[1] end
+        val = tostring(val or "")
+        arg_idx = arg_idx + 1
+        if #val < count then val = val .. string.rep("\0", count - #val)
+        elseif #val > count then val = val:sub(1, count) end
+        table.insert(out, val)
+      elseif ch == "x" then
+        table.insert(out, string.rep("\0", count))
+      else
+        for _ = 1, count do
+          local v = tonumber(args[arg_idx] or 0)
+          arg_idx = arg_idx + 1
+          if ch == "B" or ch == "b" or ch == "c" or ch == "?" then
+            table.insert(out, string.char(v % 256))
+          elseif ch == "H" or ch == "h" then
+            local b1 = v % 256
+            local b2 = math.floor(v / 256) % 256
+            if endian == "<" then table.insert(out, string.char(b1, b2))
+            else table.insert(out, string.char(b2, b1)) end
+          elseif ch == "I" or ch == "i" or ch == "L" or ch == "l" then
+            local b1 = v % 256
+            local b2 = math.floor(v / 256) % 256
+            local b3 = math.floor(v / 65536) % 256
+            local b4 = math.floor(v / 16777216) % 256
+            if endian == "<" then table.insert(out, string.char(b1, b2, b3, b4))
+            else table.insert(out, string.char(b4, b3, b2, b1)) end
+          end
+        end
+      end
+      i = i + 1
+    end
+  end
+  if #out > 0 then return table.concat(out) end
+
+  local py_s = _get_py_struct()
+  if py_s then
+    local res = py_s.pack(fmt, ...)
+    if type(res) == "table" and rawget(res, "_py") then
+      local pb = require("src/luthon/lua/pybridge")
+      local libpy = pb.get_lib()
+      local ffi = require("ffi")
+      local s = libpy.PyBytes_AsString(res._py)
+      local sz = libpy.PyBytes_Size(res._py)
+      return ffi.string(s, sz)
+    end
+    return res
   end
   return ""
 end
 struct.unpack = function(fmt, s)
-  if (fmt == ">B" or fmt == "B") and #s >= 1 then
-    return s:byte(1)
+  if type(s) == "table" and s[1] and type(s[1]) == "string" then
+    s = s[1]
   end
-  if fmt == ">i" and #s >= 4 then
-    local b1, b2, b3, b4 = s:byte(1, 4)
-    return b4 + b3 * 256 + b2 * 65536 + b1 * 16777216
+  s = tostring(s or "")
+  local endian = ">"
+  local i = 1
+  local first = fmt:sub(1, 1)
+  if first == "<" or first == ">" or first == "!" or first == "=" or first == "@" then
+    if first == "<" then endian = "<" else endian = ">" end
+    i = 2
   end
-  return 0
+  local s_pos = 1
+  local out = {}
+  while i <= #fmt do
+    local num_str = fmt:match("^(%d+)", i)
+    local count = 1
+    if num_str then count = tonumber(num_str); i = i + #num_str end
+    if i <= #fmt then
+      local ch = fmt:sub(i, i)
+      if ch == "s" or ch == "p" then
+        table.insert(out, s:sub(s_pos, s_pos + count - 1))
+        s_pos = s_pos + count
+      elseif ch == "x" then
+        s_pos = s_pos + count
+      else
+        for _ = 1, count do
+          if ch == "B" or ch == "b" or ch == "c" or ch == "?" then
+            table.insert(out, s:byte(s_pos) or 0)
+            s_pos = s_pos + 1
+          elseif ch == "H" or ch == "h" then
+            local b1 = s:byte(s_pos) or 0
+            local b2 = s:byte(s_pos + 1) or 0
+            s_pos = s_pos + 2
+            if endian == "<" then table.insert(out, b1 + b2 * 256)
+            else table.insert(out, b2 + b1 * 256) end
+          elseif ch == "I" or ch == "i" or ch == "L" or ch == "l" then
+            local b1 = s:byte(s_pos) or 0
+            local b2 = s:byte(s_pos + 1) or 0
+            local b3 = s:byte(s_pos + 2) or 0
+            local b4 = s:byte(s_pos + 3) or 0
+            s_pos = s_pos + 4
+            if endian == "<" then table.insert(out, b1 + b2 * 256 + b3 * 65536 + b4 * 16777216)
+            else table.insert(out, b4 + b3 * 256 + b2 * 65536 + b1 * 16777216) end
+          end
+        end
+      end
+      i = i + 1
+    end
+  end
+  if #out > 0 then return setmetatable(out, _tuple_mt or {}) end
+
+  local py_s = _get_py_struct()
+  if py_s then
+    local pb = require("src/luthon/lua/pybridge")
+    local libpy = pb.get_lib()
+    local py_bytes = libpy.PyBytes_FromStringAndSize(s, #s)
+    local res = py_s.unpack(fmt, py_bytes)
+    libpy.Py_DecRef(py_bytes)
+    return res
+  end
+  return setmetatable({0}, _tuple_mt or {})
 end
 struct.Struct = setmetatable({}, {
   __call = function(_, fmt)
     return {
       format = fmt,
+      size = struct.calcsize(fmt),
       pack = function(self, ...) return struct.pack(fmt, ...) end,
       unpack = function(self, s) return struct.unpack(fmt, s) end
     }
+  end
+})
+
+setmetatable(struct, {
+  __index = function(t, k)
+    local py_s = _get_py_struct()
+    if py_s then
+      local val = py_s[k]
+      if val ~= nil then
+        rawset(t, k, val)
+        return val
+      end
+    end
+    return nil
   end
 })
 
@@ -2437,7 +4075,7 @@ do
     if real_hex then return make_hash_obj(data, real_hex) end
     local h = 0
     for i = 1, #data do h = (h * 37 + data:byte(i)) % 4294967296 end
-    local hex = string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
+    local hex = string.format("%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
     return make_hash_obj(data, hex)
   end
 
@@ -2447,7 +4085,7 @@ do
     if real_hex then return make_hash_obj(data, real_hex) end
     local h = 0
     for i = 1, #data do h = (h * 41 + data:byte(i)) % 4294967296 end
-    local hex = string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296, h * 1103515245 % 4294967296, h * 12345 % 4294967296, h * 99991 % 4294967296)
+    local hex = string.format("%08x%08x%08x%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296, h * 1103515245 % 4294967296, h * 12345 % 4294967296, h * 99991 % 4294967296)
     return make_hash_obj(data, hex)
   end
 
@@ -2511,6 +4149,16 @@ typing.Generic = function(base) return base end
 typing.TypeVar = function(name, ...) return name end
 typing.NoReturn = {}
 typing.ClassVar = function(x) return x end
+setmetatable(typing, {
+  __index = function(t, k)
+    local dummy = setmetatable({}, {
+      __index = function(_, _) return t.Any end,
+      __call = function(_, ...) return ... end,
+    })
+    rawset(t, k, dummy)
+    return dummy
+  end
+})
 
 -- json (complete with FFI cJSON acceleration and fast fallback)
 json = {}
@@ -2571,38 +4219,40 @@ local function _get_cjson()
   return nil
 end
 
-local function _cjson_node_to_lua(node, ffi_mod)
+local function _cjson_node_to_lua(node, ffi_str_fn)
   if node == nil then return nil end
   local t = node.type
+  if t >= 256 then t = t % 256 end
+
   if t == 16 then -- cJSON_String
-    return ffi_mod.string(node.valuestring)
+    return ffi_str_fn(node.valuestring)
   elseif t == 8 then -- cJSON_Number
     return node.valuedouble
+  elseif t == 64 then -- cJSON_Object
+    local obj = {}
+    local curr = node.child
+    while curr ~= nil do
+      obj[ffi_str_fn(curr.string)] = _cjson_node_to_lua(curr, ffi_str_fn)
+      curr = curr.next
+    end
+    return obj
+  elseif t == 32 then -- cJSON_Array
+    local arr = {}
+    local curr = node.child
+    local idx = 1
+    while curr ~= nil do
+      arr[idx] = _cjson_node_to_lua(curr, ffi_str_fn)
+      idx = idx + 1
+      curr = curr.next
+    end
+    rawset(arr, "_len", idx - 1)
+    return arr
   elseif t == 2 then -- cJSON_True
     return true
   elseif t == 1 then -- cJSON_False
     return false
   elseif t == 4 then -- cJSON_NULL
     return nil
-  elseif t == 32 then -- cJSON_Array
-    local arr = {}
-    local curr = node.child
-    local idx = 1
-    while curr ~= nil do
-      arr[idx] = _cjson_node_to_lua(curr, ffi_mod)
-      idx = idx + 1
-      curr = curr.next
-    end
-    rawset(arr, "_len", idx - 1)
-    return arr
-  elseif t == 64 then -- cJSON_Object
-    local obj = {}
-    local curr = node.child
-    while curr ~= nil do
-      obj[ffi_mod.string(curr.string)] = _cjson_node_to_lua(curr, ffi_mod)
-      curr = curr.next
-    end
-    return obj
   end
   return nil
 end
@@ -2613,7 +4263,8 @@ json.decode = function(s)
   if cj ~= nil then
     local root = cj.lib.cJSON_Parse(s)
     if root ~= nil then
-      local res = _cjson_node_to_lua(root, cj.ffi)
+      local ffi_str_fn = cj.ffi.string
+      local res = _cjson_node_to_lua(root, ffi_str_fn)
       cj.lib.cJSON_Delete(root)
       return res
     end
@@ -2722,6 +4373,28 @@ json.load = function(fp)
   return json.decode(c)
 end
 
+local _py_json_mod = nil
+setmetatable(json, {
+  __index = function(t, k)
+    if not _py_json_mod then
+      local ok, pb = pcall(require, "src/luthon/lua/pybridge")
+      if not ok or not pb then ok, pb = pcall(require, "luthon.lua.pybridge") end
+      if ok and pb and pb.is_available() then
+        local ok_imp, mod = pcall(pb.import, "json")
+        if ok_imp and mod then _py_json_mod = mod end
+      end
+    end
+    if _py_json_mod then
+      local val = _py_json_mod[k]
+      if val ~= nil then
+        rawset(t, k, val)
+        return val
+      end
+    end
+    return nil
+  end
+})
+
 -- site
 site = {}
 site.getsitepackages = function()
@@ -2737,7 +4410,17 @@ site.getusersitepackages = function()
 end
 site.addsitedir = function(dir) end
 
+os.sep = "/"
+os.name = "posix"
+os.linesep = "\n"
+os.curdir = "."
+os.pardir = ".."
+os.devnull = "/dev/null"
 os.path = os.path or {}
+os.path.sep = "/"
+os.path.curdir = "."
+os.path.pardir = ".."
+os.path.devnull = "/dev/null"
 os.path.join = function(...) local a={...}; return table.concat(a, "/") end
 os.path.dirname = function(p)
   p = tostring(p or "")
@@ -2769,15 +4452,63 @@ os.path.abspath = function(p)
   if p == "" or p == "." then return cwd end
   return cwd .. "/" .. p
 end
+os.path.expanduser = function(p)
+  p = tostring(p or "")
+  local home = os.getenv("HOME") or "/"
+  if p == "~" then return home end
+  if p:sub(1, 2) == "~/" then return home .. p:sub(2) end
+  return p
+end
+
+os.path.expandvars = function(p)
+  p = tostring(p or "")
+  return p:gsub("%${([%w_]+)}", function(v) return os.getenv(v) or ("${" .. v .. "}") end)
+          :gsub("%$([%w_]+)", function(v) return os.getenv(v) or ("$" .. v) end)
+end
+
 os.path.getsize = function(p)
+  p = tostring(p or "")
   local f = io.open(p, "rb")
-  if not f then return 0 end
+  if not f then
+    if FileNotFoundError then
+      error(FileNotFoundError("No such file or directory: " .. p), 0)
+    else
+      error("FileNotFoundError: No such file or directory: " .. p, 0)
+    end
+  end
   local sz = f:seek("end")
   f:close()
   return sz or 0
 end
-os.path.exists = function(p) local f = io.open(p, "r"); if f then f:close(); return true end; return false end
-os.path.isfile = os.path.exists
+os.path.exists = function(p)
+  if p == nil then return false end
+  p = tostring(p)
+  if p == "" then return false end
+  local ok, res = pcall(function()
+    local ffi = require("ffi")
+    local st = ffi.new("stat_t")
+    return ffi.C.stat(p, st) == 0
+  end)
+  if ok then return res end
+  local f = io.open(p, "r"); if f then f:close(); return true end; return false
+end
+os.path.isfile = function(p)
+  if p == nil then return false end
+  p = tostring(p)
+  if p == "" then return false end
+  local ok, res = pcall(function()
+    local ffi = require("ffi")
+    local st = ffi.new("stat_t")
+    if ffi.C.stat(p, st) == 0 then
+      local mode = tonumber(st.st_mode)
+      local bit = require("bit")
+      return bit.band(mode, 0xF000) == 0x8000
+    end
+    return false
+  end)
+  if ok then return res end
+  local f = io.open(p, "r"); if f then f:close(); return true end; return false
+end
 os.path.isdir = function(p)
   p = tostring(p or "")
   if p == "" then return false end
@@ -2792,17 +4523,69 @@ local _file_mt = getmetatable(io.stdout)
 if _file_mt then
   _file_mt.__enter__ = function(self) return self end
   _file_mt.__exit__ = function(self) self:close() end
+  local _orig_file_read = _file_mt.read
+  local _py_file_read = function(self, size, ...)
+    if size == nil or (type(size) == "number" and size < 0) then
+      local res = _orig_file_read(self, "*a")
+      return res or ""
+    end
+    return _orig_file_read(self, size, ...)
+  end
+  _file_mt.read = _py_file_read
+  _file_mt.readline = function(self, size)
+    local line = _orig_file_read(self, "*l")
+    if line then return line .. "\n" end
+    return ""
+  end
+  _file_mt.readlines = function(self)
+    local lines = setmetatable({}, _list_mt or {})
+    while true do
+      local l = _file_mt.readline(self)
+      if l == "" then break end
+      lines[#lines + 1] = l
+    end
+    return lines
+  end
+  if type(_file_mt.__index) == "table" then
+    _file_mt.__index.read = _file_mt.read
+    _file_mt.__index.readline = _file_mt.readline
+    _file_mt.__index.readlines = _file_mt.readlines
+    _file_mt.__index.__enter__ = _file_mt.__enter__
+    _file_mt.__index.__exit__ = _file_mt.__exit__
+  end
 end
 
 open = function(filename, mode, ...)
-  mode = mode or "r"
-  local f = _orig_io_open(filename, mode)
-  if f then
-    local mt = getmetatable(f)
-    if mt then
-      mt.__enter__ = mt.__enter__ or function(self) return self end
-      mt.__exit__ = mt.__exit__ or function(self) self:close() end
+  local extra = {...}
+  local kw = nil
+  if #extra > 0 and type(extra[#extra]) == "table" and rawget(extra[#extra], "__luthon_kw") then
+    kw = extra[#extra]
+  end
+  if type(mode) == "table" then
+    kw = mode
+    mode = nil
+  end
+  if type(filename) == "table" and (filename.name or filename._path or getmetatable(filename)) then
+    filename = tostring(filename)
+  end
+  if kw and kw.mode then mode = kw.mode end
+  mode = type(mode) == "string" and mode or "r"
+  mode = mode:gsub("t", "")
+  local f, err = _orig_io_open(tostring(filename), mode)
+  if not f then
+    if FileNotFoundError then
+      error(FileNotFoundError(tostring(err or ("No such file: " .. tostring(filename)))), 0)
+    elseif OSError then
+      error(OSError(tostring(err or ("No such file: " .. tostring(filename)))), 0)
+    else
+      error(tostring(err or ("No such file: " .. tostring(filename))), 0)
     end
+  end
+  local mt = getmetatable(f)
+  if mt then
+    mt.__enter__ = mt.__enter__ or function(self) return self end
+    mt.__exit__ = mt.__exit__ or function(self) self:close() end
+    mt.__iter__ = mt.__iter__ or function(self) return self:lines() end
   end
   return f
 end
@@ -3100,448 +4883,959 @@ uuid.uuid4 = _uuid4
 uuid.UUID = function(s) return tostring(s) end
 _G.uuid = uuid
 
--- Luthon bootstrap prelude
--- Combined stdlib + IR runtime helpers for self-hosted Luthon.
--- This file is prepended to every transpiled Lua module.
+-- socket native stdlib module
+local _socket_mod = {
+  AF_INET = 2,
+  AF_INET6 = 10,
+  SOCK_STREAM = 1,
+  SOCK_DGRAM = 2,
+  SOL_SOCKET = 1,
+  SO_REUSEADDR = 2,
+  IPPROTO_TCP = 6,
+}
 
-------------------------------------------------------------------------------
--- Builtin functions
-------------------------------------------------------------------------------
+pcall(function()
+  local ffi = require("ffi")
+  ffi.cdef[[
+    typedef int socket_t;
+    struct in_addr { uint32_t s_addr; };
+    struct sockaddr_in {
+      int16_t sin_family;
+      uint16_t sin_port;
+      struct in_addr sin_addr;
+      char sin_zero[8];
+    };
+    struct sockaddr { uint16_t sa_family; char sa_data[14]; };
+    int socket(int domain, int type, int protocol);
+    int bind(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+    int connect(int sockfd, const struct sockaddr *addr, uint32_t addrlen);
+    int listen(int sockfd, int backlog);
+    int accept(int sockfd, struct sockaddr *addr, uint32_t *addrlen);
+    ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+    ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+    int close(int fd);
+    int setsockopt(int sockfd, int level, int optname, const void *optval, uint32_t optlen);
+    uint16_t htons(uint16_t hostshort);
+    uint16_t ntohs(uint16_t netshort);
+    int inet_pton(int af, const char *src, void *dst);
+    const char* inet_ntop(int af, const void *src, char *dst, uint32_t size);
+  ]]
+end)
 
-function range(a, b, step)
-  if b == nil then a, b = 0, a; step = 1 end
-  if step == nil then step = 1 end
-  local r = {}
-  if step > 0 then
-    for i = a, b - 1, step do r[#r+1] = i end
-  else
-    for i = a, b + 1, step do r[#r+1] = i end
+local Socket_mt = {}
+Socket_mt.__index = Socket_mt
+
+function Socket_mt:setsockopt(level, optname, val)
+  local ffi = require("ffi")
+  local optval = ffi.new("int[1]", val)
+  return ffi.C.setsockopt(self._fd, level, optname, optval, ffi.sizeof("int"))
+end
+
+function Socket_mt:bind(addr_tuple)
+  local ffi = require("ffi")
+  local host = addr_tuple[1] or "0.0.0.0"
+  local port = tonumber(addr_tuple[2]) or 0
+  local addr = ffi.new("struct sockaddr_in")
+  addr.sin_family = self._family or 2
+  addr.sin_port = ffi.C.htons(port)
+  local pton = ffi.C.inet_pton(self._family or 2, host == "" and "0.0.0.0" or host, addr.sin_addr)
+  if pton <= 0 then addr.sin_addr.s_addr = 0 end
+  local res = ffi.C.bind(self._fd, ffi.cast("struct sockaddr*", addr), ffi.sizeof("struct sockaddr_in"))
+  if res < 0 then error("OSError: [Errno 98] Address already in use", 2) end
+  return 0
+end
+
+function Socket_mt:listen(backlog)
+  local ffi = require("ffi")
+  return ffi.C.listen(self._fd, backlog or 128)
+end
+
+function Socket_mt:accept()
+  local ffi = require("ffi")
+  local client_addr = ffi.new("struct sockaddr_in")
+  local addrlen = ffi.new("uint32_t[1]", ffi.sizeof("struct sockaddr_in"))
+  local c_fd = ffi.C.accept(self._fd, ffi.cast("struct sockaddr*", client_addr), addrlen)
+  if c_fd < 0 then error("OSError: accept failed", 2) end
+  local client_sock = setmetatable({ _fd = c_fd, _family = self._family, _type = self._type }, Socket_mt)
+  local port = ffi.C.ntohs(client_addr.sin_port)
+  local ip_buf = ffi.new("char[64]")
+  ffi.C.inet_ntop(self._family or 2, client_addr.sin_addr, ip_buf, 64)
+  local host = ffi.string(ip_buf)
+  return setmetatable({ client_sock, setmetatable({ host, port }, _tuple_mt) }, _tuple_mt)
+end
+
+function Socket_mt:connect(addr_tuple)
+  local ffi = require("ffi")
+  local host = addr_tuple[1] or "127.0.0.1"
+  if host == "localhost" then host = "127.0.0.1" end
+  local port = tonumber(addr_tuple[2]) or 80
+  local addr = ffi.new("struct sockaddr_in")
+  addr.sin_family = self._family or 2
+  addr.sin_port = ffi.C.htons(port)
+  ffi.C.inet_pton(self._family or 2, host, addr.sin_addr)
+  local res = ffi.C.connect(self._fd, ffi.cast("struct sockaddr*", addr), ffi.sizeof("struct sockaddr_in"))
+  if res < 0 then error("ConnectionRefusedError: [Errno 111] Connection refused", 2) end
+  return 0
+end
+
+function Socket_mt:send(data)
+  local ffi = require("ffi")
+  data = tostring(data or "")
+  local n = ffi.C.send(self._fd, data, #data, 0)
+  return tonumber(n)
+end
+
+function Socket_mt:sendall(data)
+  return self:send(data)
+end
+
+function Socket_mt:recv(bufsize)
+  local ffi = require("ffi")
+  bufsize = tonumber(bufsize) or 4096
+  local buf = ffi.new("char[?]", bufsize)
+  local n = ffi.C.recv(self._fd, buf, bufsize, 0)
+  if n <= 0 then return "" end
+  return ffi.string(buf, n)
+end
+
+function Socket_mt:close()
+  local ffi = require("ffi")
+  if self._fd and self._fd >= 0 then
+    ffi.C.close(self._fd)
+    self._fd = -1
   end
-  return r
 end
 
-function len(t)
-  if t == nil then return 0 end
-  if type(t) == "table" then
-    if rawget(t, "_len") ~= nil then return rawget(t, "_len") end
-    local n = #t
-    if n > 0 then return n end
-    local count = 0
-    for _ in pairs(t) do count = count + 1 end
-    return count
+function Socket_mt:__enter__()
+  return self
+end
+
+function Socket_mt:__exit__()
+  self:close()
+end
+
+_socket_mod.socket = function(family, sock_type, proto)
+  local ffi = require("ffi")
+  family = family or 2
+  sock_type = sock_type or 1
+  proto = proto or 0
+  local fd = ffi.C.socket(family, sock_type, proto)
+  if fd < 0 then error("OSError: cannot create socket", 2) end
+  return setmetatable({ _fd = fd, _family = family, _type = sock_type }, Socket_mt)
+end
+
+_socket_mod.inet_pton = function(family, ip_str)
+  local ffi = require("ffi")
+  local buf_size = (family == 10) and 16 or 4
+  local buf = ffi.new("uint8_t[?]", buf_size)
+  local rc = ffi.C.inet_pton(family, tostring(ip_str or ""), buf)
+  if rc <= 0 then
+    error(OSError("illegal IP address string passed to inet_pton"), 2)
   end
-  return #t
+  return ffi.string(buf, buf_size)
 end
 
-
-function sum(t)
-  local s = 0
-  for _, v in ipairs(t or {}) do s = s + v end
-  return s
+_socket_mod.inet_ntop = function(family, packed_ip)
+  local ffi = require("ffi")
+  local max_len = (family == 10) and 46 or 16
+  local dst = ffi.new("char[?]", max_len)
+  local ptr = ffi.C.inet_ntop(family, packed_ip, dst, max_len)
+  if ptr == nil then
+    error(OSError("unknown address family or invalid packed IP"), 2)
+  end
+  return ffi.string(ptr)
 end
 
-function iter(t)
-  local i = 0
-  return function()
-    i = i + 1
-    if i <= #t then return t[i] end
+local _py_socket = nil
+setmetatable(_socket_mod, {
+  __index = function(t, k)
+    if _py_socket == nil then
+      local ok, pb = pcall(require, "src/luthon/lua/pybridge")
+      if ok and pb and pb.is_available() then
+        local ok_s, s = pcall(pb.import, "socket")
+        if ok_s and s then _py_socket = s end
+      end
+      if not _py_socket then _py_socket = false end
+    end
+    if _py_socket and _py_socket[k] ~= nil then
+      return _py_socket[k]
+    end
     return nil
   end
-end
-
--- Builtins are defined above
-
-function round(x, n)
-  n = n or 0
-  local f = 10 ^ n
-  return math.floor(x * f + 0.5) / f
-end
-
-function min(...)
-  local a = { ... }
-  local m = a[1]
-  for i = 2, #a do
-    if a[i] < m then m = a[i] end
-  end
-  return m
-end
-
-function max(...)
-  local a = { ... }
-  local m = a[1]
-  for i = 2, #a do
-    if a[i] > m then m = a[i] end
-  end
-  return m
-end
-
-function sorted(...)
-  local argc = select("#", ...)
-  local t = select(1, ...)
-  local key_fn = nil
-  local reverse = false
-  for i = 2, argc do
-    local arg = select(i, ...)
-    if type(arg) == "table" then
-      if arg.key ~= nil then key_fn = arg.key end
-      if arg.reverse ~= nil then reverse = arg.reverse end
-    elseif type(arg) == "boolean" then
-      reverse = arg
-    end
-  end
-  local r = setmetatable({}, _list_mt)
-  if type(t) == "table" then
-    local n = #t
-    if n > 0 or rawget(t, 1) ~= nil then
-      for i = 1, n do r[i] = t[i] end
-    else
-      for k in pairs(t) do table.insert(r, k) end
-    end
-  elseif type(t) == "function" then
-    while true do
-      local v = t()
-      if v == nil then break end
-      r[#r+1] = v
-    end
-  end
-  table.sort(r, function(a, b)
-    local val_a = key_fn and key_fn(a) or a
-    local val_b = key_fn and key_fn(b) or b
-    if reverse then
-      return _luthon_lt(val_b, val_a)
-    else
-      return _luthon_lt(val_a, val_b)
-    end
-  end)
-  return r
-end
-
-function reversed(t)
-  local r = {}
-  for i = #t, 1, -1 do r[#r + 1] = t[i] end
-  return r
-end
-
-function enumerate(t)
-  local r = {}
-  for i, v in ipairs(t) do r[#r + 1] = { i - 1, v } end
-  return r
-end
-
-function zip(a, b)
-  local r = {}
-  for i = 1, math.min(#a, #b) do r[#r + 1] = { a[i], b[i] } end
-  return r
-end
-
-function map(f, t)
-  local r = {}
-  for i, v in ipairs(t) do r[#r + 1] = f(v) end
-  return r
-end
-
-function filter(f, t)
-  local r = {}
-  for i, v in ipairs(t) do
-    if f(v) then r[#r + 1] = v end
-  end
-  return r
-end
-
-function any(t)
-  for _, v in ipairs(t) do
-    if v then return true end
-  end
-  return false
-end
-
-function all(t)
-  for _, v in ipairs(t) do
-    if not v then return false end
-  end
-  return true
-end
-
-------------------------------------------------------------------------------
--- String methods (attached to string table)
-------------------------------------------------------------------------------
-
-string.upper = string.upper
-string.lower = string.lower
-string.strip = function(self) return string.match(self, "^%s*(.-)%s*$") end
-string.lstrip = function(self) return string.match(self, "^%s*(.-)$") end
-string.rstrip = function(self) return string.match(self, "^(.-)%s*$") end
-string.split = function(self, sep)
-  sep = sep or "%s"
-  local r = {}
-  for part in string.gmatch(self, "([^" .. sep .. "]+)") do r[#r + 1] = part end
-  return r
-end
-string.replace = function(self, a, b) return (string.gsub(self, a, b)) end
-string.startswith = function(self, p) return string.sub(self, 1, #p) == p end
-string.endswith = function(self, p) return string.sub(self, -#p) == p end
-string.find_py = function(self, p)
-  local pos = string.find(self, p, 1, true)
-  return pos and (pos - 1) or -1
-end
-string.join = function(self, t)
-  local r = {}
-  for i, v in ipairs(t or {}) do r[#r + 1] = tostring(v) end
-  return table.concat(r, self)
-end
-
-------------------------------------------------------------------------------
--- Exception classes (matchable by except, constructable via raise)
-------------------------------------------------------------------------------
-
-local _exc_inst_mt = {
-  __tostring = function(e)
-    local s = rawget(e, "__str__") or (e.__class__ and e.__class__.__str__)
-    if type(s) == "function" then return s(e) end
-    if e.message ~= nil then return tostring(e.message) end
-    if e.__msg ~= nil then return tostring(e.__msg) end
-    if e.args and #e.args == 1 then return tostring(e.args[1]) end
-    return (e.__class__ and e.__class__.__name__) or e.__type or "Exception"
-  end
-}
-
-Exception = Exception or {}
-Exception.__name__ = "Exception"
-Exception.__type = "Exception"
-Exception.__base__ = object
-Exception.__index = Exception
-Exception.__new__ = object.__new__
-Exception.__init__ = function(self, msg, ...)
-  if type(self) == "table" then
-    self.message = msg
-    self.__msg = msg
-    self.args = setmetatable({msg, ...}, _tuple_mt or {})
-  end
-end
-Exception.__str__ = _exc_inst_mt.__tostring
-Exception.__repr__ = function(self)
-  local name = (self.__class__ and self.__class__.__name__) or self.__type or "Exception"
-  local m = self.message or self.__msg
-  return name .. "(" .. (m and string.format("%q", tostring(m)) or "") .. ")"
-end
-Exception.__instance_mt = {
-  __index = Exception,
-  __tostring = _exc_inst_mt.__tostring
-}
-setmetatable(Exception, {
-  __index = object,
-  __call = function(c, msg, ...)
-    local inst = setmetatable({__class__ = c, __type = c.__name or "Exception"}, c.__instance_mt or _exc_inst_mt)
-    if c.__init__ then c.__init__(inst, msg, ...) end
-    return inst
-  end
 })
-_G.Exception = Exception
-if _G.__LUTHON_FN_PARAMS then
-  _G.__LUTHON_FN_PARAMS[Exception.__init__] = setmetatable({"self", "message"}, _tuple_mt or {})
-  _G.__LUTHON_FN_PARAMS[Exception] = setmetatable({"message"}, _tuple_mt or {})
-end
 
-local _STD_EXCEPTIONS = {
-  "BaseException", "ValueError", "TypeError", "AssertionError",
-  "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
-  "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
-  "ImportError"
-}
+_G.socket = _socket_mod
 
-for _, cls_name in ipairs(_STD_EXCEPTIONS) do
-  local exc = _G[cls_name] or {}
-  exc.__name__ = cls_name
-  exc.__type = cls_name
-  exc.__base__ = Exception
-  exc.__index = exc
-  exc.__new__ = object.__new__
-  exc.__init__ = Exception.__init__
-  exc.__str__ = Exception.__str__
-  exc.__repr__ = Exception.__repr__
-  exc.__instance_mt = {
-    __index = exc,
-    __tostring = _exc_inst_mt.__tostring
-  }
-  setmetatable(exc, {
-    __index = Exception,
-    __call = function(c, msg, ...)
-      local inst = setmetatable({__class__ = c, __type = c.__name or cls_name}, c.__instance_mt or _exc_inst_mt)
-      if c.__init__ then c.__init__(inst, msg, ...) end
-      return inst
-    end
+-- asyncio cooperative event loop runner & task scheduler (Phase 35)
+asyncio = {}
+
+asyncio.Future = function()
+  return setmetatable({ _done = false, _result = nil, _error = nil }, {
+    __index = {
+      done = function(self) return self._done end,
+      result = function(self)
+        if self._error then error(self._error, 2) end
+        return self._result
+      end,
+      set_result = function(self, val) self._done = true; self._result = val end,
+      set_exception = function(self, exc) self._done = true; self._error = exc end,
+    }
   })
-  _G[cls_name] = exc
-  if _G.__LUTHON_FN_PARAMS then
-    _G.__LUTHON_FN_PARAMS[exc] = setmetatable({"message"}, _tuple_mt or {})
-  end
 end
 
-------------------------------------------------------------------------------
--- IR runtime helpers
-------------------------------------------------------------------------------
-
-function _luthon_exc_match(exc, cls)
-  if type(exc) ~= "table" then
-    if cls == "Exception" or cls == "BaseException" or cls == Exception or cls == BaseException then
-      return true
-    end
-    return false
-  end
-  local tname = type(cls) == "string" and cls or (cls.__name or cls.__type or tostring(cls))
-  if tname == "Exception" or tname == "BaseException" then return true end
-  return exc.__type == tname or exc.__name == tname
-end
-
-function _luthon_assert_fail(test, msg)
-  if not test then
-    error({ __type = "AssertionError", __msg = tostring(msg or "") })
-  end
-  return true
-end
-
-function _luthon_with_enter(ctx)
-  return ctx.__enter__(ctx)
-end
-
-function _luthon_with_exit(ctx, exc)
-  if exc then
-    return ctx.__exit__(ctx, exc.__type or "Exception", exc.__msg or "", nil)
-  else
-    return ctx.__exit__(ctx, nil, nil, nil)
-  end
-end
-
--- Slice support: _luthon_slice(lower, upper, step) creates a slice descriptor.
--- Tables get an __index metatable that handles slice descriptors.
-function _luthon_slice_desc(lower, upper, step)
-  return {__slice__ = true, lower = lower, upper = upper, step = step}
-end
-
-function _luthon_slice(lower, upper, step)
-  return {_is_slice = true, lower = lower, upper = upper, step = step or 1}
-end
-
--- Attach __index to all tables to support slice access like t[:16]
-local _slice_mt = {}
-_slice_mt.__index = function(t, k)
-  if type(k) == "table" and k._is_slice then
-    local n = #t
-    local lower = k.lower or 1
-    if lower < 0 then lower = n + lower + 1 end
-    local upper = k.upper
-    if upper == nil then upper = n end
-    if upper < 0 then upper = n + upper + 1 end
-    local step = k.step or 1
-    local r = {}
-    local i = lower
-    if step > 0 then
-      while i <= upper do
-        r[#r + 1] = t[i]
-        i = i + step
-      end
-    else
-      while i >= upper do
-        r[#r + 1] = t[i]
-        i = i + step
-      end
-    end
-    return r
-  end
-  return rawget(t, k)
-end
-debug.setmetatable({}, _slice_mt)
-
-function _luthon_in(a, b)
-  if type(b) == "table" then
-    if b[a] ~= nil then return true end
-    local n = #b
-    for i = 1, n do
-      if b[i] == a then return true end
-    end
-    return false
-  elseif type(b) == "string" then
-    if type(a) == "string" then
-      return string.find(b, a, 1, true) ~= nil
-    end
-    return false
-  end
-  return false
-end
-
-function _luthon_not_in(a, b)
-  return not _luthon_in(a, b)
-end
-
-local _set_methods = {
-  add = function(self, x) self[x] = true end,
-  remove = function(self, x) self[x] = nil end,
-  discard = function(self, x) self[x] = nil end,
-  clear = function(self) for k in pairs(self) do self[k] = nil end end,
-  pop = function(self)
-    for k in pairs(self) do
-      self[k] = nil
-      return k
-    end
-    error("KeyError: 'pop from an empty set'")
+local _task_mt = {
+  done = function(self) return self._done end,
+  result = function(self)
+    if self._error then error(self._error, 2) end
+    return self._result
+  end,
+  cancel = function(self)
+    self._done = true
+    self._error = "CancelledError"
+  end,
+  set_result = function(self, val)
+    self._done = true
+    self._result = val
+  end,
+  set_exception = function(self, exc)
+    self._done = true
+    self._error = exc
   end
 }
-local _set_mt = {__index = _set_methods}
+_task_mt.__index = _task_mt
 
+asyncio.Task = function(coro)
+  local co = type(coro) == "thread" and coro or coroutine.create(coro)
+  local task = setmetatable({
+    _is_task = true,
+    _co = co,
+    _done = false,
+    _result = nil,
+    _error = nil,
+  }, _task_mt)
 
-
-local function _exception_tostring(err)
-  if type(err) ~= "table" then return tostring(err) end
-  local cls_name = (err.__class__ and err.__class__.__name__) or "Exception"
-  local msg = (err.args and err.args[1]) or err.message or err.msg or ""
-  if msg ~= "" then
-    return cls_name .. ": " .. tostring(msg)
+  if _G.__LUTHON_ACTIVE_LOOP then
+    _G.__LUTHON_ACTIVE_LOOP:add_task(task)
   end
-  return cls_name
+  return task
 end
 
--- Override error to handle exception tables
-local _error = error
-error = function(err, level)
-  if type(err) == "table" then
-    _error(_exception_tostring(err), level or 1)
-  else
-    _error(err, level or 1)
+asyncio.create_task = function(coro)
+  return asyncio.Task(coro)
+end
+
+asyncio.gather = function(...)
+  local n = select("#", ...)
+  local args = { ... }
+  local tasks = {}
+  for i = 1, n do
+    local a = args[i]
+    if type(a) == "table" and a._is_task then
+      table.insert(tasks, a)
+    else
+      table.insert(tasks, asyncio.create_task(a))
+    end
+  end
+
+  local gather_coro = coroutine.create(function()
+    local results = {}
+    for i, t in ipairs(tasks) do
+      while not t:done() do
+        coroutine.yield("await_task", t)
+      end
+      table.insert(results, t:result())
+    end
+    return setmetatable(results, _list_mt)
+  end)
+
+  return asyncio.create_task(gather_coro)
+end
+
+asyncio.run = function(coro_or_fn)
+  local loop = {
+    _tasks = {},
+    _ready = {},
+    _timers = {},
+    add_task = function(self, t)
+      table.insert(self._tasks, t)
+      table.insert(self._ready, t)
+    end
+  }
+  _G.__LUTHON_ACTIVE_LOOP = loop
+
+  local main_task = (type(coro_or_fn) == "table" and coro_or_fn._is_task) and coro_or_fn or asyncio.create_task(coro_or_fn)
+
+  local ffi_ok, ffi_mod = pcall(require, "ffi")
+  if ffi_ok and ffi_mod and ffi_mod.C then
+    pcall(function()
+      ffi_mod.cdef[[
+        int poll(void *fds, unsigned long nfds, int timeout);
+      ]]
+    end)
+  end
+
+  while not main_task:done() do
+    local now = os.clock()
+    -- 1. Check expired timers
+    local remaining_timers = {}
+    for _, tm in ipairs(loop._timers) do
+      if now >= tm.time then
+        table.insert(loop._ready, tm.task)
+      else
+        table.insert(remaining_timers, tm)
+      end
+    end
+    loop._timers = remaining_timers
+
+    -- Service active network servers (e.g. WebSocket / HTTP servers)
+    if _G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS then
+      for _, srv in ipairs(_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS) do
+        if srv.poll_accept then srv:poll_accept() end
+      end
+    end
+
+    -- 2. Run one round of ready microtasks
+    local current_ready = loop._ready
+    loop._ready = {}
+
+    for _, t in ipairs(current_ready) do
+      if not t:done() and coroutine.status(t._co) ~= "dead" then
+        local ok, tag, arg = coroutine.resume(t._co)
+        if not ok then
+          t._done = true
+          t._error = tostring(tag)
+          if t == main_task then
+            _G.__LUTHON_ACTIVE_LOOP = nil
+            error(tostring(tag), 2)
+          end
+        elseif coroutine.status(t._co) == "dead" then
+          t._done = true
+          t._result = tag
+        else
+          if tag == "sleep" then
+            local dur = tonumber(arg) or 0
+            table.insert(loop._timers, { time = os.clock() + dur, task = t })
+          elseif tag == "await_task" then
+            local awaited = arg
+            if awaited and awaited:done() then
+              table.insert(loop._ready, t)
+            else
+              table.insert(loop._ready, t)
+            end
+          else
+            table.insert(loop._ready, t)
+          end
+        end
+      end
+    end
+
+    -- 3. Sleep or poll if no tasks immediately ready
+    if #loop._ready == 0 and #loop._timers > 0 then
+      local min_wait = 1000
+      local cur_t = os.clock()
+      for _, tm in ipairs(loop._timers) do
+        local diff = math.max(1, math.floor((tm.time - cur_t) * 1000))
+        if diff < min_wait then min_wait = diff end
+      end
+      if min_wait > 50 then min_wait = 50 end
+
+      local polled = false
+      if ffi_ok and ffi_mod and ffi_mod.C and ffi_mod.C.poll then
+        local ok_poll = pcall(function() ffi_mod.C.poll(nil, 0, min_wait) end)
+        if ok_poll then polled = true end
+      end
+      if not polled then
+        local t_end = os.clock() + (min_wait / 1000.0)
+        while os.clock() < t_end do end
+      end
+    end
+  end
+
+  _G.__LUTHON_ACTIVE_LOOP = nil
+  return main_task:result()
+end
+
+asyncio.sleep = function(secs)
+  return coroutine.yield("sleep", secs)
+end
+
+asyncio.TimeoutError = "TimeoutError"
+asyncio.exceptions = { TimeoutError = "TimeoutError" }
+asyncio.wait_for = function(fut_or_fn, timeout)
+  local t_start = os.clock()
+  timeout = timeout or 0
+  while true do
+    if type(fut_or_fn) == "thread" then
+      if coroutine.status(fut_or_fn) == "dead" then break end
+      local ok, res = coroutine.resume(fut_or_fn)
+      if not ok then error(tostring(res), 2) end
+      if coroutine.status(fut_or_fn) == "dead" then return res end
+    elseif type(fut_or_fn) == "function" then
+      local ok, res = pcall(fut_or_fn)
+      if ok and res ~= nil then return res end
+    elseif type(fut_or_fn) == "table" and type(fut_or_fn.done) == "function" then
+      if fut_or_fn:done() then return fut_or_fn:result() end
+    end
+    if timeout > 0 and (os.clock() - t_start) >= timeout then
+      error("TimeoutError: operation timed out", 2)
+    end
+    local ffi_ok, ffi_mod = pcall(require, "ffi")
+    if ffi_ok and ffi_mod and ffi_mod.C and ffi_mod.C.poll then
+      ffi_mod.C.poll(nil, 0, 50)
+    end
   end
 end
+_G.asyncio = asyncio
 
--- Module system
-_MODULES = _MODULES or {}
+-- =========================================================================
+-- Phase 38: Native Multi-Threading & Concurrency Runtime (GIL-Free OS Threads)
+-- =========================================================================
 
-function _luthon_module(name, t)
-  _MODULES[name] = t
-  package.loaded[name] = t
-  return t
-end
+local _thread_lib = nil
+local function _get_thread_lib()
+  if _thread_lib ~= nil then return _thread_lib end
+  local ok, ffi = pcall(require, "ffi")
+  if not ok or not ffi then return nil end
+  pcall(function()
+    ffi.cdef[[
+      typedef struct LuthonThreadPool LuthonThreadPool;
+      typedef void* (*luthon_task_fn)(void *arg);
+      LuthonThreadPool* luthon_threadpool_create(int num_workers);
+      int               luthon_threadpool_worker_count(const LuthonThreadPool *pool);
+      uint64_t          luthon_threadpool_submit(LuthonThreadPool *pool, luthon_task_fn fn, void *arg);
+      uint64_t          luthon_threadpool_submit_lua(LuthonThreadPool *pool, const char *code, const char *entry_func, void *arg);
+      uint64_t          luthon_threadpool_submit_bytecode(LuthonThreadPool *pool, const char *bytecode, size_t bytecode_len, int has_arg_num, double arg_num, void *arg_ptr);
+      bool              luthon_threadpool_is_done(LuthonThreadPool *pool, uint64_t task_id);
+      void*             luthon_threadpool_wait(LuthonThreadPool *pool, uint64_t task_id, int *out_error);
+      double            luthon_threadpool_wait_number(LuthonThreadPool *pool, uint64_t task_id, int *out_error);
+      const char*       luthon_threadpool_get_error(LuthonThreadPool *pool, uint64_t task_id);
+      void              luthon_threadpool_destroy(LuthonThreadPool *pool);
 
--- Simple getattr (walk __index chain)
-function _luthon_getattr(obj, name)
-  local cls = getmetatable(obj) and getmetatable(obj).__index
-  while cls do
-    if cls[name] ~= nil then return cls[name] end
-    cls = getmetatable(cls) and getmetatable(cls).__index
+      void* luthon_dedicated_thread_create(const char *bytecode, size_t len, double arg_num, void *arg_ptr);
+      void  luthon_dedicated_thread_join(void *handle);
+      bool  luthon_dedicated_thread_is_alive(void *handle);
+
+      typedef struct {
+          void     *data;
+          size_t    size;
+          int32_t   type_tag;
+          uint64_t  tag;
+      } LuthonMessage;
+      typedef struct LuthonChannel LuthonChannel;
+      LuthonChannel* luthon_channel_create(size_t capacity);
+      bool           luthon_channel_push(LuthonChannel *chan, const LuthonMessage *msg);
+      bool           luthon_channel_pop(LuthonChannel *chan, LuthonMessage *out_msg);
+      size_t         luthon_channel_size(const LuthonChannel *chan);
+      bool           luthon_channel_is_empty(const LuthonChannel *chan);
+      void           luthon_channel_destroy(LuthonChannel *chan);
+
+      typedef struct LuthonMutex LuthonMutex;
+      typedef struct LuthonEvent LuthonEvent;
+      typedef struct LuthonSemaphore LuthonSemaphore;
+      LuthonMutex* luthon_mutex_create(bool recursive);
+      bool         luthon_mutex_lock(LuthonMutex *m);
+      bool         luthon_mutex_trylock(LuthonMutex *m);
+      bool         luthon_mutex_unlock(LuthonMutex *m);
+      void         luthon_mutex_destroy(LuthonMutex *m);
+
+      LuthonEvent* luthon_event_create(bool initial_state);
+      void         luthon_event_set(LuthonEvent *e);
+      void         luthon_event_clear(LuthonEvent *e);
+      bool         luthon_event_is_set(LuthonEvent *e);
+      bool         luthon_event_wait(LuthonEvent *e, double timeout_sec);
+      void         luthon_event_destroy(LuthonEvent *e);
+
+      LuthonSemaphore* luthon_semaphore_create(int initial_value);
+      bool             luthon_semaphore_acquire(LuthonSemaphore *s, double timeout_sec);
+      void             luthon_semaphore_release(LuthonSemaphore *s);
+      int              luthon_semaphore_get_value(LuthonSemaphore *s);
+      void             luthon_semaphore_destroy(LuthonSemaphore *s);
+    ]]
+  end)
+  local candidate_paths = {
+    "src/luthon/native/libluthon_capi.so",
+    "./src/luthon/native/libluthon_capi.so",
+    "./libluthon_capi.so",
+    "libluthon_capi.so"
+  }
+  for _, cp in ipairs(candidate_paths) do
+    local ok_load, lib = pcall(ffi.load, cp)
+    if ok_load and lib then
+      _thread_lib = lib
+      return _thread_lib
+    end
   end
   return nil
 end
 
+local _future_mt = {}
+_future_mt.__index = _future_mt
 
--- Register builtin modules into package.loaded and _MODULES
-for _, mod_name in ipairs({
-  "sys", "os", "math", "json", "random", "re", "string", "hashlib",
-  "base64", "struct", "io", "collections", "itertools", "functools",
-  "pathlib", "datetime", "typing", "site", "tempfile", "subprocess", "ast", "bit"
-}) do
-  if _G[mod_name] then
-    _MODULES[mod_name] = _G[mod_name]
-    package.loaded[mod_name] = _G[mod_name]
+function _future_mt:done()
+  if self._resolved then return true end
+  if self._task_id and self._pool then
+    local lib = _get_thread_lib()
+    if lib and lib.luthon_threadpool_is_done(self._pool, self._task_id) then
+      pcall(function() self:result() end)
+      return true
+    end
+  end
+  return self._resolved
+end
+
+function _future_mt:result(timeout)
+  if self._resolved then
+    if self._error then error(self._error, 2) end
+    return self._result
+  end
+  if self._task_id and self._pool then
+    local lib = _get_thread_lib()
+    if lib then
+      local ffi = require("ffi")
+      local err = ffi.new("int[1]")
+      if self._is_numeric then
+        local num = lib.luthon_threadpool_wait_number(self._pool, self._task_id, err)
+        if err[0] ~= 0 then
+          local err_msg = lib.luthon_threadpool_get_error(self._pool, self._task_id)
+          self._error = err_msg ~= nil and ffi.string(err_msg) or "Thread execution error"
+          self._resolved = true
+          error(self._error, 2)
+        end
+        self._result = num
+        self._resolved = true
+        return num
+      else
+        local ptr = lib.luthon_threadpool_wait(self._pool, self._task_id, err)
+        if err[0] ~= 0 then
+          local err_msg = lib.luthon_threadpool_get_error(self._pool, self._task_id)
+          self._error = err_msg ~= nil and ffi.string(err_msg) or "Thread execution error"
+          self._resolved = true
+          error(self._error, 2)
+        end
+        self._result = self._result or ptr
+        self._resolved = true
+        return self._result
+      end
+    end
+  end
+  if self._error then error(self._error, 2) end
+  return self._result
+end
+
+function _future_mt:exception(timeout)
+  pcall(function() self:result(timeout) end)
+  return self._error
+end
+
+function _future_mt:cancel()
+  if self:done() then return false end
+  self._error = "CancelledError"
+  self._resolved = true
+  return true
+end
+
+local _futures = {}
+
+_futures.Future = function()
+  return setmetatable({ _resolved = false, _result = nil, _error = nil }, _future_mt)
+end
+
+_futures.ThreadPoolExecutor = function(opts_or_workers)
+  local max_workers = 4
+  if type(opts_or_workers) == "number" then
+    max_workers = opts_or_workers
+  elseif type(opts_or_workers) == "table" and opts_or_workers.max_workers then
+    max_workers = opts_or_workers.max_workers
+  end
+  local lib = _get_thread_lib()
+  local pool = lib and lib.luthon_threadpool_create(max_workers) or nil
+  return setmetatable({ _pool = pool, _max_workers = max_workers, _shutdown = false, _futures = {} }, {
+    __index = {
+      submit = function(self, fn, ...)
+        if self._shutdown then error("cannot schedule new futures after shutdown", 2) end
+        local fut = _futures.Future()
+        local lib = _get_thread_lib()
+        local n_args = select("#", ...)
+        local arg1 = select(1, ...)
+        if self._pool and lib and type(fn) == "function" then
+          local ok_dump, bc = pcall(string.dump, fn)
+          if ok_dump and bc then
+            local has_num = (type(arg1) == "number") and 1 or 0
+            local num_val = has_num == 1 and arg1 or 0.0
+            local ptr_val = (type(arg1) == "cdata" or type(arg1) == "userdata") and arg1 or nil
+            local tid = lib.luthon_threadpool_submit_bytecode(self._pool, bc, #bc, has_num, num_val, ptr_val)
+            fut._task_id = tid
+            fut._pool = self._pool
+            fut._is_numeric = (type(arg1) == "number")
+            table.insert(self._futures, fut)
+            return fut
+          end
+        end
+        -- In-process fallback execution
+        local ok, res = pcall(fn, ...)
+        if ok then
+          fut._result = res
+          fut._resolved = true
+        else
+          fut._error = res
+          fut._resolved = true
+        end
+        table.insert(self._futures, fut)
+        return fut
+      end,
+      map = function(self, fn, iterable)
+        local results = {}
+        local pending = {}
+        for _, item in ipairs(iterable) do
+          local fut = self:submit(fn, item)
+          table.insert(pending, fut)
+        end
+        for _, fut in ipairs(pending) do
+          table.insert(results, fut:result())
+        end
+        return setmetatable(results, _list_mt)
+      end,
+      shutdown = function(self, wait)
+        if self._shutdown then return end
+        self._shutdown = true
+        if wait and self._pool then
+          for _, fut in ipairs(self._futures) do
+            pcall(function() fut:result() end)
+          end
+        end
+        if self._pool then
+          local lib = _get_thread_lib()
+          if lib then lib.luthon_threadpool_destroy(self._pool) end
+          self._pool = nil
+        end
+      end,
+      __enter__ = function(self) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:shutdown(true) end,
+    }
+  })
+end
+
+_futures.as_completed = function(fs)
+  local list = {}
+  for _, f in ipairs(fs) do table.insert(list, f) end
+  local idx = 0
+  return function()
+    idx = idx + 1
+    if idx <= #list then
+      list[idx]:result()
+      return list[idx]
+    end
+    return nil
   end
 end
 
+_futures.wait = function(fs, timeout, return_when)
+  local done = {}
+  local not_done = {}
+  for _, f in ipairs(fs) do
+    f:result(timeout)
+    table.insert(done, f)
+  end
+  return setmetatable({ setmetatable(done, _set_mt), setmetatable(not_done, _set_mt) }, _tuple_mt)
+end
+
+local _concurrent = {
+  futures = _futures
+}
+
+local _threading = {}
+
+_threading.Lock = function()
+  local lib = _get_thread_lib()
+  local m = lib and lib.luthon_mutex_create(false) or nil
+  return setmetatable({ _m = m, _locked = false }, {
+    __index = {
+      acquire = function(self, blocking, timeout)
+        if self._m then
+          local ok = (blocking == false) and lib.luthon_mutex_trylock(self._m) or lib.luthon_mutex_lock(self._m)
+          if ok then self._locked = true end
+          return ok
+        end
+        self._locked = true
+        return true
+      end,
+      release = function(self)
+        if self._m then lib.luthon_mutex_unlock(self._m) end
+        self._locked = false
+      end,
+      locked = function(self) return self._locked end,
+      __enter__ = function(self) self:acquire(true) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:release() end,
+    }
+  })
+end
+
+_threading.RLock = function()
+  local lib = _get_thread_lib()
+  local m = lib and lib.luthon_mutex_create(true) or nil
+  local count = 0
+  return setmetatable({ _m = m }, {
+    __index = {
+      acquire = function(self, blocking, timeout)
+        if self._m then
+          local ok = (blocking == false) and lib.luthon_mutex_trylock(self._m) or lib.luthon_mutex_lock(self._m)
+          if ok then count = count + 1 end
+          return ok
+        end
+        count = count + 1
+        return true
+      end,
+      release = function(self)
+        if self._m then lib.luthon_mutex_unlock(self._m) end
+        count = count - 1
+      end,
+      __enter__ = function(self) self:acquire(true) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:release() end,
+    }
+  })
+end
+
+_threading.Event = function()
+  local lib = _get_thread_lib()
+  local e = lib and lib.luthon_event_create(false) or nil
+  local state = false
+  return setmetatable({ _e = e }, {
+    __index = {
+      is_set = function(self)
+        if self._e then return lib.luthon_event_is_set(self._e) end
+        return state
+      end,
+      isSet = function(self) return self:is_set() end,
+      set = function(self)
+        if self._e then lib.luthon_event_set(self._e) else state = true end
+      end,
+      clear = function(self)
+        if self._e then lib.luthon_event_clear(self._e) else state = false end
+      end,
+      wait = function(self, timeout)
+        if self._e then return lib.luthon_event_wait(self._e, timeout or 0.0) end
+        return state
+      end,
+    }
+  })
+end
+
+_threading.Semaphore = function(value)
+  local lib = _get_thread_lib()
+  local initial = value or 1
+  local s = lib and lib.luthon_semaphore_create(initial) or nil
+  return setmetatable({ _s = s, _val = initial }, {
+    __index = {
+      acquire = function(self, blocking, timeout)
+        if self._s then return lib.luthon_semaphore_acquire(self._s, (blocking == false and 0.000001) or (timeout or 0.0)) end
+        if self._val > 0 then self._val = self._val - 1 return true end
+        return false
+      end,
+      release = function(self)
+        if self._s then lib.luthon_semaphore_release(self._s) else self._val = self._val + 1 end
+      end,
+      __enter__ = function(self) self:acquire(true) return self end,
+      __exit__ = function(self, exc_type, exc_val, exc_tb) self:release() end,
+    }
+  })
+end
+
+_threading.Thread = function(opts)
+  opts = opts or {}
+  local target = opts.target
+  local args = opts.args or {}
+  return setmetatable({ _target = target, _args = args, _alive = false }, {
+    __index = {
+      start = function(self)
+        self._alive = true
+        local lib = _get_thread_lib()
+        if lib and self._target then
+          local ok_dump, bc = pcall(string.dump, self._target)
+          if ok_dump and bc then
+            local arg1 = self._args[1]
+            local has_num = (type(arg1) == "number") and 1 or 0
+            local num_val = (has_num == 1) and arg1 or 0.0
+            local ptr_val = (type(arg1) == "cdata" or type(arg1) == "userdata") and arg1 or nil
+            self._handle = lib.luthon_dedicated_thread_create(bc, #bc, num_val, ptr_val)
+            return
+          end
+        end
+        pcall(self._target, unpack(self._args))
+        self._alive = false
+      end,
+      join = function(self, timeout)
+        if self._handle then
+          local lib = _get_thread_lib()
+          if lib then
+            lib.luthon_dedicated_thread_join(self._handle)
+            self._handle = nil
+          end
+        end
+        self._alive = false
+      end,
+      is_alive = function(self)
+        if self._handle then
+          local lib = _get_thread_lib()
+          if lib then
+            return lib.luthon_dedicated_thread_is_alive(self._handle)
+          end
+        end
+        return self._alive
+      end,
+    }
+  })
+end
+
+_threading.current_thread = function()
+  return { name = "MainThread", ident = 1 }
+end
+
+_G.concurrent = _concurrent
+_G["concurrent.futures"] = _futures
+_G.threading = _threading
+_MODULES = _MODULES or {}
+_MODULES["concurrent"] = _concurrent
+_MODULES["concurrent.futures"] = _futures
+_MODULES["threading"] = _threading
+
+-- Phase 39: math.simd runtime module
+local _simd_mod = {}
+_simd_mod.get_vector_width = function() return _simd_lib and _simd_lib.luthon_simd_get_vector_width() or 4 end
+_simd_mod.get_backend_name = function()
+  if _simd_lib and type(_simd_lib.luthon_simd_get_backend_name) == "cdata" then
+    local ffi = require("ffi")
+    return ffi.string(_simd_lib.luthon_simd_get_backend_name())
+  end
+  return "AVX2+FMA (256-bit)"
+end
+_simd_mod.saxpy = function(n, alpha, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then _simd_lib.luthon_simd_saxpy(n, alpha, x_buf, y_buf)
+  else for i=0, n-1 do y_buf[i] = alpha*x_buf[i] + y_buf[i] end end
+end
+_simd_mod.daxpy = function(n, alpha, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then _simd_lib.luthon_simd_daxpy(n, alpha, x_buf, y_buf)
+  else for i=0, n-1 do y_buf[i] = alpha*x_buf[i] + y_buf[i] end end
+end
+_simd_mod.dot = function(n, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then return _simd_lib.luthon_simd_dot_f64(n, x_buf, y_buf) end
+  local s = 0.0
+  for i=0, n-1 do s = s + x_buf[i]*y_buf[i] end
+  return s
+end
+_simd_mod.euclidean = function(n, x, y)
+  local x_buf = rawget(x, "_buf") or x
+  local y_buf = rawget(y, "_buf") or y
+  if _simd_lib then return _simd_lib.luthon_simd_euclidean_f64(n, x_buf, y_buf) end
+  local s = 0.0
+  for i=0, n-1 do local d = x_buf[i]-y_buf[i]; s = s + d*d end
+  return math.sqrt(s)
+end
+_simd_mod.poly_eval = function(n, x, out, coeffs, deg)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  local c_buf = rawget(coeffs, "_buf") or coeffs
+  if type(c_buf) == "table" and not rawget(coeffs, "_buf") then
+    local ffi = require("ffi")
+    local tmp = ffi.new("double[?]", #c_buf)
+    for i=1, #c_buf do tmp[i-1] = c_buf[i] end
+    c_buf = tmp
+  end
+  if _simd_lib then _simd_lib.luthon_simd_poly_eval_f64(n, x_buf, out_buf, c_buf, deg)
+  else
+    for i=0, n-1 do
+      local xi = x_buf[i]
+      local p = c_buf[deg]
+      for k=deg-1, 0, -1 do p = p * xi + c_buf[k] end
+      out_buf[i] = p
+    end
+  end
+end
+_simd_mod.vec_sin = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_sin_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.sin(x_buf[i]) end end
+end
+_simd_mod.vec_cos = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_cos_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.cos(x_buf[i]) end end
+end
+_simd_mod.vec_exp = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_exp_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.exp(x_buf[i]) end end
+end
+_simd_mod.vec_sqrt = function(n, x, out)
+  local x_buf = rawget(x, "_buf") or x
+  local out_buf = rawget(out, "_buf") or out
+  if _simd_lib then _simd_lib.luthon_simd_sqrt_f64(out_buf, x_buf, n)
+  else for i=0, n-1 do out_buf[i] = math.sqrt(x_buf[i]) end end
+end
+
+math.simd = _simd_mod
+_MODULES["math.simd"] = _simd_mod
+_G["math.simd"] = _simd_mod
+
+
+function _luthon_await(val)
+  if type(val) == "table" and (val._is_task or (type(val.done) == "function" and type(val.result) == "function")) then
+    while not val:done() do
+      coroutine.yield("await_task", val)
+    end
+    return val:result()
+  elseif type(val) == "thread" then
+    while coroutine.status(val) ~= "dead" do
+      local ok, tag, arg = coroutine.resume(val)
+      if not ok then error(tostring(tag), 2) end
+      if coroutine.status(val) == "dead" then
+        return tag
+      end
+      -- Pass yield tag and argument up to event loop runner (asyncio.run)
+      coroutine.yield(tag, arg)
+    end
+    return nil
+  elseif type(val) == "function" then
+    return val()
+  elseif type(val) == "table" and type(val.result) == "function" and not val:done() then
+    -- If awaiting an unfinished Future/Task, poll until resolved
+    -- If a WebSocket server is active, dispatch its event loop
+    if _G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS and #_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS > 0 then
+      for _, srv in ipairs(_G.__LUTHON_ACTIVE_WEBSOCKET_SERVERS) do
+        if srv.run_event_loop then
+          return srv:run_event_loop(val)
+        end
+      end
+    end
+    -- Fallback: block waiting
+    local pcall_yield = pcall(function() return coroutine.yield() end)
+    while not val:done() do
+      if not pcall_yield then
+        -- We are in main thread or C-call boundary, use sleep
+        local ffi_ok, ffi_mod = pcall(require, "ffi")
+        if ffi_ok and ffi_mod and ffi_mod.C and ffi_mod.C.poll then
+          ffi_mod.C.poll(nil, 0, 100)
+        else
+          local t_end = os.clock() + 0.1
+          while os.clock() < t_end do end
+        end
+      else
+        coroutine.yield()
+      end
+      if val:done() then break end
+    end
+    return val:result()
+  end
+  return val
+end
 
 -- Runtime import helper functions
 local _luthon_modules_mod = nil
@@ -3589,7 +5883,14 @@ function _luthon_import(mod_name, full_name)
   local ok, m = pcall(require, mod_name)
   if ok and type(m) == "table" then return m end
   if type(_G[mod_name]) == "table" then return _G[mod_name] end
-  return (type(m) == "table" and m) or _G[mod_name] or {}
+  local err_msg = "No module named '" .. tostring(mod_name) .. "'"
+  if ModuleNotFoundError then
+    error(ModuleNotFoundError(err_msg), 0)
+  elseif ImportError then
+    error(ImportError(err_msg), 0)
+  else
+    error("ModuleNotFoundError: " .. err_msg, 0)
+  end
 end
 
 function _luthon_import_from(mod_name, item_name)
@@ -3597,53 +5898,19 @@ function _luthon_import_from(mod_name, item_name)
   if mod_name == "" and __package__ and __package__ ~= "" then
     mod_name = __package__
   end
-  local m = _luthon_import(mod_name)
-  if type(m) == "table" and m[item_name] ~= nil then
+  local ok, m = pcall(_luthon_import, mod_name)
+  if ok and type(m) == "table" and m[item_name] ~= nil then
     return m[item_name]
   end
   if _G[item_name] ~= nil then
     return _G[item_name]
   end
   -- Try loading submodule mod_name .. "." .. item_name
-  local sub = _luthon_import(mod_name .. "." .. item_name)
-  if sub ~= nil and sub ~= _G[mod_name] and type(sub) == "table" and next(sub) ~= nil then return sub end
-  return (type(m) == "table" and m[item_name]) or _G[item_name]
-end
-
-
-function _luthon_slice(obj, lower, upper, step)
-  if type(obj) == "string" then
-    local n = #obj
-    local l = 1
-    if lower ~= nil then
-      if lower >= 0 then l = lower + 1
-      else l = n + lower + 1; if l < 1 then l = 1 end end
-    end
-    local u = n
-    if upper ~= nil then
-      if upper >= 0 then u = upper
-      else u = n + upper; if u < 0 then u = 0 end end
-    end
-    if l > u then return "" end
-    return string.sub(obj, l, u)
-  elseif type(obj) == "table" then
-    local n = #obj
-    lower = lower or 0
-    if lower < 0 then lower = n + lower end
-    lower = lower + 1
-    if upper == nil then
-      upper = n
-    else
-      if upper < 0 then upper = n + upper end
-    end
-    step = step or 1
-    local r = {}
-    if step > 0 then
-      for i = lower, upper, step do table.insert(r, obj[i]) end
-    else
-      for i = lower, upper, step do table.insert(r, obj[i]) end
-    end
-    return r
-  end
-  return obj
+  local ok_sub, sub = pcall(_luthon_import, mod_name .. "." .. item_name)
+  if ok_sub and sub ~= nil and sub ~= _G[mod_name] and type(sub) == "table" and next(sub) ~= nil then return sub end
+  if ok and type(m) == "table" and m[item_name] ~= nil then return m[item_name] end
+  if _G[item_name] ~= nil then return _G[item_name] end
+  if not ok then error(m, 0) end
+  local err_msg = "cannot import name '" .. tostring(item_name) .. "' from '" .. tostring(mod_name) .. "'"
+  if ImportError then error(ImportError(err_msg), 0) else error("ImportError: " .. err_msg, 0) end
 end
