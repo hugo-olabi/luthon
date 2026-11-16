@@ -299,6 +299,7 @@ local function check_py_error()
     error("pybridge: " .. msg, 3)
   end
 end
+pybridge.check_py_error = check_py_error
 
 -- Metatable for Python Object Proxy
 local PyProxy = {}
