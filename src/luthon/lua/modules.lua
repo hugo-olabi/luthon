@@ -72,11 +72,11 @@ if pythonpath then
   end
 end
 
--- Add paths from package.path
+-- Add paths from package.path (excluding host system Lua library roots to avoid colliding with Python stdlib names like 're')
 if package and package.path then
   for p in package.path:gmatch("([^;]+)") do
     local base = p:match("^(.-)/%?[^/]*$")
-    if base and base ~= "" and base ~= "." then
+    if base and base ~= "" and base ~= "." and not base:match("^/usr/share/lua") and not base:match("^/usr/lib.*/lua") and not base:match("^/usr/local/share/lua") then
       table.insert(search_paths, base)
     end
   end
@@ -165,16 +165,19 @@ function M.find_py_module(name)
 
   local function try_find(part_list)
     for _, base in ipairs(M.get_search_paths()) do
-      -- Package directory with __init__.py
-      local pkg_dir = base .. "/" .. table.concat(part_list, "/")
-      local init_path = pkg_dir .. "/__init__.py"
-      local f = io.open(init_path, "r")
-      if f then f:close(); return init_path end
+      -- Skip site-packages and dist-packages: installed packages are resolved via binary C-API or pybridge
+      if not base:find("/site%-packages") and not base:find("/dist%-packages") and not base:match("/usr/lib/python%d") then
+        -- Package directory with __init__.py
+        local pkg_dir = base .. "/" .. table.concat(part_list, "/")
+        local init_path = pkg_dir .. "/__init__.py"
+        local f = io.open(init_path, "r")
+        if f then f:close(); return init_path end
 
-      -- Module file: module.py
-      local cand = base .. "/" .. table.concat(part_list, "/") .. ".py"
-      local f2 = io.open(cand, "r")
-      if f2 then f2:close(); return cand end
+        -- Module file: module.py
+        local cand = base .. "/" .. table.concat(part_list, "/") .. ".py"
+        local f2 = io.open(cand, "r")
+        if f2 then f2:close(); return cand end
+      end
     end
     return nil
   end
@@ -195,6 +198,8 @@ local native_shims = {
   ["PIL"] = "src/luthon/lua/native/PIL/init",
   requests = "src/luthon/lua/native/requests",
   websockets = "src/luthon/lua/native/websockets",
+  pytest = "src/luthon/lua/native/pytest",
+  pytest_twisted = "src/luthon/lua/native/pytest_twisted",
 }
 
 function M.find_native_shim(name)
@@ -487,6 +492,24 @@ function M.load_module_file(name, path)
       for k, v in pairs(result) do
         ns[k] = v
       end
+      local mt = getmetatable(result)
+      if mt then
+        setmetatable(ns, {
+          __index = function(t, k)
+            if _G[k] ~= nil then return _G[k] end
+            if mt.__index then
+              if type(mt.__index) == "function" then
+                local v = mt.__index(result, k)
+                if v ~= nil then return v end
+              elseif type(mt.__index) == "table" then
+                local v = mt.__index[k]
+                if v ~= nil then return v end
+              end
+            end
+            return nil
+          end
+        })
+      end
     end
   end)
 
@@ -504,6 +527,8 @@ end
 ------------------------------------------------------------------------------
 -- Public load API (Waterfall Waterfall)
 ------------------------------------------------------------------------------
+
+local transpile_cache = {}
 
 function M.find_module(name)
   return M.find_lua_module(name)
@@ -545,11 +570,19 @@ function M.load(name)
     end
     if driver and driver.transpile_file then
       local pkg = py_path:match("__init__%.py$") and name or (name:match("^(.*)%.[^%.]+$") or "")
-      local ok_transpile, lua_out = pcall(driver.transpile_file, py_path, pkg)
-      if ok_transpile and lua_out then
+      local lua_out = transpile_cache[py_path]
+      if not lua_out then
+        local ok_transpile, out = pcall(driver.transpile_file, py_path, pkg)
+        if ok_transpile and out then
+          lua_out = out
+          transpile_cache[py_path] = out
+        end
+      end
+      if lua_out then
         local ns = { __name__ = name, __package__ = pkg, __file__ = py_path }
         setmetatable(ns, {__index = _G})
-        local chunk = load(lua_out, py_path, "t", ns)
+        sys_modules[name] = ns
+        local chunk, chunk_err = load(lua_out, "@" .. name, "t", ns)
         if chunk then
           loading[name] = true
           local ok, res = xpcall(chunk, debug.traceback)
@@ -558,11 +591,14 @@ function M.load(name)
             if type(res) == "table" then
               for k, v in pairs(res) do ns[k] = v end
             end
-            sys_modules[name] = ns
             return ns
           else
-            error("Error executing transpiled module '" .. name .. "': " .. tostring(res), 2)
+            sys_modules[name] = nil
+            error("Error executing transpiled module '" .. name .. "' (" .. tostring(py_path) .. "): " .. tostring(res), 2)
           end
+        else
+          sys_modules[name] = nil
+          error("Syntax error in transpiled module '" .. name .. "': " .. tostring(chunk_err), 2)
         end
       end
     end

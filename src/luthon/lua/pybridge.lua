@@ -66,6 +66,7 @@ ffi.cdef[[
   void Py_Initialize(void);
   int Py_IsInitialized(void);
   void Py_Finalize(void);
+  int PyRun_SimpleString(const char *s);
 
   PyObject* PyImport_ImportModule(const char *name);
   PyObject* PyObject_GetAttrString(PyObject *o, const char *name);
@@ -125,6 +126,17 @@ ffi.cdef[[
   PyObject* PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs);
   PyObject* PySlice_New(PyObject *start, PyObject *stop, PyObject *step);
   PyObject* PyObject_RichCompare(PyObject *v, PyObject *w, int op);
+  PyObject* PyErr_NewException(const char *name, PyObject *base, PyObject *dict);
+
+  PyObject* PyNumber_Add(PyObject *v, PyObject *w);
+  PyObject* PyNumber_Subtract(PyObject *v, PyObject *w);
+  PyObject* PyNumber_Multiply(PyObject *v, PyObject *w);
+  PyObject* PyNumber_TrueDivide(PyObject *v, PyObject *w);
+  PyObject* PyNumber_FloorDivide(PyObject *v, PyObject *w);
+  PyObject* PyNumber_Remainder(PyObject *v, PyObject *w);
+  PyObject* PyNumber_Power(PyObject *v1, PyObject *v2, PyObject *v3);
+  PyObject* PyNumber_Negative(PyObject *o);
+  int PyObject_RichCompareBool(PyObject *v, PyObject *w, int opid);
 
   int PyCallable_Check(PyObject *o);
   PyObject* PyObject_GetIter(PyObject *o);
@@ -151,7 +163,11 @@ local candidate_libs = {
 
 function pybridge.get_lib()
   if libpy then return libpy end
-  for _, soname in ipairs(candidate_libs) do
+  local env_lib = os.getenv("LUTHON_LIBPYTHON")
+  local libs = {}
+  if env_lib and env_lib ~= "" then table.insert(libs, env_lib) end
+  for _, l in ipairs(candidate_libs) do table.insert(libs, l) end
+  for _, soname in ipairs(libs) do
     -- Ensure libpython symbols are exported globally for C extensions (RTLD_NOW | RTLD_GLOBAL = 258)
     pcall(function() ffi.C.dlopen(soname, 258) end)
     local ok, lib = pcall(function() return ffi.load(soname) end)
@@ -165,6 +181,21 @@ function pybridge.get_lib()
   end
   if libpy.Py_IsInitialized() == 0 then
     libpy.Py_Initialize()
+    pcall(function()
+      libpy.PyRun_SimpleString([[
+import sys, os
+venv = os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX")
+if venv:
+    for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
+        sp = os.path.join(venv, "lib", f"python{ver}", "site-packages")
+        if os.path.isdir(sp) and sp not in sys.path:
+            sys.path.insert(0, sp)
+for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
+    local_sp = os.path.abspath(os.path.join(".", ".venv", "lib", f"python{ver}", "site-packages"))
+    if os.path.isdir(local_sp) and local_sp not in sys.path:
+        sys.path.insert(0, local_sp)
+]])
+    end)
   end
   none_ptr = ffi.cast("PyObject*", libpy._Py_NoneStruct)
   return libpy
@@ -207,14 +238,45 @@ local function check_py_error()
     local pval = ffi.new("PyObject*[1]")
     local ptb = ffi.new("PyObject*[1]")
     libpy.PyErr_Fetch(ptype, pval, ptb)
+    local is_stop_iter = false
+    if ptype[0] ~= nil then
+      local name_obj = libpy.PyObject_GetAttrString(ptype[0], "__name__")
+      if name_obj ~= nil then
+        local sz = ffi.new("Py_ssize_t[1]")
+        local s = libpy.PyUnicode_AsUTF8AndSize(name_obj, sz)
+        if s ~= nil and ffi.string(s, sz[0]) == "StopIteration" then
+          is_stop_iter = true
+        end
+        decref(name_obj)
+      end
+    end
+    if is_stop_iter then
+      decref(ptype[0])
+      decref(pval[0])
+      decref(ptb[0])
+      return nil
+    end
     local msg = "Python error"
     if pval[0] ~= nil then
       local str_obj = libpy.PyObject_Str(pval[0])
       if str_obj ~= nil then
         local sz = ffi.new("Py_ssize_t[1]")
         local s = libpy.PyUnicode_AsUTF8AndSize(str_obj, sz)
-        msg = ffi.string(s, sz[0])
+        if s ~= nil then
+          msg = ffi.string(s, sz[0])
+        end
         decref(str_obj)
+      end
+    end
+    if ptype[0] ~= nil then
+      local name_obj = libpy.PyObject_GetAttrString(ptype[0], "__name__")
+      if name_obj ~= nil then
+        local sz = ffi.new("Py_ssize_t[1]")
+        local s = libpy.PyUnicode_AsUTF8AndSize(name_obj, sz)
+        if s ~= nil then
+          msg = ffi.string(s, sz[0]) .. ": " .. msg
+        end
+        decref(name_obj)
       end
     end
     decref(ptype[0])
@@ -292,12 +354,19 @@ end
 
 PyProxy.__call = function(self, ...)
   pybridge.get_lib()
-  local args = {...}
-  -- If self is a bound method and the first argument is identical to its __self__, drop it
+  local total_args = select("#", ...)
+  local args = {}
+  for i = 1, total_args do
+    args[i] = select(i, ...)
+  end
+
+  local dropped_self = false
   local self_obj = libpy.PyObject_GetAttrString(self._py, "__self__")
   if self_obj ~= nil then
-    if #args > 0 and type(args[1]) == "table" and args[1]._py == self_obj then
+    if total_args > 0 and type(args[1]) == "table" and args[1]._py == self_obj then
       table.remove(args, 1)
+      total_args = total_args - 1
+      dropped_self = true
     end
     decref(self_obj)
   else
@@ -316,33 +385,45 @@ PyProxy.__call = function(self, ...)
   else
     libpy.PyErr_Clear()
   end
-  if py_name == "exec" and #args == 1 then
-    args = {args[1], {}}
+  if py_name == "exec" then
+    local code = args[1]
+    local globals_dict = args[2] or {}
+    local locals_dict = args[3] or globals_dict
+    local py_code = lua_to_py(code)
+    local py_globals = lua_to_py(globals_dict)
+    local py_locals = lua_to_py(locals_dict)
+    local tuple = libpy.PyTuple_New(3)
+    libpy.PyTuple_SetItem(tuple, 0, py_code)
+    libpy.PyTuple_SetItem(tuple, 1, py_globals)
+    libpy.PyTuple_SetItem(tuple, 2, py_locals)
+    local res = libpy.PyObject_CallObject(self._py, tuple)
+    decref(tuple)
+    if res == nil then check_py_error() end
+    decref(res)
+    return nil
   end
 
-  local total_args = select("#", ...)
   -- Check if Luthon padded calling convention with kwargs table was used:
   -- e.g. fn(arg1, nil, nil, nil, nil, {kw = val})
   local py_kwargs = nil
-  local last_arg = total_args > 0 and select(total_args, ...) or nil
+  local last_arg = total_args > 0 and args[total_args] or nil
   local last_mt = type(last_arg) == "table" and getmetatable(last_arg) or nil
   if total_args >= 2 and type(last_arg) == "table" and not last_arg._py and not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__)) then
-    -- Verify if intermediate args between pos args and last_arg are nils
     local pos_count = 0
     for i = 1, total_args - 1 do
-      local a = select(i, ...)
-      if a ~= nil then pos_count = i end
+      if args[i] ~= nil then pos_count = i end
     end
-    -- It is a kwargs call
     py_kwargs = libpy.PyDict_New()
     for k, val in pairs(last_arg) do
       local py_val = lua_to_py(val)
-      libpy.PyDict_SetItemString(py_kwargs, tostring(k), py_val)
-      decref(py_val)
+      if py_val ~= nil then
+        libpy.PyDict_SetItemString(py_kwargs, tostring(k), py_val)
+        decref(py_val)
+      end
     end
     local tuple = libpy.PyTuple_New(pos_count)
     for i = 1, pos_count do
-      local py_v = lua_to_py(select(i, ...))
+      local py_v = lua_to_py(args[i])
       libpy.PyTuple_SetItem(tuple, i - 1, py_v)
     end
     local res = libpy.PyObject_Call(self._py, tuple, py_kwargs)
@@ -356,10 +437,9 @@ PyProxy.__call = function(self, ...)
     return lua_res
   end
 
-  local tuple = libpy.PyTuple_New(#args)
-  for i, v in ipairs(args) do
-    local py_v = lua_to_py(v)
-    -- PyTuple_SetItem steals reference
+  local tuple = libpy.PyTuple_New(total_args)
+  for i = 1, total_args do
+    local py_v = lua_to_py(args[i])
     libpy.PyTuple_SetItem(tuple, i - 1, py_v)
   end
   local res = libpy.PyObject_CallObject(self._py, tuple)
@@ -396,6 +476,85 @@ PyProxy.__tostring = function(self)
   return res
 end
 
+local function _py_binop(a, b, fn_name)
+  pybridge.get_lib()
+  local py_a = lua_to_py(a)
+  local py_b = lua_to_py(b)
+  local res = libpy[fn_name](py_a, py_b)
+  decref(py_a)
+  decref(py_b)
+  if res == nil then
+    check_py_error()
+  end
+  local lua_res = py_to_lua(res)
+  decref(res)
+  return lua_res
+end
+
+PyProxy.__add = function(a, b) return _py_binop(a, b, "PyNumber_Add") end
+PyProxy.__sub = function(a, b) return _py_binop(a, b, "PyNumber_Subtract") end
+PyProxy.__mul = function(a, b) return _py_binop(a, b, "PyNumber_Multiply") end
+PyProxy.__div = function(a, b) return _py_binop(a, b, "PyNumber_TrueDivide") end
+PyProxy.__mod = function(a, b) return _py_binop(a, b, "PyNumber_Remainder") end
+PyProxy.__pow = function(a, b)
+  pybridge.get_lib()
+  local py_a = lua_to_py(a)
+  local py_b = lua_to_py(b)
+  local res = libpy.PyNumber_Power(py_a, py_b, none_ptr)
+  decref(py_a)
+  decref(py_b)
+  if res == nil then check_py_error() end
+  local lua_res = py_to_lua(res)
+  decref(res)
+  return lua_res
+end
+PyProxy.__unm = function(a)
+  pybridge.get_lib()
+  local py_a = lua_to_py(a)
+  local res = libpy.PyNumber_Negative(py_a)
+  decref(py_a)
+  if res == nil then check_py_error() end
+  local lua_res = py_to_lua(res)
+  decref(res)
+  return lua_res
+end
+PyProxy.__eq = function(a, b)
+  pybridge.get_lib()
+  local py_a = lua_to_py(a)
+  local py_b = lua_to_py(b)
+  local res = libpy.PyObject_RichCompareBool(py_a, py_b, 2)
+  decref(py_a)
+  decref(py_b)
+  if res < 0 then
+    libpy.PyErr_Clear()
+    return false
+  end
+  return res == 1
+end
+PyProxy.__lt = function(a, b)
+  pybridge.get_lib()
+  local py_a = lua_to_py(a)
+  local py_b = lua_to_py(b)
+  local res = libpy.PyObject_RichCompareBool(py_a, py_b, 0)
+  decref(py_a)
+  decref(py_b)
+  if res < 0 then check_py_error() end
+  return res == 1
+end
+PyProxy.__le = function(a, b)
+  pybridge.get_lib()
+  local py_a = lua_to_py(a)
+  local py_b = lua_to_py(b)
+  local res = libpy.PyObject_RichCompareBool(py_a, py_b, 1)
+  decref(py_a)
+  decref(py_b)
+  if res < 0 then check_py_error() end
+  return res == 1
+end
+PyProxy.__concat = function(a, b)
+  return tostring(a) .. tostring(b)
+end
+
 make_proxy = function(py_obj)
   libpy.Py_IncRef(py_obj)
   local proxy = setmetatable({_py = py_obj}, PyProxy)
@@ -410,9 +569,9 @@ end
 pybridge.make_proxy = make_proxy
 
 -- Convert Lua value to PyObject*
-lua_to_py = function(v)
+lua_to_py = function(v, visited)
   pybridge.get_lib()
-  if v == nil then
+  if v == nil or v == _G._luthon_none or (type(v) == "table" and v.__is_none__) then
     libpy.Py_IncRef(none_ptr)
     return none_ptr
   elseif type(v) == "boolean" then
@@ -424,32 +583,126 @@ lua_to_py = function(v)
       return libpy.PyFloat_FromDouble(v)
     end
   elseif type(v) == "string" then
-    return libpy.PyUnicode_FromStringAndSize(v, #v)
-  elseif type(v) == "table" then
-    if v._py then
-      libpy.Py_IncRef(v._py)
-      return v._py
+    local py_str = libpy.PyUnicode_FromStringAndSize(v, #v)
+    if py_str ~= nil then
+      return py_str
     end
+    libpy.PyErr_Clear()
+    return libpy.PyBytes_FromStringAndSize(v, #v)
+  elseif type(v) == "table" then
+    if rawget(v, "_py") then
+      libpy.Py_IncRef(rawget(v, "_py"))
+      return rawget(v, "_py")
+    end
+    if rawget(v, "_p") and type(rawget(v, "_p")) == "string" and rawget(v, "is_absolute") then
+      local py_path_mod = libpy.PyImport_ImportModule("pathlib")
+      if py_path_mod ~= nil then
+        local py_path_cls = libpy.PyObject_GetAttrString(py_path_mod, "Path")
+        decref(py_path_mod)
+        if py_path_cls ~= nil then
+          local p_str = rawget(v, "_p")
+          local py_str = libpy.PyUnicode_FromStringAndSize(p_str, #p_str)
+          local tuple = libpy.PyTuple_New(1)
+          libpy.PyTuple_SetItem(tuple, 0, py_str)
+          local py_path_obj = libpy.PyObject_CallObject(py_path_cls, tuple)
+          decref(py_path_cls)
+          decref(tuple)
+          if py_path_obj ~= nil then return py_path_obj end
+          libpy.PyErr_Clear()
+        end
+      end
+    end
+    visited = visited or {}
+    if visited[v] then
+      libpy.Py_IncRef(visited[v])
+      return visited[v]
+    end
+
+    -- Check if this is a Luthon class
+    local is_class = (rawget(v, "__class__") == nil and (rawget(v, "__instance_mt") ~= nil or rawget(v, "__index") == v) and type(rawget(v, "__name__")) == "string")
+    if is_class then
+      local cls_name = rawget(v, "__name__") or "CustomClass"
+      local dotted_name = cls_name:find("%.") and cls_name or ("_luthon." .. cls_name)
+      local base_cls = rawget(v, "__base__")
+      local is_exc = (cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") or (type(base_cls) == "table" and tostring(base_cls.__name__):match("Exception|Error|Failure")))
+      local py_base = nil
+      if base_cls ~= nil and base_cls ~= _G.object then
+        py_base = lua_to_py(base_cls, visited)
+      end
+      local py_cls = nil
+      if is_exc then
+        py_cls = libpy.PyErr_NewException(dotted_name, py_base, nil)
+      else
+        local builtins_mod = libpy.PyImport_ImportModule("builtins")
+        local type_fn = libpy.PyObject_GetAttrString(builtins_mod, "type")
+        local name_py = libpy.PyUnicode_FromStringAndSize(cls_name, #cls_name)
+        local bases_tuple
+        if py_base ~= nil then
+          bases_tuple = libpy.PyTuple_New(1)
+          libpy.PyTuple_SetItem(bases_tuple, 0, py_base)
+        else
+          bases_tuple = libpy.PyTuple_New(0)
+        end
+        local empty_dict = libpy.PyDict_New()
+        local args = libpy.PyTuple_New(3)
+        libpy.PyTuple_SetItem(args, 0, name_py)
+        libpy.PyTuple_SetItem(args, 1, bases_tuple)
+        libpy.PyTuple_SetItem(args, 2, empty_dict)
+        py_cls = libpy.PyObject_CallObject(type_fn, args)
+        decref(args)
+        decref(type_fn)
+        decref(builtins_mod)
+      end
+      if py_cls then
+        rawset(v, "_py", py_cls)
+        visited[v] = py_cls
+        return py_cls
+      end
+    end
+
+    -- Check if this is an instance of a Luthon class
+    local inst_class = rawget(v, "__class__")
+    if inst_class and type(inst_class) == "table" and type(rawget(inst_class, "__name__")) == "string" then
+      local cls_name = rawget(inst_class, "__name__")
+      if cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") then
+        local py_cls = lua_to_py(inst_class, visited)
+        local msg = v.message or v.msg or (v.args and v.args[1]) or tostring(v)
+        local msg_py = libpy.PyUnicode_FromStringAndSize(tostring(msg), #tostring(msg))
+        local args = libpy.PyTuple_New(1)
+        libpy.PyTuple_SetItem(args, 0, msg_py)
+        local exc_inst = libpy.PyObject_CallObject(py_cls, args)
+        decref(args)
+        if exc_inst then
+          visited[v] = exc_inst
+          return exc_inst
+        end
+      end
+    end
+
     if v.__slice__ then
-      local py_lower = v.lower and lua_to_py(v.lower) or nil
-      local py_upper = v.upper and lua_to_py(v.upper) or nil
-      local py_step = v.step and lua_to_py(v.step) or nil
+      local py_lower = v.lower and lua_to_py(v.lower, visited) or nil
+      local py_upper = v.upper and lua_to_py(v.upper, visited) or nil
+      local py_step = v.step and lua_to_py(v.step, visited) or nil
       local sl = libpy.PySlice_New(py_lower, py_upper, py_step)
       if py_lower then decref(py_lower) end
       if py_upper then decref(py_upper) end
       if py_step then decref(py_step) end
+      visited[v] = sl
       return sl
     end
     local mt = getmetatable(v)
     if mt and mt.__bytes__ then
       local data = v[1] or ""
-      return libpy.PyBytes_FromStringAndSize(data, #data)
+      local b = libpy.PyBytes_FromStringAndSize(data, #data)
+      visited[v] = b
+      return b
     end
     if mt and mt.__tuple__ then
       local n = #v
       local tup = libpy.PyTuple_New(n)
+      visited[v] = tup
       for i = 1, n do
-        local item = lua_to_py(v[i])
+        local item = lua_to_py(v[i], visited)
         libpy.PyTuple_SetItem(tup, i - 1, item)
       end
       return tup
@@ -466,6 +719,7 @@ lua_to_py = function(v)
       decref(args)
       decref(bio_cls)
       decref(io_mod)
+      visited[v] = py_bio
       return py_bio
     end
 
@@ -485,18 +739,32 @@ lua_to_py = function(v)
 
     if is_array and n > 0 then
       local list = libpy.PyList_New(n)
+      visited[v] = list
       for i = 1, n do
-        local item = lua_to_py(v[i])
+        local item = lua_to_py(v[i], visited)
         libpy.PyList_SetItem(list, i - 1, item)
       end
       return list
     else
       local dict = libpy.PyDict_New()
+      visited[v] = dict
       for k, val in pairs(v) do
-        if type(val) ~= "function" and type(val) ~= "userdata" and v ~= val then
-          local py_val = lua_to_py(val)
-          libpy.PyDict_SetItemString(dict, tostring(k), py_val)
-          decref(py_val)
+        if type(k) == "string" and not k:match("^__") then
+          if type(val) ~= "function" and type(val) ~= "userdata" and not visited[val] then
+            local py_val = lua_to_py(val, visited)
+            if py_val ~= nil then
+              libpy.PyDict_SetItemString(dict, tostring(k), py_val)
+              decref(py_val)
+            end
+          end
+        elseif type(k) ~= "string" and not visited[val] then
+          if type(val) ~= "function" and type(val) ~= "userdata" then
+            local py_k = lua_to_py(k, visited)
+            local py_val = lua_to_py(val, visited)
+            libpy.PyObject_SetItem(dict, py_k, py_val)
+            decref(py_k)
+            decref(py_val)
+          end
         end
       end
       return dict
@@ -518,8 +786,11 @@ pybridge.lua_to_py = lua_to_py
 -- Convert PyObject* to Lua value (or proxy for complex types)
 py_to_lua = function(py_obj, unwrap_primitives)
   pybridge.get_lib()
-  if py_obj == nil or py_obj == none_ptr then
+  if py_obj == nil then
     return nil
+  end
+  if py_obj == none_ptr then
+    return _G._luthon_none or nil
   end
 
   local t = libpy.PyObject_Type(py_obj)
@@ -547,6 +818,14 @@ py_to_lua = function(py_obj, unwrap_primitives)
     local size = ffi.new("Py_ssize_t[1]")
     local s = libpy.PyUnicode_AsUTF8AndSize(py_obj, size)
     return ffi.string(s, size[0])
+  end
+
+  local is_bytes = libpy.PyType_IsSubtype(t, libpy.PyBytes_Type) ~= 0
+  if is_bytes then
+    decref(t)
+    local s = libpy.PyBytes_AsString(py_obj)
+    local sz = libpy.PyBytes_Size(py_obj)
+    return ffi.string(s, sz)
   end
 
   if unwrap_primitives then
@@ -595,6 +874,15 @@ function pybridge.import(name)
   if mod == nil then
     check_py_error()
     error("pybridge: failed to import module '" .. name .. "'", 2)
+  end
+  if libpy.PyObject_HasAttrString(mod, "__file__") == 0 and libpy.PyObject_HasAttrString(mod, "__version__") == 0 and libpy.PyObject_HasAttrString(mod, "__all__") == 0 then
+    local is_empty_ns = (libpy.PyObject_HasAttrString(mod, "__path__") ~= 0)
+    if is_empty_ns and name == "libtorrent" then
+      decref(mod)
+      local err_msg = "No module named '" .. name .. "'"
+      if ModuleNotFoundError then error(ModuleNotFoundError(err_msg), 0)
+      else error("ModuleNotFoundError: " .. err_msg, 0) end
+    end
   end
   local proxy = make_proxy(mod)
   decref(mod)

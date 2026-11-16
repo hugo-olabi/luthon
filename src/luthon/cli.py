@@ -149,6 +149,14 @@ def run_file(
             extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
         env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
 
+        import sysconfig
+        libdir = sysconfig.get_config_var('LIBDIR')
+        ldlib = sysconfig.get_config_var('LDLIBRARY')
+        if libdir and ldlib:
+            libpy_path = Path(libdir) / ldlib
+            if libpy_path.exists():
+                env["LUTHON_LIBPYTHON"] = str(libpy_path)
+
         proc = subprocess.run(cmd, env=env)
         return proc.returncode
     finally:
