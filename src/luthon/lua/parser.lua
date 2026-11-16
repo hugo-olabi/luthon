@@ -636,6 +636,30 @@ function Parser:small_stmt()
     elseif v == "from" then return self:import_from_stmt()
     elseif v == "global" then self:advance(); local names = {}; table.insert(names, self:expect(TT.NAME).value); while self:match(TT.OP, ",") do table.insert(names, self:expect(TT.NAME).value) end; self:match(TT.NEWLINE); return node(NT.Global, {names = names, lineno = tok.line, col_offset = tok.col})
     elseif v == "nonlocal" then self:advance(); local names = {}; table.insert(names, self:expect(TT.NAME).value); while self:match(TT.OP, ",") do table.insert(names, self:expect(TT.NAME).value) end; self:match(TT.NEWLINE); return node(NT.Nonlocal, {names = names, lineno = tok.line, col_offset = tok.col})
+    elseif v == "yield" then
+      self:advance()
+      local y_node
+      if self:match(TT.NAME, "from") then
+        local val = self:test()
+        y_node = node(NT.YieldFrom, {value = val, lineno = tok.line, col_offset = tok.col})
+      else
+        local val = nil
+        if not self:newline_or_eof() and not self:check(TT.OP, ";") then
+          val = self:test()
+          if self:match(TT.OP, ",") then
+            local elts = {val}
+            repeat
+              if not self:newline_or_eof() and not self:check(TT.OP, ";") then
+                table.insert(elts, self:test())
+              end
+            until not self:match(TT.OP, ",")
+            val = node(NT.Tuple, {elts = elts, ctx = "Load", lineno = tok.line, col_offset = tok.col})
+          end
+        end
+        y_node = node(NT.Yield, {value = val, lineno = tok.line, col_offset = tok.col})
+      end
+      self:match(TT.NEWLINE)
+      return node(NT.Expr, {value = y_node, lineno = tok.line, col_offset = tok.col})
     else return self:expr_stmt() end
   else
     return self:expr_stmt()
@@ -842,7 +866,7 @@ function Parser:if_stmt()
   else
     body = {self:simple_stmt()}
   end
-  local orelse = {}
+  local elifs = {}
   while true do
     self:skip_newlines()
     if not self:check(TT.NAME, "elif") then break end
@@ -856,20 +880,26 @@ function Parser:if_stmt()
     else
       body2 = {self:simple_stmt()}
     end
-    table.insert(orelse, node(NT.If, {test = test2, body = body2, orelse = {}, lineno = 0, col_offset = 0}))
+    table.insert(elifs, {test = test2, body = body2})
   end
   self:skip_newlines()
+  local else_body = {}
   if self:match(TT.NAME, "else") then
     self:expect(TT.OP, ":")
     self:skip_newlines()
     if self:check(TT.INDENT) then
-      orelse = self:new_suite()
+      else_body = self:new_suite()
     else
       local simple = self:simple_stmt()
-      orelse = {simple}
+      else_body = {simple}
     end
   end
-  return node(NT.If, {test = test, body = body, orelse = orelse, lineno = 0, col_offset = 0})
+  local cur_orelse = else_body
+  for i = #elifs, 1, -1 do
+    local e = elifs[i]
+    cur_orelse = {node(NT.If, {test = e.test, body = e.body, orelse = cur_orelse, lineno = 0, col_offset = 0})}
+  end
+  return node(NT.If, {test = test, body = body, orelse = cur_orelse, lineno = 0, col_offset = 0})
 end
 
 function Parser:while_stmt()
@@ -1438,6 +1468,28 @@ function Parser:atom()
     end
     return result
   elseif t == TT.NAME then
+    if v == "True" then
+      self:advance()
+      return node(NT.Constant, {value = true, lineno = tok.line, col_offset = tok.col})
+    elseif v == "False" then
+      self:advance()
+      return node(NT.Constant, {value = false, lineno = tok.line, col_offset = tok.col})
+    elseif v == "None" then
+      self:advance()
+      return node(NT.Constant, {value = nil, lineno = tok.line, col_offset = tok.col})
+    elseif v == "yield" then
+      self:advance()
+      if self:match(TT.NAME, "from") then
+        local val = self:test()
+        return node(NT.YieldFrom, {value = val, lineno = tok.line, col_offset = tok.col})
+      else
+        local val = nil
+        if not self:newline_or_eof() and not self:check(TT.OP, ")") and not self:check(TT.OP, "]") and not self:check(TT.OP, "}") and not self:check(TT.OP, ",") and not self:check(TT.OP, ":") and not self:check(TT.OP, ";") then
+          val = self:test()
+        end
+        return node(NT.Yield, {value = val, lineno = tok.line, col_offset = tok.col})
+      end
+    end
     self:advance()
     -- f-string: f"..." or F"..."  (f immediately followed by a string literal)
     if (v == "f" or v == "F") and self:check(TT.STRING) then

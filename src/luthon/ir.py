@@ -64,6 +64,17 @@ def _safe_var(name: str) -> str:
     return name
 
 
+def _has_yield(node: ast.AST) -> bool:
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.Yield, ast.YieldFrom)):
+            return True
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if _has_yield(child):
+            return True
+    return False
+
+
 class IRLowerer:
     def __init__(self, package: str = ""):
         self._tmp = 0
@@ -126,6 +137,58 @@ class IRLowerer:
         finally:
             self._cur_node = prev_node
 
+    def _lower_target(self, tgt, val_tmp):
+        if isinstance(tgt, (ast.Tuple, ast.List)):
+            has_starred = any(isinstance(e, ast.Starred) for e in tgt.elts)
+            if not has_starred:
+                for i, e in enumerate(tgt.elts):
+                    idx_tmp = self._new_tmp()
+                    self._emit("CONST", [i], result=idx_tmp)
+                    elem_tmp = self._new_tmp()
+                    self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                    self._lower_target(e, elem_tmp)
+            else:
+                star_idx = next(i for i, e in enumerate(tgt.elts) if isinstance(e, ast.Starred))
+                num_trail = len(tgt.elts) - 1 - star_idx
+                for i in range(star_idx):
+                    idx_tmp = self._new_tmp()
+                    self._emit("CONST", [i], result=idx_tmp)
+                    elem_tmp = self._new_tmp()
+                    self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                    self._lower_target(tgt.elts[i], elem_tmp)
+                for j in range(1, num_trail + 1):
+                    idx_tmp = self._new_tmp()
+                    self._emit("CONST", [-j], result=idx_tmp)
+                    elem_tmp = self._new_tmp()
+                    self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                    self._lower_target(tgt.elts[len(tgt.elts) - j], elem_tmp)
+                star_elem = tgt.elts[star_idx]
+                slice_tmp = self._new_tmp()
+                if num_trail > 0:
+                    self._emit("CALL", ["_luthon_slice", val_tmp, str(star_idx), str(-num_trail)], result=slice_tmp)
+                else:
+                    self._emit("CALL", ["_luthon_slice", val_tmp, str(star_idx)], result=slice_tmp)
+                self._lower_target(star_elem.value, slice_tmp)
+        elif isinstance(tgt, ast.Starred):
+            self._lower_target(tgt.value, val_tmp)
+        elif isinstance(tgt, ast.Name):
+            safe_name = _safe_var(tgt.id)
+            if self._cur_fn is not None and (tgt.id in getattr(self._cur_fn, "cellvars", []) or tgt.id in getattr(self._cur_fn, "freevars", [])):
+                self._emit("CELL_SET", [safe_name, val_tmp])
+            else:
+                self._emit("STORE", [safe_name, val_tmp])
+        elif isinstance(tgt, ast.Subscript):
+            base = self.lower_expr(tgt.value)
+            sl = self.lower_expr(tgt.slice)
+            self._emit("STORE_SUBSCR", [base, sl, val_tmp])
+        elif isinstance(tgt, ast.Attribute):
+            obj = self.lower_expr(tgt.value)
+            attr = tgt.attr
+            if attr in LUA_RESERVED_KEYWORDS:
+                self._emit("STORE_SUBSCR", [obj, f'"{attr}"', val_tmp])
+            else:
+                self._emit("SET_ATTR", [obj, attr, val_tmp])
+
     def _lower_stmt_impl(self, node):
         if isinstance(node, ast.Expr):
             if isinstance(node.value, ast.YieldFrom):
@@ -150,60 +213,8 @@ class IRLowerer:
                 self.lower_expr(node.value)
         elif isinstance(node, ast.Assign):
             val = self.lower_expr(node.value)
-            def lower_target(tgt, val_tmp):
-                if isinstance(tgt, (ast.Tuple, ast.List)):
-                    has_starred = any(isinstance(e, ast.Starred) for e in tgt.elts)
-                    if not has_starred:
-                        for i, e in enumerate(tgt.elts):
-                            idx_tmp = self._new_tmp()
-                            self._emit("CONST", [i], result=idx_tmp)
-                            elem_tmp = self._new_tmp()
-                            self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
-                            lower_target(e, elem_tmp)
-                    else:
-                        star_idx = next(i for i, e in enumerate(tgt.elts) if isinstance(e, ast.Starred))
-                        num_trail = len(tgt.elts) - 1 - star_idx
-                        for i in range(star_idx):
-                            idx_tmp = self._new_tmp()
-                            self._emit("CONST", [i], result=idx_tmp)
-                            elem_tmp = self._new_tmp()
-                            self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
-                            lower_target(tgt.elts[i], elem_tmp)
-                        for j in range(1, num_trail + 1):
-                            idx_tmp = self._new_tmp()
-                            self._emit("CONST", [-j], result=idx_tmp)
-                            elem_tmp = self._new_tmp()
-                            self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
-                            lower_target(tgt.elts[len(tgt.elts) - j], elem_tmp)
-                        star_elem = tgt.elts[star_idx]
-                        slice_tmp = self._new_tmp()
-                        if num_trail > 0:
-                            self._emit("CALL", ["_luthon_slice", val_tmp, str(star_idx), str(-num_trail)], result=slice_tmp)
-                        else:
-                            self._emit("CALL", ["_luthon_slice", val_tmp, str(star_idx)], result=slice_tmp)
-                        lower_target(star_elem.value, slice_tmp)
-                elif isinstance(tgt, ast.Starred):
-                    lower_target(tgt.value, val_tmp)
-                elif isinstance(tgt, ast.Name):
-                    safe_name = _safe_var(tgt.id)
-                    if self._cur_fn is not None and (tgt.id in getattr(self._cur_fn, "cellvars", []) or tgt.id in getattr(self._cur_fn, "freevars", [])):
-                        self._emit("CELL_SET", [safe_name, val_tmp])
-                    else:
-                        self._emit("STORE", [safe_name, val_tmp])
-                elif isinstance(tgt, ast.Subscript):
-                    base = self.lower_expr(tgt.value)
-                    sl = self.lower_expr(tgt.slice)
-                    self._emit("STORE_SUBSCR", [base, sl, val_tmp])
-                elif isinstance(tgt, ast.Attribute):
-                    obj = self.lower_expr(tgt.value)
-                    attr = tgt.attr
-                    if attr in LUA_RESERVED_KEYWORDS:
-                        self._emit("STORE_SUBSCR", [obj, f'"{attr}"', val_tmp])
-                    else:
-                        self._emit("SET_ATTR", [obj, attr, val_tmp])
-
             for t in node.targets:
-                lower_target(t, val)
+                self._lower_target(t, val)
         elif isinstance(node, ast.AugAssign):
             lhs = self.lower_expr(node.target)
             rhs = self.lower_expr(node.value)
@@ -211,6 +222,13 @@ class IRLowerer:
             self._emit("BINOP", [self._binop(node.op), lhs, rhs], result=res)
             if isinstance(node.target, ast.Name):
                 self._emit("STORE", [_safe_var(node.target.id), res])
+            elif isinstance(node.target, ast.Attribute):
+                val = self.lower_expr(node.target.value)
+                self._emit("SET_ATTR", [val, node.target.attr, res])
+            elif isinstance(node.target, ast.Subscript):
+                val = self.lower_expr(node.target.value)
+                idx = self.lower_expr(node.target.slice)
+                self._emit("STORE_SUBSCR", [val, idx, res])
         elif isinstance(node, ast.Return):
             val = self.lower_expr(node.value) if node.value else None
             if self._try_depth > 0:
@@ -369,7 +387,7 @@ class IRLowerer:
                 self.lower_stmt(s)
             if not node.body or not isinstance(node.body[-1], ast.Return):
                 self._emit("RETURN", [])
-            is_gen = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node))
+            is_gen = _has_yield(node)
             is_async = isinstance(node, ast.AsyncFunctionDef)
 
             if is_gen or is_async:
@@ -380,7 +398,10 @@ class IRLowerer:
                 self.module.functions.append(fn)
 
                 # Create wrapper function that returns a generator or coroutine thread
-                wrapper_fn = Function(name=unique_fn_name, params=[_safe_var(a.arg) for a in node.args.args])
+                wrapper_params = [_safe_var(a.arg) for a in node.args.args]
+                if node.args.vararg:
+                    wrapper_params.append("...")
+                wrapper_fn = Function(name=unique_fn_name, params=wrapper_params)
                 wrapper_fn.is_nested = is_nested
                 sc = getattr(node, "_scope", None)
                 if sc is not None:
@@ -394,7 +415,7 @@ class IRLowerer:
 
                 # Call make_generator/make_coroutine(impl_name, arg1, arg2, ...)
                 res_tmp = self._new_tmp()
-                call_args = [wrapper_type, impl_name] + [_safe_var(a.arg) for a in node.args.args]
+                call_args = [wrapper_type, impl_name] + [p for p in wrapper_params]
                 self._emit("CALL", call_args, result=res_tmp)
                 self._emit("RETURN", [res_tmp])
                 self.module.functions.append(wrapper_fn)
@@ -460,6 +481,32 @@ class IRLowerer:
         elif isinstance(node, ast.Pass):
             pass
         elif isinstance(node, ast.Try):
+            if node.finalbody and (node.handlers or node.orelse):
+                inner = ast.Try(body=node.body, handlers=node.handlers, orelse=node.orelse, finalbody=[])
+                outer = ast.Try(body=[inner], handlers=[], orelse=[], finalbody=node.finalbody)
+                self.lower_stmt(outer)
+                return
+
+            if node.finalbody:
+                try_label = self._new_label("try")
+                try_block = self._new_block(try_label)
+                self._cur_block = try_block
+                self._emit("TRY_BEGIN", [], result=self._new_tmp())
+                self._try_depth += 1
+                for s in node.body:
+                    self.lower_stmt(s)
+                self._try_depth -= 1
+                self._emit("FINALLY_BEGIN", [], result=self._new_tmp())
+                finally_label = self._new_label("finally")
+                self._cur_block = self._new_block(finally_label)
+                for s in node.finalbody:
+                    self.lower_stmt(s)
+                self._emit("FINALLY_END", [], result=self._new_tmp())
+                end_label = self._new_label("end_try")
+                self._cur_block = self._new_block(end_label)
+                self._emit("TRY_UNWIND", [])
+                return
+
             try_label = self._new_label("try")
             try_block = self._new_block(try_label)
             self._cur_block = try_block
@@ -469,23 +516,27 @@ class IRLowerer:
                 self.lower_stmt(s)
             self._try_depth -= 1
             self._emit("END_TRY", [], result=self._new_tmp())
-            finally_label = self._new_label("finally")
-            end_label = self._new_label("end_try")
             for h in node.handlers:
                 handler_lbl = self._new_label("except")
                 self._cur_block = self._new_block(handler_lbl)
+                if h.type is not None:
+                    type_tmp = self.lower_expr(h.type)
+                    self._emit("CATCH_BEGIN", [type_tmp], result=self._new_tmp())
+                else:
+                    self._emit("CATCH_BEGIN", [], result=self._new_tmp())
                 if h.name:
                     self._emit("STORE", [h.name, "_exc"])
                 for s in h.body:
                     self.lower_stmt(s)
                 self._emit("END_CATCH", [], result=self._new_tmp())
             self._emit("END_ALL_CATCH", [], result=self._new_tmp())
-            for s in node.orelse:
-                self.lower_stmt(s)
-            if node.finalbody:
-                self._cur_block = self._new_block(finally_label)
-                for s in node.finalbody:
+            if node.orelse:
+                self._emit("TRY_ELSE", [], result=self._new_tmp())
+                for s in node.orelse:
                     self.lower_stmt(s)
+                self._emit("END_TRY_ELSE", [], result=self._new_tmp())
+            self._emit("TRY_CLOSE", [], result=self._new_tmp())
+            end_label = self._new_label("end_try")
             self._cur_block = self._new_block(end_label)
             self._emit("TRY_UNWIND", [])
         elif isinstance(node, ast.ClassDef):
@@ -552,7 +603,7 @@ class IRLowerer:
             prev_cur_class = getattr(self, "_cur_class", None)
             self._cur_class = node.name
             for stmt in node.body:
-                if isinstance(stmt, ast.FunctionDef):
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if stmt.name == "__init__":
                         has_init = True
                     if stmt.name == "__repr__":
@@ -598,9 +649,38 @@ class IRLowerer:
                         self.lower_stmt(s2)
                     if not stmt.body or not isinstance(stmt.body[-1], ast.Return):
                         self._emit("RETURN", [])
-                    self.module.functions.append(fn)
-                    self._cur_fn = prev_fn
-                    self._cur_block = prev_block
+
+                    is_gen = _has_yield(stmt)
+                    is_async = isinstance(stmt, ast.AsyncFunctionDef)
+
+                    if is_gen or is_async:
+                        wrapper_type = "make_generator" if is_gen else "make_coroutine"
+                        impl_name = node.name + "." + stmt.name + "_impl"
+                        fn.name = impl_name
+                        self.module.functions.append(fn)
+
+                        wrapper_fn = Function(name=node.name + "." + stmt.name, params=list(params))
+                        if sc is not None:
+                            wrapper_fn.freevars = sorted(getattr(sc, "freevars", set()))
+                            wrapper_fn.cellvars = sorted(getattr(sc, "cellvars", set()))
+                            wrapper_fn.upvalues = list(wrapper_fn.freevars)
+                        wrapper_block = Block(label="entry")
+                        wrapper_fn.blocks.append(wrapper_block)
+                        self._cur_fn = wrapper_fn
+                        self._cur_block = wrapper_block
+
+                        res_tmp = self._new_tmp()
+                        call_args = [wrapper_type, impl_name] + [p for p in params]
+                        self._emit("CALL", call_args, result=res_tmp)
+                        self._emit("RETURN", [res_tmp])
+                        self.module.functions.append(wrapper_fn)
+
+                        self._cur_fn = prev_fn
+                        self._cur_block = prev_block
+                    else:
+                        self.module.functions.append(fn)
+                        self._cur_fn = prev_fn
+                        self._cur_block = prev_block
                     self._cur_method_first_arg = prev_method_first_arg
 
                     # Register method parameters for keyword call resolution
@@ -626,6 +706,25 @@ class IRLowerer:
                                 self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
                             else:
                                 self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
+                        elif isinstance(dec, ast.Attribute) and isinstance(dec.value, ast.Name) and dec.attr in ("setter", "deleter", "getter"):
+                            base_prop = self._new_tmp()
+                            if dec.value.id in LUA_RESERVED_KEYWORDS:
+                                self._emit("SUBSCR", [node.name, f'"{dec.value.id}"'], result=base_prop)
+                            else:
+                                self._emit("GET_ATTR", [node.name, dec.value.id], result=base_prop)
+                            dec_fn = self._new_tmp()
+                            self._emit("GET_ATTR", [base_prop, dec.attr], result=dec_fn)
+                            m_tmp = self._new_tmp()
+                            if stmt.name in LUA_RESERVED_KEYWORDS:
+                                self._emit("SUBSCR", [node.name, f'"{stmt.name}"'], result=m_tmp)
+                            else:
+                                self._emit("GET_ATTR", [node.name, stmt.name], result=m_tmp)
+                            res_tmp = self._new_tmp()
+                            self._emit("CALL", [dec_fn, m_tmp], result=res_tmp)
+                            if stmt.name in LUA_RESERVED_KEYWORDS:
+                                self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', res_tmp])
+                            else:
+                                self._emit("SET_ATTR", [node.name, stmt.name, res_tmp])
                         else:
                             dec_tmp = self.lower_expr(dec)
                             m_tmp = self._new_tmp()
@@ -705,44 +804,26 @@ class IRLowerer:
 
             self._emit("STORE", [node.name, cls])
         elif isinstance(node, (ast.With, ast.AsyncWith)):
-            # with statement: enter context, run body, exit context
-            aliases = []
-            is_async = isinstance(node, ast.AsyncWith)
-            for i, item in enumerate(node.items):
+            mgrs = []
+            for item in node.items:
                 ctx_tmp = self.lower_expr(item.context_expr)
                 mgr_tmp = self._new_tmp()
                 self._emit("LOAD", [ctx_tmp], result=mgr_tmp)
-                aliases.append(mgr_tmp)
-                enter_tmp = self._new_tmp()
-                enter_method = "__aenter__" if is_async else "__enter__"
-                self._emit("GET_ATTR", [mgr_tmp, enter_method], result=enter_tmp)
-                enter_lbl = self._new_label("with_enter")
-                end_enter_lbl = self._new_label("with_enter_end")
-                self._emit("BRANCH", [enter_tmp, enter_lbl, end_enter_lbl])
-                self._cur_block = self._new_block(enter_lbl)
-                self._emit("DO", [])
                 enter_ret = self._new_tmp()
-                self._emit("CALL", [enter_tmp, mgr_tmp], result=enter_ret)
-                if item.optional_vars and isinstance(item.optional_vars, ast.Name):
-                    self._emit("STORE", [item.optional_vars.id, enter_ret])
-                self._emit("END", [])
-                self._cur_block = self._new_block(end_enter_lbl)
-            # body
+                self._emit("CALL", ["_luthon_with_enter", mgr_tmp], result=enter_ret)
+                if item.optional_vars:
+                    self._lower_target(item.optional_vars, enter_ret)
+                mgrs.append(mgr_tmp)
+                self._emit("WITH_BEGIN", [])
+
+            self._try_depth += len(mgrs)
             for s in node.body:
                 self.lower_stmt(s)
-            # __exit__ / __aexit__ for each context manager (in reverse order)
-            for mgr_tmp in reversed(aliases):
-                exit_tmp = self._new_tmp()
-                exit_method = "__aexit__" if is_async else "__exit__"
-                self._emit("GET_ATTR", [mgr_tmp, exit_method], result=exit_tmp)
-                exit_lbl = self._new_label("with_exit")
-                end_exit_lbl = self._new_label("with_exit_end")
-                self._emit("BRANCH", [exit_tmp, exit_lbl, end_exit_lbl])
-                self._cur_block = self._new_block(exit_lbl)
-                self._emit("DO", [])
-                self._emit("CALL", [exit_tmp, mgr_tmp], result=self._new_tmp())
-                self._emit("END", [])
-                self._cur_block = self._new_block(end_exit_lbl)
+            self._try_depth -= len(mgrs)
+
+            for mgr_tmp in reversed(mgrs):
+                self._emit("WITH_END", [mgr_tmp])
+            self._emit("TRY_UNWIND", [])
         elif isinstance(node, ast.Raise):
             if node.exc:
                 exc_tmp = self.lower_expr(node.exc)
@@ -983,6 +1064,18 @@ class IRLowerer:
                 self._emit("GET_ATTR", [obj, attr], result=t)
             return t
         if isinstance(node, ast.Name):
+            if node.id == "True":
+                t = self._new_tmp()
+                self._emit("CONST", [True], result=t)
+                return t
+            elif node.id == "False":
+                t = self._new_tmp()
+                self._emit("CONST", [False], result=t)
+                return t
+            elif node.id == "None":
+                t = self._new_tmp()
+                self._emit("CONST", [None], result=t)
+                return t
             safe_name = _safe_var(node.id)
             if self._cur_fn is not None and (node.id in getattr(self._cur_fn, "cellvars", []) or node.id in getattr(self._cur_fn, "freevars", [])):
                 t = self._new_tmp()

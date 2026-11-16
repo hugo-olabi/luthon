@@ -63,6 +63,40 @@ function Module.new(name)
   return self
 end
 
+local LUA_RESERVED_KEYWORDS = {
+  ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true,
+  ["elseif"] = true, ["end"] = true, ["false"] = true, ["for"] = true,
+  ["function"] = true, ["goto"] = true, ["if"] = true, ["in"] = true,
+  ["local"] = true, ["nil"] = true, ["not"] = true, ["or"] = true,
+  ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+  ["until"] = true, ["while"] = true,
+}
+
+local function _safe_var(name)
+  if type(name) == "string" and LUA_RESERVED_KEYWORDS[name] then
+    return "_py_" .. name
+  end
+  return name
+end
+
+local function _has_yield(n, is_root, seen)
+  if not n or type(n) ~= "table" then return false end
+  seen = seen or {}
+  if seen[n] then return false end
+  seen[n] = true
+
+  if n._type == "Yield" or n._type == "YieldFrom" then return true end
+  if not is_root and (n._type == "FunctionDef" or n._type == "AsyncFunctionDef") then
+    return false
+  end
+  for k, v in pairs(n) do
+    if k ~= "_scope" and k ~= "parent" and type(v) == "table" then
+      if _has_yield(v, false, seen) then return true end
+    end
+  end
+  return false
+end
+
 ------------------------------------------------------------------------------
 -- Operator mappings (Python AST op -> Lua IR op string)
 ------------------------------------------------------------------------------
@@ -126,6 +160,7 @@ function IRLowerer.new(package)
   self._break_stack = {}
   self._continue_stack = {}
   self._try_depth = 0
+  self._fn_counter = {}
   return self
 end
 
@@ -205,71 +240,77 @@ local function _is_cell_or_free(fn, name)
   return false
 end
 
+function IRLowerer:_lower_target(tgt, val_tmp)
+  if tgt._type == "Tuple" or tgt._type == "List" then
+    local star_idx = nil
+    for idx, e in ipairs(tgt.elts or {}) do
+      if e._type == "Starred" then star_idx = idx; break end
+    end
+    if not star_idx then
+      for i, e in ipairs(tgt.elts or {}) do
+        local idx_tmp = self:_new_tmp()
+        self:_emit("CONST", {i - 1}, idx_tmp)
+        local elem_tmp = self:_new_tmp()
+        self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+        self:_lower_target(e, elem_tmp)
+      end
+    else
+      local elts = tgt.elts or {}
+      local num_trail = #elts - star_idx
+      for i = 1, star_idx - 1 do
+        local idx_tmp = self:_new_tmp()
+        self:_emit("CONST", {i - 1}, idx_tmp)
+        local elem_tmp = self:_new_tmp()
+        self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+        self:_lower_target(elts[i], elem_tmp)
+      end
+      for j = 1, num_trail do
+        local idx_tmp = self:_new_tmp()
+        self:_emit("CONST", {-j}, idx_tmp)
+        local elem_tmp = self:_new_tmp()
+        self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+        self:_lower_target(elts[#elts - j + 1], elem_tmp)
+      end
+      local star_elem = elts[star_idx]
+      local slice_tmp = self:_new_tmp()
+      if num_trail > 0 then
+        self:_emit("CALL", {"_luthon_slice", val_tmp, tostring(star_idx - 1), tostring(-num_trail)}, slice_tmp)
+      else
+        self:_emit("CALL", {"_luthon_slice", val_tmp, tostring(star_idx - 1)}, slice_tmp)
+      end
+      self:_lower_target(star_elem.value, slice_tmp)
+    end
+  elseif tgt._type == "Starred" then
+    self:_lower_target(tgt.value, val_tmp)
+  elseif tgt._type == "Name" then
+    local safe_name = _safe_var(tgt.id)
+    if _is_cell_or_free(self._cur_fn, tgt.id) then
+      self:_emit("CELL_SET", {safe_name, val_tmp})
+    else
+      self:_emit("STORE", {safe_name, val_tmp})
+    end
+  elseif tgt._type == "Subscript" then
+    local base = self:lower_expr(tgt.value)
+    local sl = self:lower_expr(tgt.slice)
+    self:_emit("STORE_SUBSCR", {base, sl, val_tmp})
+  elseif tgt._type == "Attribute" then
+    local obj = self:lower_expr(tgt.value)
+    if LUA_RESERVED_KEYWORDS[tgt.attr] then
+      self:_emit("STORE_SUBSCR", {obj, "\"" .. tgt.attr .. "\"", val_tmp})
+    else
+      self:_emit("SET_ATTR", {obj, tgt.attr, val_tmp})
+    end
+  end
+end
+
 function IRLowerer:_lower_stmt_impl(node)
   local t = node._type
   if t == "Expr" then
     self:lower_expr(node.value)
   elseif t == "Assign" then
     local val = self:lower_expr(node.value)
-    local function lower_target(tgt, val_tmp)
-      if tgt._type == "Tuple" or tgt._type == "List" then
-        local star_idx = nil
-        for idx, e in ipairs(tgt.elts or {}) do
-          if e._type == "Starred" then star_idx = idx; break end
-        end
-        if not star_idx then
-          for i, e in ipairs(tgt.elts or {}) do
-            local idx_tmp = self:_new_tmp()
-            self:_emit("CONST", {i - 1}, idx_tmp)
-            local elem_tmp = self:_new_tmp()
-            self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
-            lower_target(e, elem_tmp)
-          end
-        else
-          local elts = tgt.elts or {}
-          local num_trail = #elts - star_idx
-          for i = 1, star_idx - 1 do
-            local idx_tmp = self:_new_tmp()
-            self:_emit("CONST", {i - 1}, idx_tmp)
-            local elem_tmp = self:_new_tmp()
-            self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
-            lower_target(elts[i], elem_tmp)
-          end
-          for j = 1, num_trail do
-            local idx_tmp = self:_new_tmp()
-            self:_emit("CONST", {-j}, idx_tmp)
-            local elem_tmp = self:_new_tmp()
-            self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
-            lower_target(elts[#elts - j + 1], elem_tmp)
-          end
-          local star_elem = elts[star_idx]
-          local slice_tmp = self:_new_tmp()
-          if num_trail > 0 then
-            self:_emit("CALL", {"_luthon_slice", val_tmp, tostring(star_idx - 1), tostring(-num_trail)}, slice_tmp)
-          else
-            self:_emit("CALL", {"_luthon_slice", val_tmp, tostring(star_idx - 1)}, slice_tmp)
-          end
-          lower_target(star_elem.value, slice_tmp)
-        end
-      elseif tgt._type == "Starred" then
-        lower_target(tgt.value, val_tmp)
-      elseif tgt._type == "Name" then
-        if _is_cell_or_free(self._cur_fn, tgt.id) then
-          self:_emit("CELL_SET", {tgt.id, val_tmp})
-        else
-          self:_emit("STORE", {tgt.id, val_tmp})
-        end
-      elseif tgt._type == "Subscript" then
-        local base = self:lower_expr(tgt.value)
-        local sl = self:lower_expr(tgt.slice)
-        self:_emit("STORE_SUBSCR", {base, sl, val_tmp})
-      elseif tgt._type == "Attribute" then
-        local obj = self:lower_expr(tgt.value)
-        self:_emit("SET_ATTR", {obj, tgt.attr, val_tmp})
-      end
-    end
     for _, tgt in ipairs(node.targets or {}) do
-      lower_target(tgt, val)
+      self:_lower_target(tgt, val)
     end
   elseif t == "Delete" then
     -- del target -> set to nil (or delete attribute/item)
@@ -277,10 +318,14 @@ function IRLowerer:_lower_stmt_impl(node)
       local nil_tmp = self:_new_tmp()
       self:_emit("CONST", {nil}, nil_tmp)
       if tgt._type == "Name" then
-        self:_emit("STORE", {tgt.id, nil_tmp})
+        self:_emit("STORE", {_safe_var(tgt.id), nil_tmp})
       elseif tgt._type == "Attribute" then
         local obj = self:lower_expr(tgt.value)
-        self:_emit("SET_ATTR", {obj, tgt.attr, nil_tmp})
+        if LUA_RESERVED_KEYWORDS[tgt.attr] then
+          self:_emit("STORE_SUBSCR", {obj, "\"" .. tgt.attr .. "\"", nil_tmp})
+        else
+          self:_emit("SET_ATTR", {obj, tgt.attr, nil_tmp})
+        end
       elseif tgt._type == "Subscript" then
         local base = self:lower_expr(tgt.value)
         local sl = self:lower_expr(tgt.slice)
@@ -292,8 +337,16 @@ function IRLowerer:_lower_stmt_impl(node)
     local rhs = self:lower_expr(node.value)
     local res = self:_new_tmp()
     self:_emit("BINOP", {self:_binop(node.op), lhs, rhs}, res)
-    if node.target._type == "Name" then
+    local target_t = node.target._type or node.target.type
+    if target_t == "Name" then
       self:_emit("STORE", {node.target.id, res})
+    elseif target_t == "Attribute" then
+      local val = self:lower_expr(node.target.value)
+      self:_emit("SET_ATTR", {val, node.target.attr, res})
+    elseif target_t == "Subscript" then
+      local val = self:lower_expr(node.target.value)
+      local idx = self:lower_expr(node.target.slice)
+      self:_emit("STORE_SUBSCR", {val, idx, res})
     end
   elseif t == "Return" then
     local val = nil
@@ -324,10 +377,12 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("CALL", {"_luthon_assert_fail", cond, msg_tmp}, self:_new_tmp())
   elseif t == "If" then
     local cond = self:lower_expr(node.test)
+    local chk_cond = self:_new_tmp()
+    self:_emit("CALL", {"bool", cond}, chk_cond)
     local then_lbl = self:_new_label("then")
     local else_lbl = self:_new_label("else")
     local end_lbl = self:_new_label("endif")
-    self:_emit("BRANCH", {cond, then_lbl, else_lbl})
+    self:_emit("BRANCH", {chk_cond, then_lbl, else_lbl})
     -- then
     self._cur_block = self:_new_block(then_lbl)
     self:_emit("DO", {})
@@ -344,7 +399,6 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("JUMP", {end_lbl})
     end
     self:_emit("END", {})
-    if #self._break_stack > 0 then table.remove(self._break_stack) end
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "While" then
     local cond_lbl = self:_new_label("whilecond")
@@ -376,7 +430,7 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     if node.target._type == "Name" then
-      self:_emit("STORE", {node.target.id, nxt})
+      self:_emit("STORE", {_safe_var(node.target.id), nxt})
     elseif node.target._type == "Tuple" or node.target._type == "List" then
       for i, t in ipairs(node.target.elts or {}) do
         if t._type == "Name" then
@@ -384,7 +438,7 @@ function IRLowerer:_lower_stmt_impl(node)
           self:_emit("CONST", {i - 1}, idx_tmp)
           local elem_tmp = self:_new_tmp()
           self:_emit("SUBSCR", {nxt, idx_tmp}, elem_tmp)
-          self:_emit("STORE", {t.id, elem_tmp})
+          self:_emit("STORE", {_safe_var(t.id), elem_tmp})
         end
       end
     end
@@ -396,10 +450,14 @@ function IRLowerer:_lower_stmt_impl(node)
     if #self._continue_stack > 0 then table.remove(self._continue_stack) end
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "FunctionDef" or t == "AsyncFunctionDef" then
+    local fn_sym = node.name
+    local count = (self._fn_counter[node.name] or 0) + 1
+    self._fn_counter[node.name] = count
+    local unique_fn_name = (count == 1) and node.name or (node.name .. "_" .. tostring(count))
     local is_nested = (self._cur_fn ~= nil and not self._cur_fn.is_entry_point)
-    local fn = Function.new(node.name, {})
+    local fn = Function.new(unique_fn_name, {})
     fn.is_nested = is_nested
-    for _, a in ipairs(node.args and node.args.args or {}) do table.insert(fn.params, a.arg) end
+    for _, a in ipairs(node.args and node.args.args or {}) do table.insert(fn.params, _safe_var(a.arg)) end
     if node.args and (node.args.vararg or node.args.kwarg) then
       table.insert(fn.params, "...")
     end
@@ -407,13 +465,13 @@ function IRLowerer:_lower_stmt_impl(node)
     local sc = node._scope
     if sc then
       fn.locals = {}
-      for k in pairs(sc.locals or {}) do table.insert(fn.locals, k) end
+      for k in pairs(sc.locals or {}) do table.insert(fn.locals, _safe_var(k)) end
       table.sort(fn.locals)
       fn.freevars = {}
-      for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, k) end
+      for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, _safe_var(k)) end
       table.sort(fn.freevars)
       fn.cellvars = {}
-      for k in pairs(sc.cellvars or {}) do table.insert(fn.cellvars, k) end
+      for k in pairs(sc.cellvars or {}) do table.insert(fn.cellvars, _safe_var(k)) end
       table.sort(fn.cellvars)
       fn.upvalues = {}
       for _, fv in ipairs(fn.freevars) do table.insert(fn.upvalues, fv) end
@@ -444,23 +502,87 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("MAKE_DICT", {}, t_kw)
       self:_emit("STORE", {kwarg_name, t_kw})
     end
+    -- Unpack default parameter values
+    local args_list = node.args and node.args.args or {}
+    local defaults = node.args and node.args.defaults or {}
+    if #defaults > 0 then
+      local offset = #args_list - #defaults
+      for i, default in ipairs(defaults) do
+        local param_name = args_list[offset + i].arg
+        local def_tmp = self:lower_expr(default)
+        local is_nil_lbl = self:_new_label("def_set")
+        local skip_lbl = self:_new_label("def_skip")
+        local chk_tmp = self:_new_tmp()
+        self:_emit("CMP", {"eq", param_name, "nil"}, chk_tmp)
+        self:_emit("BRANCH", {chk_tmp, is_nil_lbl, skip_lbl})
+        self._cur_block = self:_new_block(is_nil_lbl)
+        self:_emit("STORE", {param_name, def_tmp})
+        self:_emit("JUMP", {skip_lbl})
+        self._cur_block = self:_new_block(skip_lbl)
+      end
+    end
     for _, s in ipairs(node.body or {}) do self:lower_stmt(s) end
     if not node.body or node.body[#node.body]._type ~= "Return" then
       self:_emit("RETURN", {})
     end
-    table.insert(self.module.functions, fn)
-    -- Switch back to enclosing block before applying decorators
-    self._cur_fn = prev_fn
-    self._cur_block = prev_block
 
+    local is_gen = _has_yield(node, true)
+    local is_async = (t == "AsyncFunctionDef")
     local fn_ref = fn.name
+
+    if is_gen or is_async then
+      local wrapper_type = is_gen and "make_generator" or "make_coroutine"
+      local impl_name = fn.name .. "_impl"
+      fn.name = impl_name
+      fn.is_nested = is_nested
+      table.insert(self.module.functions, fn)
+
+      local wrapper_params = {}
+      for _, a in ipairs(node.args and node.args.args or {}) do table.insert(wrapper_params, _safe_var(a.arg)) end
+      if node.args and (node.args.vararg or node.args.kwarg) then
+        table.insert(wrapper_params, "...")
+      end
+      local wrapper_fn = Function.new(unique_fn_name, wrapper_params)
+      wrapper_fn.is_nested = is_nested
+      if sc then
+        wrapper_fn.freevars = {}
+        for k in pairs(sc.freevars or {}) do table.insert(wrapper_fn.freevars, _safe_var(k)) end
+        table.sort(wrapper_fn.freevars)
+        wrapper_fn.cellvars = {}
+        for k in pairs(sc.cellvars or {}) do table.insert(wrapper_fn.cellvars, _safe_var(k)) end
+        table.sort(wrapper_fn.cellvars)
+        wrapper_fn.upvalues = {}
+        for _, fv in ipairs(wrapper_fn.freevars) do table.insert(wrapper_fn.upvalues, fv) end
+      end
+      local wrapper_block = Block.new("entry")
+      table.insert(wrapper_fn.blocks, wrapper_block)
+      self._cur_fn = wrapper_fn
+      self._cur_block = wrapper_block
+
+      local res_tmp = self:_new_tmp()
+      local call_args = {wrapper_type, impl_name}
+      for _, p in ipairs(wrapper_params) do table.insert(call_args, p) end
+      self:_emit("CALL", call_args, res_tmp)
+      self:_emit("RETURN", {res_tmp})
+      table.insert(self.module.functions, wrapper_fn)
+
+      self._cur_fn = prev_fn
+      self._cur_block = prev_block
+      fn_ref = unique_fn_name
+    else
+      table.insert(self.module.functions, fn)
+      self._cur_fn = prev_fn
+      self._cur_block = prev_block
+      fn_ref = fn.name
+    end
+
     if is_nested then
       local fn_tmp = self:_new_tmp()
-      self:_emit("MAKE_FUNCTION", {fn.name}, fn_tmp)
-      self:_emit("STORE", {fn.name, fn_tmp})
+      self:_emit("MAKE_FUNCTION", {fn_ref}, fn_tmp)
+      self:_emit("STORE", {fn_sym, fn_tmp})
       fn_ref = fn_tmp
     else
-      self:_emit("STORE", {fn.name, fn.name})
+      self:_emit("STORE", {fn_sym, fn_ref})
     end
     local clean_params = {}
     for _, p in ipairs(fn.params) do
@@ -476,17 +598,21 @@ function IRLowerer:_lower_stmt_impl(node)
       local dec = node.decorator_list[i]
       local dec_tmp = self:lower_expr(dec)
       local fn_tmp = self:_new_tmp()
-      self:_emit("LOAD", {fn.name}, fn_tmp)
+      self:_emit("LOAD", {fn_sym}, fn_tmp)
       local result_tmp = self:_new_tmp()
       self:_emit("CALL", {dec_tmp, fn_tmp}, result_tmp)
-      self:_emit("STORE", {fn.name, result_tmp})
+      self:_emit("STORE", {fn_sym, result_tmp})
     end
   elseif t == "Import" then
     for _, alias in ipairs(node.names or {}) do
       local name = alias.asname or alias.name:match("([^%.]+)")
       self._imported_modules[name] = true
       self._imported_modules[alias.name] = true
-      self:_emit("IMPORT", {name, alias.name})
+      if alias.asname then
+        self:_emit("IMPORT", {name, alias.name})
+      else
+        self:_emit("IMPORT", {name, name, alias.name})
+      end
     end
   elseif t == "ImportFrom" then
     local mod = node.module or ""
@@ -511,30 +637,70 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("IMPORT_FROM", {name, mod, alias.name})
     end
   elseif t == "Try" then
-    -- try/except/finally
+    local handlers = node.handlers or {}
+    local orelse = node.orelse or {}
+    local finalbody = node.finalbody or {}
+    if #finalbody > 0 and (#handlers > 0 or #orelse > 0) then
+      local inner = {
+        _type = "Try",
+        body = node.body,
+        handlers = handlers,
+        orelse = orelse,
+        finalbody = {}
+      }
+      local outer = {
+        _type = "Try",
+        body = {inner},
+        handlers = {},
+        orelse = {},
+        finalbody = finalbody
+      }
+      self:lower_stmt(outer)
+      return
+    end
+
+    if #finalbody > 0 then
+      local try_label = self:_new_label("try")
+      local try_block = self:_new_block(try_label)
+      self._cur_block = try_block
+      self:_emit("TRY_BEGIN", {}, self:_new_tmp())
+      self._try_depth = self._try_depth + 1
+      for _, s in ipairs(node.body or {}) do
+        self:lower_stmt(s)
+      end
+      self._try_depth = self._try_depth - 1
+      self:_emit("FINALLY_BEGIN", {}, self:_new_tmp())
+      local finally_label = self:_new_label("finally")
+      self._cur_block = self:_new_block(finally_label)
+      for _, s in ipairs(finalbody) do
+        self:lower_stmt(s)
+      end
+      self:_emit("FINALLY_END", {}, self:_new_tmp())
+      local end_label = self:_new_label("end_try")
+      self._cur_block = self:_new_block(end_label)
+      self:_emit("TRY_UNWIND", {})
+      return
+    end
+
     local try_label = self:_new_label("try")
     local try_block = self:_new_block(try_label)
     self._cur_block = try_block
-    -- emit TRY_BEGIN marker
     self:_emit("TRY_BEGIN", {}, self:_new_tmp())
-    -- lower try body
     self._try_depth = self._try_depth + 1
     for _, s in ipairs(node.body or {}) do
       self:lower_stmt(s)
     end
     self._try_depth = self._try_depth - 1
-    -- end try block
     self:_emit("END_TRY", {}, self:_new_tmp())
-    -- except handlers
-    local handlers = node.handlers or {}
-    local finally_label = self:_new_label("finally")
-    local end_label = self:_new_label("end_try")
-    local handler_blocks = {}
-    for i, h in ipairs(handlers) do
+    for _, h in ipairs(handlers) do
       local handler_lbl = self:_new_label("except")
-      table.insert(handler_blocks, handler_lbl)
       self._cur_block = self:_new_block(handler_lbl)
-      -- bind exception variable
+      if h.type then
+        local type_tmp = self:lower_expr(h.type)
+        self:_emit("CATCH_BEGIN", {type_tmp}, self:_new_tmp())
+      else
+        self:_emit("CATCH_BEGIN", {}, self:_new_tmp())
+      end
       if h.name then
         self:_emit("STORE", {h.name, "_exc"})
       end
@@ -543,21 +709,16 @@ function IRLowerer:_lower_stmt_impl(node)
       end
       self:_emit("END_CATCH", {}, self:_new_tmp())
     end
-    -- Mark end of all exception handlers: re-raise if none matched
     self:_emit("END_ALL_CATCH", {}, self:_new_tmp())
-    -- else clause (not supported yet)
-    if node.orelse and #node.orelse > 0 then
-      for _, s in ipairs(node.orelse or {}) do
+    if #orelse > 0 then
+      self:_emit("TRY_ELSE", {}, self:_new_tmp())
+      for _, s in ipairs(orelse) do
         self:lower_stmt(s)
       end
+      self:_emit("END_TRY_ELSE", {}, self:_new_tmp())
     end
-    -- finally block
-    if node.finalbody and #node.finalbody > 0 then
-      self._cur_block = self:_new_block(finally_label)
-      for _, s in ipairs(node.finalbody or {}) do
-        self:lower_stmt(s)
-      end
-    end
+    self:_emit("TRY_CLOSE", {}, self:_new_tmp())
+    local end_label = self:_new_label("end_try")
     self._cur_block = self:_new_block(end_label)
     self:_emit("TRY_UNWIND", {})
   elseif t == "Pass" then
@@ -640,20 +801,20 @@ function IRLowerer:_lower_stmt_impl(node)
         local prev_method_first_arg = self._cur_method_first_arg
         self._cur_method_first_arg = stmt.args and stmt.args.args and stmt.args.args[1] and stmt.args.args[1].arg
         local fn = Function.new(node.name .. "." .. stmt.name, {})
-        for _, a in ipairs(stmt.args and stmt.args.args or {}) do table.insert(fn.params, a.arg) end
+        for _, a in ipairs(stmt.args and stmt.args.args or {}) do table.insert(fn.params, _safe_var(a.arg)) end
         if stmt.args and (stmt.args.vararg or stmt.args.kwarg) then
           table.insert(fn.params, "...")
         end
         local sc = stmt._scope
         if sc then
           fn.locals = {}
-          for k in pairs(sc.locals or {}) do table.insert(fn.locals, k) end
+          for k in pairs(sc.locals or {}) do table.insert(fn.locals, _safe_var(k)) end
           table.sort(fn.locals)
           fn.freevars = {}
-          for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, k) end
+          for k in pairs(sc.freevars or {}) do table.insert(fn.freevars, _safe_var(k)) end
           table.sort(fn.freevars)
           fn.cellvars = {}
-          for k in pairs(sc.cellvars or {}) do table.insert(fn.cellvars, k) end
+          for k in pairs(sc.cellvars or {}) do table.insert(fn.cellvars, _safe_var(k)) end
           table.sort(fn.cellvars)
           fn.upvalues = {}
           for _, fv in ipairs(fn.freevars) do table.insert(fn.upvalues, fv) end
@@ -678,13 +839,70 @@ function IRLowerer:_lower_stmt_impl(node)
           self:_emit("MAKE_DICT", {}, t_kw)
           self:_emit("STORE", {kwarg_name, t_kw})
         end
+        -- Unpack default parameter values
+        local args_list = stmt.args and stmt.args.args or {}
+        local defaults = stmt.args and stmt.args.defaults or {}
+        if #defaults > 0 then
+          local offset = #args_list - #defaults
+          for i, default in ipairs(defaults) do
+            local param_name = args_list[offset + i].arg
+            local def_tmp = self:lower_expr(default)
+            local is_nil_lbl = self:_new_label("def_set")
+            local skip_lbl = self:_new_label("def_skip")
+            local chk_tmp = self:_new_tmp()
+            self:_emit("CMP", {"eq", param_name, "nil"}, chk_tmp)
+            self:_emit("BRANCH", {chk_tmp, is_nil_lbl, skip_lbl})
+            self._cur_block = self:_new_block(is_nil_lbl)
+            self:_emit("STORE", {param_name, def_tmp})
+            self:_emit("JUMP", {skip_lbl})
+            self._cur_block = self:_new_block(skip_lbl)
+          end
+        end
         for _, s2 in ipairs(stmt.body or {}) do self:lower_stmt(s2) end
         if not stmt.body or stmt.body[#stmt.body]._type ~= "Return" then
           self:_emit("RETURN", {})
         end
-        table.insert(self.module.functions, fn)
-        self._cur_fn = prev_fn
-        self._cur_block = prev_block
+
+        local is_gen = _has_yield(stmt, true)
+        local is_async = (stmt._type == "AsyncFunctionDef")
+        if is_gen or is_async then
+          local wrapper_type = is_gen and "make_generator" or "make_coroutine"
+          local impl_name = node.name .. "." .. stmt.name .. "_impl"
+          fn.name = impl_name
+          table.insert(self.module.functions, fn)
+
+          local wrapper_params = {}
+          for _, p in ipairs(fn.params) do table.insert(wrapper_params, p) end
+          local wrapper_fn = Function.new(node.name .. "." .. stmt.name, wrapper_params)
+          if sc then
+            wrapper_fn.freevars = {}
+            for k in pairs(sc.freevars or {}) do table.insert(wrapper_fn.freevars, _safe_var(k)) end
+            table.sort(wrapper_fn.freevars)
+            wrapper_fn.cellvars = {}
+            for k in pairs(sc.cellvars or {}) do table.insert(wrapper_fn.cellvars, _safe_var(k)) end
+            table.sort(wrapper_fn.cellvars)
+            wrapper_fn.upvalues = {}
+            for _, fv in ipairs(wrapper_fn.freevars) do table.insert(wrapper_fn.upvalues, fv) end
+          end
+          local wrapper_block = Block.new("entry")
+          table.insert(wrapper_fn.blocks, wrapper_block)
+          self._cur_fn = wrapper_fn
+          self._cur_block = wrapper_block
+
+          local res_tmp = self:_new_tmp()
+          local call_args = {wrapper_type, impl_name}
+          for _, p in ipairs(wrapper_params) do table.insert(call_args, p) end
+          self:_emit("CALL", call_args, res_tmp)
+          self:_emit("RETURN", {res_tmp})
+          table.insert(self.module.functions, wrapper_fn)
+
+          self._cur_fn = prev_fn
+          self._cur_block = prev_block
+        else
+          table.insert(self.module.functions, fn)
+          self._cur_fn = prev_fn
+          self._cur_block = prev_block
+        end
         self._cur_method_first_arg = prev_method_first_arg
 
         local clean_params = {}
@@ -714,6 +932,28 @@ function IRLowerer:_lower_stmt_impl(node)
             local prop_ref = node.name .. "." .. stmt.name
             self:_emit("CALL", {"property", prop_ref}, prop_tmp)
             self:_emit("SET_ATTR", {node.name, stmt.name, prop_tmp})
+          elseif dec._type == "Attribute" and dec.value and dec.value._type == "Name" and (dec.attr == "setter" or dec.attr == "deleter" or dec.attr == "getter") then
+            local base_prop = self:_new_tmp()
+            if LUA_RESERVED_KEYWORDS[dec.value.id] then
+              self:_emit("SUBSCR", {node.name, "\"" .. dec.value.id .. "\""}, base_prop)
+            else
+              self:_emit("GET_ATTR", {node.name, dec.value.id}, base_prop)
+            end
+            local dec_fn = self:_new_tmp()
+            self:_emit("GET_ATTR", {base_prop, dec.attr}, dec_fn)
+            local m_tmp = self:_new_tmp()
+            if LUA_RESERVED_KEYWORDS[stmt.name] then
+              self:_emit("SUBSCR", {node.name, "\"" .. stmt.name .. "\""}, m_tmp)
+            else
+              self:_emit("GET_ATTR", {node.name, stmt.name}, m_tmp)
+            end
+            local res_tmp = self:_new_tmp()
+            self:_emit("CALL", {dec_fn, m_tmp}, res_tmp)
+            if LUA_RESERVED_KEYWORDS[stmt.name] then
+              self:_emit("STORE_SUBSCR", {node.name, "\"" .. stmt.name .. "\"", res_tmp})
+            else
+              self:_emit("SET_ATTR", {node.name, stmt.name, res_tmp})
+            end
           else
             local dec_tmp = self:lower_expr(dec)
             local m_tmp = self:_new_tmp()
@@ -806,48 +1046,51 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("CALL", {"error", "nil"}, self:_new_tmp())
     end
   elseif t == "With" then
-    -- with statement: enter context, run body, exit context
-    local aliases = {}
-    for i, item in ipairs(node.items or {}) do
+    local mgrs = {}
+    for _, item in ipairs(node.items or {}) do
       local ctx_tmp = self:lower_expr(item.context_expr)
-      local alias
+      local mgr_tmp = self:_new_tmp()
+      self:_emit("LOAD", {ctx_tmp}, mgr_tmp)
+      local enter_ret = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_with_enter", mgr_tmp}, enter_ret)
       if item.optional_vars then
-        alias = self:lower_expr(item.optional_vars)
-      else
-        alias = self:_new_tmp()
+        self:_lower_target(item.optional_vars, enter_ret)
       end
-      table.insert(aliases, alias)
-      self:_emit("STORE", {alias, ctx_tmp})
-      -- Call __enter__(alias) if method exists
-      local enter_tmp = self:_new_tmp()
-      self:_emit("GET_ATTR", {alias, "__enter__"}, enter_tmp)
-      local enter_lbl = self:_new_label("with_enter")
-      local end_enter_lbl = self:_new_label("with_enter_end")
-      self:_emit("BRANCH", {enter_tmp, enter_lbl, end_enter_lbl})
-      self._cur_block = self:_new_block(enter_lbl)
-      self:_emit("DO", {})
-      self:_emit("CALL", {enter_tmp, alias}, self:_new_tmp())
-      self:_emit("END", {})
-      self._cur_block = self:_new_block(end_enter_lbl)
+      table.insert(mgrs, mgr_tmp)
+      self:_emit("WITH_BEGIN", {})
     end
-    -- body
+
     for _, s in ipairs(node.body or {}) do
       self:lower_stmt(s)
     end
-    -- __exit__ for each context manager (reverse order)
-    for i = #aliases, 1, -1 do
-      local alias = aliases[i]
-      local exit_tmp = self:_new_tmp()
-      self:_emit("GET_ATTR", {alias, "__exit__"}, exit_tmp)
-      local exit_lbl = self:_new_label("with_exit")
-      local end_exit_lbl = self:_new_label("with_exit_end")
-      self:_emit("BRANCH", {exit_tmp, exit_lbl, end_exit_lbl})
-      self._cur_block = self:_new_block(exit_lbl)
-      self:_emit("DO", {})
-      self:_emit("CALL", {exit_tmp, alias}, self:_new_tmp())
-      self:_emit("END", {})
-      self._cur_block = self:_new_block(end_exit_lbl)
+
+    for i = #mgrs, 1, -1 do
+      self:_emit("WITH_END", {mgrs[i]})
     end
+    self:_emit("TRY_UNWIND", {})
+  elseif t == "Yield" then
+    local val_tmp = node.value and self:lower_expr(node.value) or nil
+    local args = {"coroutine.yield"}
+    if val_tmp then table.insert(args, val_tmp) end
+    self:_emit("CALL", args, self:_new_tmp())
+  elseif t == "YieldFrom" then
+    local it_tmp = self:lower_expr(node.value)
+    local iter_fn = self:_new_tmp()
+    self:_emit("LOAD", {"iter"}, iter_fn)
+    local nxt_iter = self:_new_tmp()
+    self:_emit("CALL", {iter_fn, it_tmp}, nxt_iter)
+    local loop_lbl = self:_new_label("yfrom_loop")
+    local body_lbl = self:_new_label("yfrom_body")
+    local end_lbl = self:_new_label("yfrom_end")
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(loop_lbl)
+    local val = self:_new_tmp()
+    self:_emit("NEXT", {nxt_iter}, val)
+    self:_emit("BRANCH_NONE", {val, end_lbl})
+    self._cur_block = self:_new_block(body_lbl)
+    self:_emit("CALL", {"coroutine.yield", val}, self:_new_tmp())
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(end_lbl)
   else
     -- fallback: record unsupported
     self:_emit("NOP", {type(node).__name__ or type(node)})
@@ -907,17 +1150,35 @@ function IRLowerer:_lower_expr_impl(node)
   elseif t == "Attribute" then
     local obj = self:lower_expr(node.value)
     local res = self:_new_tmp()
-    self:_emit("GET_ATTR", {obj, node.attr}, res)
+    if LUA_RESERVED_KEYWORDS[node.attr] then
+      self:_emit("SUBSCR", {obj, "\"" .. node.attr .. "\""}, res)
+    else
+      self:_emit("GET_ATTR", {obj, node.attr}, res)
+    end
     return res
   elseif t == "Name" then
+    if node.id == "True" then
+      local res = self:_new_tmp()
+      self:_emit("CONST", {true}, res)
+      return res
+    elseif node.id == "False" then
+      local res = self:_new_tmp()
+      self:_emit("CONST", {false}, res)
+      return res
+    elseif node.id == "None" then
+      local res = self:_new_tmp()
+      self:_emit("CONST", {nil}, res)
+      return res
+    end
+    local safe_name = _safe_var(node.id)
     if _is_cell_or_free(self._cur_fn, node.id) then
       local res = self:_new_tmp()
-      self:_emit("CELL_GET", {node.id}, res)
+      self:_emit("CELL_GET", {safe_name}, res)
       return res
     end
     local res = self:_new_tmp()
-    local name = node.id
-    if name == "type" and (not self._cur_fn or ((not self._cur_fn.params or not self._cur_fn.params[name]) and (not self._cur_fn.locals or not self._cur_fn.locals[name]))) then
+    local name = safe_name
+    if node.id == "type" and (not self._cur_fn or ((not self._cur_fn.params or not self._cur_fn.params[node.id]) and (not self._cur_fn.locals or not self._cur_fn.locals[node.id]))) then
       name = "_luthon_type"
     end
     self:_emit("LOAD", {name}, res)
@@ -1161,7 +1422,7 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     -- bind target
     if gen.target._type == "Name" then
-      self:_emit("STORE", {gen.target.id, nxt})
+      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
     end
     -- condition
     if gen.ifs and #gen.ifs > 0 then
@@ -1190,7 +1451,7 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     if gen.target._type == "Name" then
-      self:_emit("STORE", {gen.target.id, nxt})
+      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
     end
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
@@ -1218,7 +1479,7 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     if gen.target._type == "Name" then
-      self:_emit("STORE", {gen.target.id, nxt})
+      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
     end
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
@@ -1247,7 +1508,7 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     if gen.target._type == "Name" then
-      self:_emit("STORE", {gen.target.id, nxt})
+      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
     end
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
@@ -1359,6 +1620,34 @@ function IRLowerer:_lower_expr_impl(node)
   elseif t == "FormattedValue" then
     -- {expr[!conv][:format]} -> lower the inner expression; conversion/format handled by JoinedStr
     return self:lower_expr(node.value)
+  elseif t == "Yield" then
+    local val_tmp = node.value and self:lower_expr(node.value) or nil
+    local args = {"coroutine.yield"}
+    if val_tmp then table.insert(args, val_tmp) end
+    local res = self:_new_tmp()
+    self:_emit("CALL", args, res)
+    return res
+  elseif t == "YieldFrom" then
+    local it_tmp = self:lower_expr(node.value)
+    local iter_fn = self:_new_tmp()
+    self:_emit("LOAD", {"iter"}, iter_fn)
+    local nxt_iter = self:_new_tmp()
+    self:_emit("CALL", {iter_fn, it_tmp}, nxt_iter)
+    local loop_lbl = self:_new_label("yfrom_loop")
+    local body_lbl = self:_new_label("yfrom_body")
+    local end_lbl = self:_new_label("yfrom_end")
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(loop_lbl)
+    local val = self:_new_tmp()
+    self:_emit("NEXT", {nxt_iter}, val)
+    self:_emit("BRANCH_NONE", {val, end_lbl})
+    self._cur_block = self:_new_block(body_lbl)
+    self:_emit("CALL", {"coroutine.yield", val}, self:_new_tmp())
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(end_lbl)
+    local res = self:_new_tmp()
+    self:_emit("CONST", {nil}, res)
+    return res
   else
     -- fallback
     local res = self:_new_tmp()

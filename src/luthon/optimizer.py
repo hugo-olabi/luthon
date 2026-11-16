@@ -185,16 +185,19 @@ def eliminate_dead_code_function(fn: Function) -> bool:
     changed = False
 
     # 1. Truncate instructions following unconditional JUMP or RETURN in each block
-    # (except block containing structural markers like END_TRY, END_CATCH, END_ALL_CATCH)
+    # (except block containing structural markers like try/catch/with/finally)
+    TRY_STRUCTURAL_OPS = {
+        "TRY_BEGIN", "END_TRY", "CATCH_BEGIN", "END_CATCH", "END_ALL_CATCH",
+        "TRY_ELSE", "END_TRY_ELSE", "TRY_CLOSE", "FINALLY_BEGIN", "FINALLY_END",
+        "WITH_BEGIN", "WITH_END",
+    }
     for block in fn.blocks:
+        if any(ins.op in TRY_STRUCTURAL_OPS for ins in block.instrs):
+            continue
         trimmed: List[Instr] = []
         for ins in block.instrs:
             trimmed.append(ins)
             if ins.op in ("JUMP", "RETURN"):
-                # If block contains structural try/catch markers, keep them
-                remaining_structural = [i for i in block.instrs[len(trimmed):] if i.op in ("END_TRY", "END_CATCH", "END_ALL_CATCH")]
-                if remaining_structural:
-                    trimmed.extend(remaining_structural)
                 if len(trimmed) < len(block.instrs):
                     changed = True
                 break
