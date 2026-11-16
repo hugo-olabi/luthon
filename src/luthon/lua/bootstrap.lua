@@ -43,6 +43,10 @@ pcall(function()
     void *memcpy(void *dest, const void *src, size_t n);
 
     typedef struct __dirstream DIR;
+    typedef struct _IO_FILE FILE;
+    int fileno(FILE *stream);
+    int fsync(int fd);
+    int chmod(const char *pathname, unsigned int mode);
     struct dirent {
       unsigned long  d_ino;
       long           d_off;
@@ -432,6 +436,7 @@ _G._luthon_none = _G._luthon_none or setmetatable({
   __tostring = function() return "None" end,
   __call = function() error("TypeError: 'NoneType' object is not callable") end,
   __index = function(t, k)
+    if k == "_py" then return nil end
     if k == "__is_none__" then return true end
     if k == "__bool__" then return function() return false end end
     error("AttributeError: 'NoneType' object has no attribute '" .. tostring(k) .. "'")
@@ -1727,19 +1732,28 @@ local function _str_mod(fmt, args)
     error("TypeError: unsupported operand type(s) for %")
   end
   local t = {}
-  if type(args) == "table" then
-    if fmt:find("%%%([%a%w_]+%)") then
-      return _str_format_map(fmt, args)
-    end
+  local is_tuple = (type(args) == "table" and (rawget(args, "__is_tuple") or (getmetatable(args) and getmetatable(args).__tuple__)))
+  if is_tuple then
     for i = 1, #args do
       t[i] = args[i]
     end
+  elseif type(args) == "table" and fmt:find("%%%([%a%w_]+%)") then
+    return _str_format_map(fmt, args)
   else
     t = {args}
   end
   local f2, t2 = _expand_dynamic_format(fmt, t)
   if #t2 > 0 then
-    return string.format(f2, unpack(t2))
+    local fmt_args = {}
+    for i = 1, #t2 do
+      local val = t2[i]
+      if type(val) == "table" or type(val) == "userdata" then
+        fmt_args[i] = tostring(val)
+      else
+        fmt_args[i] = val
+      end
+    end
+    return string.format(f2, unpack(fmt_args))
   else
     return f2
   end
@@ -1862,10 +1876,38 @@ local _raw_str = function(x)
 end
 local _raw_int = function(x, base)
   if x == nil then return 0 end
-  if base then return tonumber(x, base) end
-  return math.floor(tonumber(x))
+  if type(x) == "boolean" then return x and 1 or 0 end
+  if type(x) == "string" then
+    x = x:match("^%s*(.-)%s*$")
+  end
+  local num = base and tonumber(x, base) or tonumber(x)
+  if num == nil then
+    local ve = _G.ValueError or ValueError
+    if ve then
+      error(ve("invalid literal for int(): " .. tostring(x)), 0)
+    else
+      error("ValueError: invalid literal for int(): " .. tostring(x), 0)
+    end
+  end
+  return math.floor(num)
 end
-local _raw_float = function(x) return tonumber(x or 0.0) end
+local _raw_float = function(x)
+  if x == nil then return 0.0 end
+  if type(x) == "boolean" then return x and 1.0 or 0.0 end
+  if type(x) == "string" then
+    x = x:match("^%s*(.-)%s*$")
+  end
+  local num = tonumber(x)
+  if num == nil then
+    local ve = _G.ValueError or ValueError
+    if ve then
+      error(ve("could not convert string to float: " .. tostring(x)), 0)
+    else
+      error("ValueError: could not convert string to float: " .. tostring(x), 0)
+    end
+  end
+  return num
+end
 function abs(x) return math.abs(x) end
 function repr(x)
   if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return "None" end
@@ -2370,18 +2412,20 @@ function isinstance(val, cls)
 end
 
 function getattr(obj, name, default)
-  if obj == nil then
+  if obj == nil or obj == _G._luthon_none then
     if default ~= nil then return default end
-    error("AttributeError: nil object has no attribute " .. tostring(name))
+    error("AttributeError: 'NoneType' object has no attribute '" .. tostring(name) .. "'")
   end
   if type(obj) == "string" and _str_methods and _str_methods[name] ~= nil then
     return _str_methods[name]
   end
-  local val = obj[name]
-  if type(val) == "table" and type(val.__get__) == "function" then
-    return val:__get__(obj, obj.__class__)
+  local ok, val = pcall(function() return obj[name] end)
+  if ok and val ~= nil then
+    if type(val) == "table" and type(val.__get__) == "function" then
+      return val:__get__(obj, obj.__class__)
+    end
+    return val
   end
-  if val ~= nil then return val end
   if type(obj) == "table" and _dict_methods[name] ~= nil then
     return _dict_methods[name]
   end
@@ -2390,16 +2434,17 @@ function getattr(obj, name, default)
     return cls[name]:__get__(obj, cls)
   end
   if type(obj.__getattr__) == "function" then
-    local ok, res = pcall(obj.__getattr__, obj, name)
-    if ok and res ~= nil then return res end
+    local ok_ga, res = pcall(obj.__getattr__, obj, name)
+    if ok_ga and res ~= nil then return res end
   end
   if default ~= nil then return default end
   error("AttributeError: object has no attribute " .. tostring(name))
 end
 
 function hasattr(obj, name)
-  if obj == nil then return false end
-  return obj[name] ~= nil
+  if obj == nil or obj == _G._luthon_none then return false end
+  local ok, res = pcall(getattr, obj, name)
+  return ok and res ~= nil
 end
 
 function setattr(obj, name, val)
@@ -2536,7 +2581,10 @@ local _STD_EXCEPTIONS = {
   "BaseException", "ValueError", "TypeError", "AssertionError",
   "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
   "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
-  "ImportError", "ModuleNotFoundError"
+  "ImportError", "ModuleNotFoundError", "Warning", "UserWarning",
+  "DeprecationWarning", "PendingDeprecationWarning", "SyntaxWarning",
+  "RuntimeWarning", "FutureWarning", "ImportWarning", "UnicodeWarning",
+  "BytesWarning", "ResourceWarning"
 }
 
 for _, cls_name in ipairs(_STD_EXCEPTIONS) do
@@ -2743,6 +2791,46 @@ math.fabs = math.abs
 math.sqrt = math.sqrt
 
 os.getenv = os.getenv or function(k) return nil end
+os.stat = function(p)
+  p = tostring(p or "")
+  local ffi = require("ffi")
+  local sbuf = ffi.new("stat_t")
+  local rc = ffi.C.stat(p, sbuf)
+  if rc ~= 0 then
+    if FileNotFoundError then
+      error(FileNotFoundError("No such file or directory: '" .. p .. "'"), 0)
+    else
+      error("FileNotFoundError: [Errno 2] No such file or directory: '" .. p .. "'", 0)
+    end
+  end
+  local res = {
+    st_mode = tonumber(sbuf.st_mode),
+    st_ino = tonumber(sbuf.st_ino),
+    st_dev = tonumber(sbuf.st_dev),
+    st_nlink = tonumber(sbuf.st_nlink),
+    st_uid = tonumber(sbuf.st_uid),
+    st_gid = tonumber(sbuf.st_gid),
+    st_size = tonumber(sbuf.st_size),
+    st_atime = tonumber(sbuf.st_atime) + tonumber(sbuf.st_atime_nsec) / 1e9,
+    st_mtime = tonumber(sbuf.st_mtime) + tonumber(sbuf.st_mtime_nsec) / 1e9,
+    st_ctime = tonumber(sbuf.st_ctime) + tonumber(sbuf.st_ctime_nsec) / 1e9,
+  }
+  return res
+end
+os.chmod = function(p, mode)
+  p = tostring(p or "")
+  local ffi = require("ffi")
+  local rc = ffi.C.chmod(p, tonumber(mode or 0))
+  if rc ~= 0 then
+    local err_fn = _G.OSError or _G.IOError or OSError or IOError
+    if err_fn then
+      error(err_fn("chmod failed on: " .. p), 0)
+    else
+      error("OSError: chmod failed on: " .. p, 0)
+    end
+  end
+  return 0
+end
 os.makedirs = os.makedirs or function(p)
   p = tostring(p or "")
   if p == "" or os.path.isdir(p) then return end
@@ -4546,13 +4634,31 @@ if _file_mt then
     end
     return lines
   end
+  _file_mt.fileno = function(self)
+    local ffi = require("ffi")
+    local ok, p = pcall(ffi.cast, "FILE*", self)
+    if ok and p ~= nil then
+      local ok_fn, fd = pcall(ffi.C.fileno, p)
+      if ok_fn and fd >= 0 then return tonumber(fd) end
+    end
+    return 0
+  end
   if type(_file_mt.__index) == "table" then
     _file_mt.__index.read = _file_mt.read
     _file_mt.__index.readline = _file_mt.readline
     _file_mt.__index.readlines = _file_mt.readlines
     _file_mt.__index.__enter__ = _file_mt.__enter__
     _file_mt.__index.__exit__ = _file_mt.__exit__
+    _file_mt.__index.fileno = _file_mt.fileno
   end
+end
+
+os.fsync = function(fd)
+  local ffi = require("ffi")
+  if type(fd) == "number" then
+    pcall(ffi.C.fsync, fd)
+  end
+  return 0
 end
 
 open = function(filename, mode, ...)
