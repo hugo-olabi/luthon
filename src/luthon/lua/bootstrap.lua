@@ -532,6 +532,16 @@ function _luthon_call_kw(fn, kw_table, ...)
       local libpy = pb.get_lib()
       local pos_args = { ... }
       local num_pos = select("#", ...)
+      local self_obj = libpy.PyObject_GetAttrString(fn._py, "__self__")
+      if self_obj ~= nil then
+        if num_pos > 0 and type(pos_args[1]) == "table" and rawget(pos_args[1], "_py") == self_obj then
+          table.remove(pos_args, 1)
+          num_pos = num_pos - 1
+        end
+        libpy.Py_DecRef(self_obj)
+      else
+        libpy.PyErr_Clear()
+      end
       local tuple = libpy.PyTuple_New(num_pos)
       for i = 1, num_pos do
         local py_v = pb.lua_to_py(pos_args[i])
@@ -1744,6 +1754,20 @@ local function _str_mod(fmt, args)
   end
   local f2, t2 = _expand_dynamic_format(fmt, t)
   if #t2 > 0 then
+    local arg_idx = 1
+    f2 = f2:gsub("%%([%-+0 #]*)(%d*)%.?(%d*)([a-zA-Z%%])", function(flags, w, p, spec)
+      if spec == "%" then return "%%" end
+      local cur_idx = arg_idx
+      arg_idx = arg_idx + 1
+      if spec == "r" or spec == "a" then
+        if t2[cur_idx] ~= nil then
+          local r_fn = _G.repr or repr or tostring
+          t2[cur_idx] = r_fn(t2[cur_idx])
+        end
+        return "%" .. flags .. w .. (p ~= "" and ("." .. p) or "") .. "s"
+      end
+      return "%" .. flags .. w .. (p ~= "" and ("." .. p) or "") .. spec
+    end)
     local fmt_args = {}
     for i = 1, #t2 do
       local val = t2[i]
@@ -2391,7 +2415,13 @@ function isinstance(val, cls)
     return false
   end
   local t = type(val)
-  if t == "number" then return cls == "int" or cls == "float" or cls == int or cls == float end
+  if t == "number" then
+    if cls == "int" or cls == "float" or cls == int or cls == float then return true end
+    local name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or cls.__name__))
+    if name == "Number" or name == "Real" or name == "Complex" then return true end
+    if (name == "Integral" or name == "Rational") and math.floor(val) == val then return true end
+    return false
+  end
   if t == "string" then return cls == "str" or cls == str end
   if t == "boolean" then return cls == "bool" or cls == bool end
   if t == "table" then
@@ -3406,22 +3436,401 @@ random.sample = function(population, k)
 end
 
 -- datetime
+local _timedelta_mt = {}
+_timedelta_mt.__index = _timedelta_mt
+function _timedelta_mt:total_seconds()
+  return (self.days or 0) * 86400 + (self.seconds or 0) + (self.microseconds or 0) * 1e-6
+end
+_timedelta_mt.__tostring = function(self)
+  local s = math.floor(self.seconds or 0)
+  local hrs = math.floor(s / 3600)
+  local mins = math.floor((s % 3600) / 60)
+  local secs = s % 60
+  if (self.days or 0) ~= 0 then
+    return string.format("%d days, %d:%02d:%02d", self.days, hrs, mins, secs)
+  else
+    return string.format("%d:%02d:%02d", hrs, mins, secs)
+  end
+end
+_timedelta_mt.__lt = function(a, b)
+  return a:total_seconds() < b:total_seconds()
+end
+_timedelta_mt.__le = function(a, b)
+  return a:total_seconds() <= b:total_seconds()
+end
+_timedelta_mt.__eq = function(a, b)
+  return a:total_seconds() == b:total_seconds()
+end
+
+local _datetime_mt = {}
+_datetime_mt.__index = _datetime_mt
+
+local function _datetime_to_timestamp(self)
+  local t = {
+    year = self.year or 1970,
+    month = self.month or 1,
+    day = self.day or 1,
+    hour = self.hour or 0,
+    min = self.minute or self.min or 0,
+    sec = self.second or self.sec or 0,
+  }
+  return os.time(t)
+end
+
+local function _datetime_add(a, b)
+  local dt_obj, td_obj = a, b
+  if type(b) == "table" and (b.hour ~= nil or (b.month ~= nil and b.day ~= nil)) and (a.days ~= nil or a.seconds ~= nil) then
+    dt_obj, td_obj = b, a
+  end
+  local total_secs = 0
+  if td_obj and td_obj.total_seconds then
+    total_secs = td_obj:total_seconds()
+  elseif type(td_obj) == "table" then
+    total_secs = (td_obj.days or 0) * 86400 + (td_obj.seconds or 0) + (td_obj.microseconds or 0) * 1e-6
+  elseif type(td_obj) == "number" then
+    total_secs = td_obj
+  end
+  local ts = _datetime_to_timestamp(dt_obj) + (dt_obj.microsecond or 0) * 1e-6 + total_secs
+  return datetime.datetime.fromtimestamp(ts)
+end
+
+local function _datetime_sub(a, b)
+  if type(b) == "table" and (b.days ~= nil or b.seconds ~= nil) and b.hour == nil and b.month == nil then
+    local total_secs = 0
+    if b.total_seconds then
+      total_secs = b:total_seconds()
+    else
+      total_secs = (b.days or 0) * 86400 + (b.seconds or 0) + (b.microseconds or 0) * 1e-6
+    end
+    local ts = _datetime_to_timestamp(a) + (a.microsecond or 0) * 1e-6 - total_secs
+    return datetime.datetime.fromtimestamp(ts)
+  end
+  local tsa = _datetime_to_timestamp(a) + (a.microsecond or 0) * 1e-6
+  local tsb = _datetime_to_timestamp(b) + (b.microsecond or 0) * 1e-6
+  local diff = tsa - tsb
+  local d = math.floor(diff / 86400)
+  local rem = diff - d * 86400
+  local s = math.floor(rem)
+  local us = math.floor((rem - s) * 1e6 + 0.5)
+  return datetime.timedelta(d, s, us)
+end
+
+local function _datetime_lt(a, b)
+  local tsa = _datetime_to_timestamp(a) + (a.microsecond or 0) * 1e-6
+  local tsb = _datetime_to_timestamp(b) + (b.microsecond or 0) * 1e-6
+  return tsa < tsb
+end
+
+local function _datetime_le(a, b)
+  local tsa = _datetime_to_timestamp(a) + (a.microsecond or 0) * 1e-6
+  local tsb = _datetime_to_timestamp(b) + (b.microsecond or 0) * 1e-6
+  return tsa <= tsb
+end
+
+local function _datetime_eq(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  return (a.year == b.year and a.month == b.month and a.day == b.day and
+          (a.hour or 0) == (b.hour or 0) and
+          (a.minute or a.min or 0) == (b.minute or b.min or 0) and
+          (a.second or a.sec or 0) == (b.second or b.sec or 0) and
+          (a.microsecond or 0) == (b.microsecond or 0))
+end
+
+_datetime_mt.__add = _datetime_add
+_datetime_mt.__sub = _datetime_sub
+_datetime_mt.__lt = _datetime_lt
+_datetime_mt.__le = _datetime_le
+_datetime_mt.__eq = _datetime_eq
+
+_timedelta_mt.__add = function(a, b)
+  if type(a) == "table" and (a.hour ~= nil or (a.month ~= nil and a.day ~= nil)) then
+    return _datetime_add(a, b)
+  end
+  if type(b) == "table" and (b.hour ~= nil or (b.month ~= nil and b.day ~= nil)) then
+    return _datetime_add(a, b)
+  end
+  return datetime.timedelta(
+    (a.days or 0) + (b.days or 0),
+    (a.seconds or 0) + (b.seconds or 0),
+    (a.microseconds or 0) + (b.microseconds or 0)
+  )
+end
+
+local function _datetime_replace(self, year, month, day, hour, minute, second, microsecond)
+  if type(year) == "table" and month == nil then
+    local kw = year
+    year = kw.year
+    month = kw.month
+    day = kw.day
+    hour = kw.hour
+    minute = kw.minute or kw.min
+    second = kw.second or kw.sec
+    microsecond = kw.microsecond
+  end
+  local res = {
+    year = year or self.year,
+    month = month or self.month,
+    day = day or self.day,
+    hour = hour or self.hour,
+    minute = minute or self.minute or self.min or 0,
+    min = minute or self.minute or self.min or 0,
+    second = second or self.second or self.sec or 0,
+    sec = second or self.second or self.sec or 0,
+    microsecond = microsecond or self.microsecond or 0,
+  }
+  return setmetatable(res, _datetime_mt)
+end
+
+local function _datetime_isoformat(self, sep)
+  sep = sep or "T"
+  local s = string.format("%04d-%02d-%02d%s%02d:%02d:%02d",
+    self.year or 1970,
+    self.month or 1,
+    self.day or 1,
+    sep,
+    self.hour or 0,
+    self.minute or self.min or 0,
+    self.second or self.sec or 0)
+  if self.microsecond and self.microsecond > 0 then
+    s = s .. string.format(".%06d", self.microsecond)
+  end
+  return s
+end
+
+local function _datetime_strftime(self, fmt)
+  local ts = _datetime_to_timestamp(self)
+  return os.date(fmt, ts)
+end
+
+local function _datetime_timetuple(self)
+  local ts = _datetime_to_timestamp(self)
+  local dt = os.date("*t", ts)
+  return _tuple_pack(dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec, (dt.wday + 5) % 7, dt.yday, dt.isdst and 1 or 0)
+end
+
+local function _datetime_timestamp(self)
+  local ts = _datetime_to_timestamp(self)
+  if self.microsecond and self.microsecond > 0 then
+    return ts + self.microsecond * 1e-6
+  end
+  return ts
+end
+
+local function _datetime_date(self)
+  return datetime.date(self.year, self.month, self.day)
+end
+
+local function _datetime_time(self)
+  return datetime.time(self.hour, self.minute or self.min or 0, self.second or self.sec or 0)
+end
+
+_datetime_mt.replace = _datetime_replace
+_datetime_mt.isoformat = _datetime_isoformat
+_datetime_mt.strftime = _datetime_strftime
+_datetime_mt.timetuple = _datetime_timetuple
+_datetime_mt.timestamp = _datetime_timestamp
+_datetime_mt.date = _datetime_date
+_datetime_mt.time = _datetime_time
+_datetime_mt.__tostring = function(self)
+  return _datetime_isoformat(self, " ")
+end
+
+_luthon_reg_fn(_datetime_replace, {"self", "year", "month", "day", "hour", "minute", "second", "microsecond"})
+_luthon_reg_fn(_datetime_isoformat, {"self", "sep", "timespec"})
+_luthon_reg_fn(_datetime_strftime, {"self", "fmt"})
+_luthon_reg_fn(_datetime_timetuple, {"self"})
+_luthon_reg_fn(_datetime_timestamp, {"self"})
+_luthon_reg_fn(_datetime_date, {"self"})
+_luthon_reg_fn(_datetime_time, {"self"})
+
+local _date_mt = {}
+_date_mt.__index = _date_mt
+function _date_mt:isoformat()
+  return string.format("%04d-%02d-%02d", self.year or 1970, self.month or 1, self.day or 1)
+end
+function _date_mt:strftime(fmt)
+  local ts = os.time({year = self.year or 1970, month = self.month or 1, day = self.day or 1, hour = 0, min = 0, sec = 0})
+  return os.date(fmt, ts)
+end
+function _date_mt:timetuple()
+  local ts = os.time({year = self.year or 1970, month = self.month or 1, day = self.day or 1, hour = 0, min = 0, sec = 0})
+  local dt = os.date("*t", ts)
+  return _tuple_pack(dt.year, dt.month, dt.day, 0, 0, 0, (dt.wday + 5) % 7, dt.yday, -1)
+end
+_date_mt.__tostring = function(self)
+  return self:isoformat()
+end
+_date_mt.__lt = function(a, b)
+  if a.year ~= b.year then return (a.year or 0) < (b.year or 0) end
+  if a.month ~= b.month then return (a.month or 0) < (b.month or 0) end
+  return (a.day or 0) < (b.day or 0)
+end
+_date_mt.__le = function(a, b)
+  if a.year ~= b.year then return (a.year or 0) <= (b.year or 0) end
+  if a.month ~= b.month then return (a.month or 0) <= (b.month or 0) end
+  return (a.day or 0) <= (b.day or 0)
+end
+_date_mt.__eq = function(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  return a.year == b.year and a.month == b.month and a.day == b.day
+end
+
 datetime = {}
-datetime.date = {}
-datetime.date.today = function()
-  local t = os.date("*t")
-  return {year = t.year, month = t.month, day = t.day}
+datetime.date = setmetatable({
+  today = function()
+    local t = os.date("*t")
+    return setmetatable({year = t.year, month = t.month, day = t.day}, _date_mt)
+  end,
+  fromtimestamp = function(ts)
+    local t = os.date("*t", math.floor(ts or 0))
+    return setmetatable({year = t.year, month = t.month, day = t.day}, _date_mt)
+  end,
+}, {
+  __call = function(_, y, m, d)
+    return setmetatable({year = y or 1970, month = m or 1, day = d or 1}, _date_mt)
+  end
+})
+
+datetime.time = setmetatable({}, {
+  __call = function(_, hour, minute, second)
+    return {hour = hour or 0, minute = minute or 0, min = minute or 0, second = second or 0, sec = second or 0}
+  end
+})
+
+local function _datetime_create(year, month, day, hour, minute, second, microsecond)
+  if type(year) == "table" and month == nil then
+    local kw = year
+    year = kw.year
+    month = kw.month
+    day = kw.day
+    hour = kw.hour
+    minute = kw.minute or kw.min
+    second = kw.second or kw.sec
+    microsecond = kw.microsecond
+  end
+  local obj = {
+    year = year or 1970,
+    month = month or 1,
+    day = day or 1,
+    hour = hour or 0,
+    minute = minute or 0,
+    min = minute or 0,
+    second = second or 0,
+    sec = second or 0,
+    microsecond = microsecond or 0,
+  }
+  return setmetatable(obj, _datetime_mt)
 end
-datetime.time = {}
-datetime.time.__call = function(hour, minute, second) return {hour = hour or 0, minute = minute or 0, second = second or 0} end
-datetime.datetime = {}
-datetime.datetime.now = function()
-  local t = os.date("*t")
-  return {year = t.year, month = t.month, day = t.day, hour = t.hour, min = t.min, sec = t.sec}
-end
+
+datetime.datetime = setmetatable({
+  now = function()
+    local t = os.date("*t")
+    local obj = {
+      year = t.year,
+      month = t.month,
+      day = t.day,
+      hour = t.hour,
+      minute = t.min,
+      min = t.min,
+      second = t.sec,
+      sec = t.sec,
+      microsecond = 0,
+    }
+    return setmetatable(obj, _datetime_mt)
+  end,
+  utcnow = function()
+    local t = os.date("!*t")
+    local obj = {
+      year = t.year,
+      month = t.month,
+      day = t.day,
+      hour = t.hour,
+      minute = t.min,
+      min = t.min,
+      second = t.sec,
+      sec = t.sec,
+      microsecond = 0,
+    }
+    return setmetatable(obj, _datetime_mt)
+  end,
+  fromtimestamp = function(ts)
+    local t = os.date("*t", math.floor(ts or 0))
+    local us = math.floor(((ts or 0) - math.floor(ts or 0)) * 1e6 + 0.5)
+    local obj = {
+      year = t.year,
+      month = t.month,
+      day = t.day,
+      hour = t.hour,
+      minute = t.min,
+      min = t.min,
+      second = t.sec,
+      sec = t.sec,
+      microsecond = us,
+    }
+    return setmetatable(obj, _datetime_mt)
+  end,
+  utcfromtimestamp = function(ts)
+    local t = os.date("!*t", math.floor(ts or 0))
+    local us = math.floor(((ts or 0) - math.floor(ts or 0)) * 1e6 + 0.5)
+    local obj = {
+      year = t.year,
+      month = t.month,
+      day = t.day,
+      hour = t.hour,
+      minute = t.min,
+      min = t.min,
+      second = t.sec,
+      sec = t.sec,
+      microsecond = us,
+    }
+    return setmetatable(obj, _datetime_mt)
+  end,
+  min = _datetime_create(1, 1, 1, 0, 0, 0, 0),
+  max = _datetime_create(9999, 12, 31, 23, 59, 59, 999999),
+}, {
+  __call = function(_, ...)
+    return _datetime_create(...)
+  end
+})
+_luthon_reg_fn(_datetime_create, {"year", "month", "day", "hour", "minute", "second", "microsecond"})
+
+_datetime_mt.__name__ = "datetime"
+_datetime_mt.__class__ = datetime.datetime
+_datetime_mt.__base__ = datetime.date
+datetime.datetime.__name__ = "datetime"
+
+_date_mt.__name__ = "date"
+_date_mt.__class__ = datetime.date
+datetime.date.__name__ = "date"
+
+_timedelta_mt.__name__ = "timedelta"
+_timedelta_mt.__class__ = datetime.timedelta
+
 datetime.timedelta = function(days, seconds, microseconds, milliseconds, minutes, hours, weeks)
-  return {days = days or 0, seconds = seconds or 0}
+  if type(days) == "table" and seconds == nil then
+    local kw = days
+    days = kw.days
+    seconds = kw.seconds
+    microseconds = kw.microseconds
+    milliseconds = kw.milliseconds
+    minutes = kw.minutes
+    hours = kw.hours
+    weeks = kw.weeks
+  end
+  local total_secs = (days or 0) * 86400 +
+                     (weeks or 0) * 7 * 86400 +
+                     (hours or 0) * 3600 +
+                     (minutes or 0) * 60 +
+                     (seconds or 0) +
+                     (milliseconds or 0) * 0.001 +
+                     (microseconds or 0) * 1e-6
+  local d = math.floor(total_secs / 86400)
+  local rem = total_secs - d * 86400
+  local s = math.floor(rem)
+  local us = math.floor((rem - s) * 1e6 + 0.5)
+  return setmetatable({days = d, seconds = s, microseconds = us}, _timedelta_mt)
 end
+_luthon_reg_fn(datetime.timedelta, {"days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks"})
 
 -- time
 time = time or {}
@@ -3452,6 +3861,28 @@ time.sleep = function(secs)
     ffi.C.usleep(math.floor((secs or 0) * 1000000))
   end)
 end
+time.mktime = function(t)
+  if type(t) == "table" then
+    if t.year and t.month and t.day then
+      return os.time({year = t.year, month = t.month, day = t.day, hour = t.hour or t.min or 0, min = t.minute or t.min or 0, sec = t.second or t.sec or 0})
+    elseif #t >= 6 then
+      return os.time({year = t[1], month = t[2], day = t[3], hour = t[4], min = t[5], sec = t[6]})
+    end
+  end
+  return os.time()
+end
+time.localtime = function(secs)
+  local t = os.date("*t", math.floor(secs or os.time()))
+  return _tuple_pack(t.year, t.month, t.day, t.hour, t.min, t.sec, (t.wday + 5) % 7, t.yday, t.isdst and 1 or 0)
+end
+time.gmtime = function(secs)
+  local t = os.date("!*t", math.floor(secs or os.time()))
+  return _tuple_pack(t.year, t.month, t.day, t.hour, t.min, t.sec, (t.wday + 5) % 7, t.yday, 0)
+end
+time.strftime = function(fmt, t)
+  if t == nil then return os.date(fmt) end
+  return os.date(fmt, time.mktime(t))
+end
 
 -- string constants and methods
 string.ascii_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -3465,13 +3896,8 @@ string.whitespace = " \t\n\r\f\v"
 string.strip = function(self, chars) return _str_methods.strip(self, chars) end
 string.lstrip = function(self, chars) return _str_methods.lstrip(self, chars) end
 string.rstrip = function(self, chars) return _str_methods.rstrip(self, chars) end
-string.split = function(self, sep)
-  sep = sep or "%s"
-  local r = {}
-  for part in string.gmatch(self, "([^" .. sep .. "]+)") do r[#r + 1] = part end
-  return r
-end
-string.replace = function(self, a, b) return (string.gsub(self, a, b)) end
+string.split = function(self, sep, maxsplit) return _str_methods.split(self, sep, maxsplit) end
+string.replace = function(self, a, b, count) return _str_methods.replace(self, a, b, count) end
 string.startswith = function(self, p)
   if type(p) == "table" then
     for i = 1, #p do
