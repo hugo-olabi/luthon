@@ -155,10 +155,11 @@ print("TCP_SOCKET_PURE_OK")
 
     def test_http_server_and_client_simulation_standard_and_pure(self):
         """Test simulating an HTTP 1.1 server and client over sockets in standard and pure modes."""
-        py_code = """
+        def make_code(port):
+            return f"""
 import socket
 
-port = 39804
+port = {port}
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -181,14 +182,14 @@ http_resp = (
     b"Content-Type: application/json\\r\\n"
     b"Content-Length: 15\\r\\n"
     b"\\r\\n"
-    b"{\\"status\\":\\"ok\\"}"
+    b"{{\\"status\\":\\"ok\\"}}"
 )
 conn.send(http_resp)
 
 # Client verifies response
 response = client.recv(4096)
 assert "200 OK" in response
-assert "{\\"status\\":\\"ok\\"}" in response
+assert "{{\\"status\\":\\"ok\\"}}" in response
 
 conn.close()
 client.close()
@@ -196,12 +197,12 @@ server.close()
 print("HTTP_SIMULATION_OK")
 """
         # Test in standard mode
-        proc1 = self._execute_lua(py_code, pure=False)
+        proc1 = self._execute_lua(make_code(39804), pure=False)
         self.assertEqual(proc1.returncode, 0, f"Standard HTTP simulation failed: {proc1.stderr}")
         self.assertIn("HTTP_SIMULATION_OK", proc1.stdout)
 
-        # Test in pure mode (--pure)
-        proc2 = self._execute_lua(py_code, pure=True)
+        # Test in pure mode (--pure) with distinct port to avoid TIME_WAIT collisions
+        proc2 = self._execute_lua(make_code(39805), pure=True)
         self.assertEqual(proc2.returncode, 0, f"Pure HTTP simulation failed: {proc2.stderr}")
         self.assertIn("HTTP_SIMULATION_OK", proc2.stdout)
 
