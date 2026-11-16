@@ -704,6 +704,9 @@ def dead_store_elimination_function(fn: Function) -> bool:
                         if isinstance(sub, str) and sub not in defs:
                             uses.add(sub)
                 defs.add(target)
+            elif ins.op in ("IMPORT", "IMPORT_FROM") and ins.args:
+                target = str(ins.args[0])
+                defs.add(target)
             else:
                 for arg in ins.args:
                     if isinstance(arg, str) and arg not in defs:
@@ -764,6 +767,12 @@ def dead_store_elimination_function(fn: Function) -> bool:
                     continue
 
             # Update liveness for non-STORE instructions
+            if ins.op in ("IMPORT", "IMPORT_FROM") and ins.args:
+                target = str(ins.args[0])
+                live.discard(target)
+                new_instrs.append(ins)
+                continue
+
             if ins.result:
                 live.discard(ins.result)
             if ins.op == "CONST":
@@ -906,6 +915,10 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                     uses.add(obj_arg)
                 if isinstance(val_arg, str) and val_arg in poolable and val_arg not in defs:
                     uses.add(val_arg)
+            elif ins.op in ("IMPORT", "IMPORT_FROM") and ins.args:
+                tgt = ins.args[0]
+                if isinstance(tgt, str) and tgt in poolable:
+                    defs.add(tgt)
             else:
                 for arg in ins.args:
                     if isinstance(arg, str) and arg in poolable:
@@ -991,6 +1004,14 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                     live.add(obj_arg)
                 if isinstance(val_arg, str) and val_arg in poolable:
                     live.add(val_arg)
+            elif ins.op in ("IMPORT", "IMPORT_FROM") and ins.args:
+                tgt = ins.args[0]
+                if isinstance(tgt, str) and tgt in poolable:
+                    live.discard(tgt)
+                    for other in live:
+                        if other in poolable and other != tgt:
+                            adj[tgt].add(other)
+                            adj[other].add(tgt)
             else:
                 if ins.result and ins.result in poolable:
                     live.discard(ins.result)
@@ -1075,6 +1096,12 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                 new_val = reg_map.get(val_arg, val_arg) if isinstance(val_arg, str) else val_arg
                 ins.args[0] = new_obj
                 ins.args[2] = new_val
+            elif ins.op in ("IMPORT", "IMPORT_FROM") and ins.args:
+                # In IMPORT/IMPORT_FROM, args[0] is target variable.
+                # args[1] (module name) and args[2] (item name) are literals and must NOT be rewritten!
+                tgt = ins.args[0]
+                if isinstance(tgt, str) and tgt in reg_map:
+                    ins.args[0] = reg_map[tgt]
             else:
                 if ins.result and ins.result in reg_map:
                     ins.result = reg_map[ins.result]

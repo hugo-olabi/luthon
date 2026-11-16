@@ -1276,14 +1276,39 @@ class IRLowerer:
             nxt = self._new_tmp()
             self._emit("NEXT", [iter_tmp], result=nxt)
             self._emit("BRANCH_NONE", [nxt, end_lbl])
-            if isinstance(gen.target, ast.Name):
-                self._emit("STORE", [gen.target.id, nxt])
+            self._lower_target(gen.target, nxt)
             if gen.ifs:
                 cond = self.lower_expr(gen.ifs[0])
                 self._emit("BRANCH", [cond, body_lbl, loop_lbl])
                 self._cur_block = self._new_block(body_lbl)
             val = self.lower_expr(node.elt)
             self._emit("SET_ADD", [res, val])
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(end_lbl)
+            return res
+        if isinstance(node, ast.DictComp):
+            # {key: value for target in iter [if cond]} -> dict built via DICT_SET
+            res = self._new_tmp()
+            self._emit("MAKE_DICT", [], result=res)
+            gen = node.generators[0]
+            iter_tmp = self._new_tmp()
+            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
+            loop_lbl = self._new_label("dcomp")
+            body_lbl = self._new_label("dbody")
+            end_lbl = self._new_label("dend")
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(loop_lbl)
+            nxt = self._new_tmp()
+            self._emit("NEXT", [iter_tmp], result=nxt)
+            self._emit("BRANCH_NONE", [nxt, end_lbl])
+            self._lower_target(gen.target, nxt)
+            if gen.ifs:
+                cond = self.lower_expr(gen.ifs[0])
+                self._emit("BRANCH", [cond, body_lbl, loop_lbl])
+                self._cur_block = self._new_block(body_lbl)
+            key = self.lower_expr(node.key)
+            val = self.lower_expr(node.value)
+            self._emit("DICT_SET", [res, key, val])
             self._emit("JUMP", [loop_lbl])
             self._cur_block = self._new_block(end_lbl)
             return res
@@ -1302,25 +1327,7 @@ class IRLowerer:
             nxt = self._new_tmp()
             self._emit("NEXT", [iter_tmp], result=nxt)
             self._emit("BRANCH_NONE", [nxt, end_lbl])
-            # bind target
-            if isinstance(gen.target, ast.Name):
-                safe_target = _safe_var(gen.target.id)
-                if self._cur_fn is not None and (gen.target.id in getattr(self._cur_fn, "cellvars", []) or gen.target.id in getattr(self._cur_fn, "freevars", [])):
-                    self._emit("CELL_SET", [safe_target, nxt])
-                else:
-                    self._emit("STORE", [safe_target, nxt])
-            elif isinstance(gen.target, (ast.Tuple, ast.List)):
-                for i, t in enumerate(gen.target.elts):
-                    if isinstance(t, ast.Name):
-                        safe_t = _safe_var(t.id)
-                        idx_tmp = self._new_tmp()
-                        self._emit("CONST", [i], result=idx_tmp)
-                        elem_tmp = self._new_tmp()
-                        self._emit("SUBSCR", [nxt, idx_tmp], result=elem_tmp)
-                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
-                            self._emit("CELL_SET", [safe_t, elem_tmp])
-                        else:
-                            self._emit("STORE", [safe_t, elem_tmp])
+            self._lower_target(gen.target, nxt)
             # condition
             if gen.ifs:
                 cond = self.lower_expr(gen.ifs[0])
@@ -1346,25 +1353,7 @@ class IRLowerer:
             nxt = self._new_tmp()
             self._emit("NEXT", [iter_tmp], result=nxt)
             self._emit("BRANCH_NONE", [nxt, end_lbl])
-            # bind target
-            if isinstance(gen.target, ast.Name):
-                safe_target = _safe_var(gen.target.id)
-                if self._cur_fn is not None and (gen.target.id in getattr(self._cur_fn, "cellvars", []) or gen.target.id in getattr(self._cur_fn, "freevars", [])):
-                    self._emit("CELL_SET", [safe_target, nxt])
-                else:
-                    self._emit("STORE", [safe_target, nxt])
-            elif isinstance(gen.target, (ast.Tuple, ast.List)):
-                for i, t in enumerate(gen.target.elts):
-                    if isinstance(t, ast.Name):
-                        safe_t = _safe_var(t.id)
-                        idx_tmp = self._new_tmp()
-                        self._emit("CONST", [i], result=idx_tmp)
-                        elem_tmp = self._new_tmp()
-                        self._emit("SUBSCR", [nxt, idx_tmp], result=elem_tmp)
-                        if self._cur_fn is not None and (t.id in getattr(self._cur_fn, "cellvars", []) or t.id in getattr(self._cur_fn, "freevars", [])):
-                            self._emit("CELL_SET", [safe_t, elem_tmp])
-                        else:
-                            self._emit("STORE", [safe_t, elem_tmp])
+            self._lower_target(gen.target, nxt)
             # condition
             if gen.ifs:
                 cond = self.lower_expr(gen.ifs[0])

@@ -825,6 +825,12 @@ function IRLowerer:_lower_stmt_impl(node)
         local b = Block.new("entry")
         table.insert(fn.blocks, b)
         self._cur_block = b
+        -- initialize cell boxes for captured variables
+        for _, cv in ipairs(fn.cellvars or {}) do
+          local cell = self:_new_tmp()
+          self:_emit("MAKE_CELL", {cv}, cell)
+          self:_emit("STORE", {cv, cell})
+        end
         -- If vararg is present, pack into a table
         if stmt.args and stmt.args.vararg then
           local vararg_name = stmt.args.vararg.arg
@@ -1060,9 +1066,11 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("WITH_BEGIN", {})
     end
 
+    self._try_depth = self._try_depth + #mgrs
     for _, s in ipairs(node.body or {}) do
       self:lower_stmt(s)
     end
+    self._try_depth = self._try_depth - #mgrs
 
     for i = #mgrs, 1, -1 do
       self:_emit("WITH_END", {mgrs[i]})
@@ -1129,7 +1137,7 @@ function IRLowerer:_lower_expr_impl(node)
     elseif v == nil then
       self:_emit("CONST", {nil}, res)
     else
-      self:_emit("CONST", {v}, res)
+      self:_emit("CONST", {v, node.is_raw == true}, res)
     end
     return res
   elseif t == "Subscript" then
@@ -1421,9 +1429,7 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
     -- bind target
-    if gen.target._type == "Name" then
-      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
-    end
+    self:_lower_target(gen.target, nxt)
     -- condition
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
@@ -1450,9 +1456,7 @@ function IRLowerer:_lower_expr_impl(node)
     local nxt = self:_new_tmp()
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    if gen.target._type == "Name" then
-      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
-    end
+    self:_lower_target(gen.target, nxt)
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
       self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
@@ -1478,9 +1482,7 @@ function IRLowerer:_lower_expr_impl(node)
     local nxt = self:_new_tmp()
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    if gen.target._type == "Name" then
-      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
-    end
+    self:_lower_target(gen.target, nxt)
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
       self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
@@ -1507,9 +1509,7 @@ function IRLowerer:_lower_expr_impl(node)
     local nxt = self:_new_tmp()
     self:_emit("NEXT", {iter_tmp}, nxt)
     self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    if gen.target._type == "Name" then
-      self:_emit("STORE", {_safe_var(gen.target.id), nxt})
-    end
+    self:_lower_target(gen.target, nxt)
     if gen.ifs and #gen.ifs > 0 then
       local cond = self:lower_expr(gen.ifs[1])
       self:_emit("BRANCH", {cond, body_lbl, loop_lbl})

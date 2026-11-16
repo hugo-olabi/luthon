@@ -315,19 +315,23 @@ function Lexer:tokenize()
       table.insert(self.tokens, {type = TT.NUMBER, value = num, line = self.line, col = self.col})
     -- String literal prefixes: b, B, r, R, u, U, rb, br, etc.
     elseif ((c == "b" or c == "B" or c == "r" or c == "R" or c == "u" or c == "U") and (self:peek(1) == '"' or self:peek(1) == "'")) then
+      local is_raw = (c == "r" or c == "R")
       self:advance()
       local str = self:read_string()
-      table.insert(self.tokens, {type = TT.STRING, value = str, line = self.line, col = self.col})
+      table.insert(self.tokens, {type = TT.STRING, value = str, is_raw = is_raw, line = self.line, col = self.col})
     elseif ((c == "r" or c == "R" or c == "b" or c == "B") and (self:peek(1) == "b" or self:peek(1) == "B" or self:peek(1) == "r" or self:peek(1) == "R") and (self:peek(2) == '"' or self:peek(2) == "'")) then
+      local p1 = c
+      local p2 = self:peek(1)
+      local is_raw = (p1 == "r" or p1 == "R" or p2 == "r" or p2 == "R")
       self:advance(2)
       local str = self:read_string()
-      table.insert(self.tokens, {type = TT.STRING, value = str, line = self.line, col = self.col})
+      table.insert(self.tokens, {type = TT.STRING, value = str, is_raw = is_raw, line = self.line, col = self.col})
     elseif c:match("[%w_]") then
       local word = self:read_ident()
       table.insert(self.tokens, {type = TT.NAME, value = word, line = self.line, col = self.col})
     elseif c == "'" or c == '"' then
       local str = self:read_string()
-      table.insert(self.tokens, {type = TT.STRING, value = str, line = self.line, col = self.col})
+      table.insert(self.tokens, {type = TT.STRING, value = str, is_raw = false, line = self.line, col = self.col})
     elseif c == "(" or c == "[" or c == "{" then
       self:advance()
       self.in_paren = self.in_paren + 1
@@ -1443,14 +1447,16 @@ function Parser:atom()
     self:advance()
     return node(NT.Constant, {value = tonumber(v), lineno = tok.line, col_offset = tok.col})
   elseif t == TT.STRING then
+    local is_raw = tok.is_raw == true
     self:advance()
-    local result = node(NT.Constant, {value = v, lineno = tok.line, col_offset = tok.col})
+    local result = node(NT.Constant, {value = v, is_raw = is_raw, lineno = tok.line, col_offset = tok.col})
     -- Handle implicit string concatenation: "hello" "world" or "hello" f"world"
     while true do
       local next_tok = self:peek()
       if next_tok and next_tok.type == TT.STRING then
+        local next_raw = next_tok.is_raw == true
         self:advance()
-        local next_node = node(NT.Constant, {value = next_tok.value, lineno = next_tok.line, col_offset = next_tok.col})
+        local next_node = node(NT.Constant, {value = next_tok.value, is_raw = next_raw, lineno = next_tok.line, col_offset = next_tok.col})
         result = node(NT.BinOp, {left = result, op = "concat", right = next_node, lineno = 0, col_offset = 0})
       elseif next_tok and next_tok.type == TT.NAME and (next_tok.value == "f" or next_tok.value == "F") then
         local peek2 = self:peek(1)
@@ -1684,7 +1690,7 @@ function Parser:_strip_fstring_quotes(str_value)
   else
     content = content:sub(2, #content - 1)
   end
-  return content
+  return content, quote, triple
 end
 
 -- Find the first occurrence of `special` at top-level delimiter depth (outside {}, [], (), and quotes) within `s`.
@@ -1727,15 +1733,26 @@ local function _split_at_depth0(s, special)
   return nil
 end
 
--- Wrap a string in Lua double quotes, escaping any embedded double quotes.
-local function _lua_str(s)
-  s = s:gsub('"', '\\"')
-  return '"' .. s .. '"'
-end
-
 -- Parse an f-string token value into a JoinedStr node.
 function Parser:parse_fstring(str_value, line, col)
-  local content = self:_strip_fstring_quotes(str_value)
+  local content, quote, triple = self:_strip_fstring_quotes(str_value)
+  local wrap_quote = quote or '"'
+  local function _escape_for_quotes(s, q)
+    return (s:gsub("(\\*)(" .. q .. ")", function(slashes, quote)
+      if #slashes % 2 == 0 then
+        return slashes .. "\\" .. quote
+      else
+        return slashes .. quote
+      end
+    end))
+  end
+  local function _wrap_str(s)
+    local q = wrap_quote
+    local escaped = _escape_for_quotes(s, q)
+    escaped = escaped:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "\\r")
+    return q .. escaped .. q
+  end
+  local _lua_str = _wrap_str
   local values = {}
   local i = 1
   local len = #content
