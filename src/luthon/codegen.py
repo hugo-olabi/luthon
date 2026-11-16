@@ -38,6 +38,8 @@ def _emit(ins):
             return ins.result + " = bit.rshift(" + l + ", " + r + ")"
         elif raw_op in ("matmul", "@"):
             return ins.result + " = " + l + ":matmul(" + r + ")"
+        elif raw_op in ("add", "+"):
+            return ins.result + " = _luthon_add(" + l + ", " + r + ")"
         return ins.result + " = " + l + " " + _op(raw_op) + " " + r
     if o == "UNOP":
         if ins.args[0] == "neg":
@@ -85,17 +87,45 @@ def _emit(ins):
         return "do"
     if o == "END":
         return "end"
-    if o == "TRY_BEGIN":
+    if o in ("TRY_BEGIN", "WITH_BEGIN"):
         scoped_vars = [str(a) for a in ins.args] if ins.args else []
         if scoped_vars:
+            if len(scoped_vars) > 180:
+                scoped_vars = scoped_vars[:180]
             return "do\nlocal ok, err = pcall(function()\n  local " + ", ".join(scoped_vars)
         return "do\nlocal ok, err = pcall(function()"
+    if o == "WITH_END":
+        mgr = ins.args[0]
+        return f"""end)
+if not ok then
+  local _suppressed = _luthon_with_exit({mgr}, err)
+  if not _suppressed then error(err, 0) end
+else
+  _luthon_with_exit({mgr}, nil)
+end
+end"""
     if o == "END_TRY":
         return "end)\nif not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
+    if o == "CATCH_BEGIN":
+        if ins.args and ins.args[0]:
+            return f"    if not _exc_matched and _luthon_exc_match(_exc, {ins.args[0]}) then\n        _exc_matched = true"
+        return "    if not _exc_matched then\n        _exc_matched = true"
     if o == "END_CATCH":
-        return "    _exc_matched = true"
+        return "    end"
     if o == "END_ALL_CATCH":
-        return "    if not _exc_matched then error(tostring(_exc)) end\nend\nend"
+        return "    if not _exc_matched then error(err, 0) end"
+    if o == "TRY_ELSE":
+        return "else\n    if not _luthon_has_ret then"
+    if o == "END_TRY_ELSE":
+        return "    end"
+    if o == "TRY_CLOSE":
+        return "end\nend"
+    if o == "FINALLY_BEGIN":
+        return "end)"
+    if o == "FINALLY_END":
+        return "if not ok then error(err, 0) end\nend"
+    if o == "TRY_UNWIND":
+        return "-- try_unwind"
     if o == "CELL_GET":
         return ins.result + " = " + ins.args[0] + ".value"
     if o == "CELL_SET":
@@ -135,7 +165,7 @@ def _emit(ins):
     if o == "SUBSCR_DIRECT":
         t = ins.args[0]
         idx = ins.args[1]
-        return f"{ins.result} = (rawget({t}, '_buf') and {t}[{idx}] or {t}[{idx} + 1])"
+        return f"{ins.result} = ((rawget({t}, '_buf') or rawget({t}, '_py')) and {t}[{idx}] or {t}[{idx} + 1])"
     if o == "GET_ATTR":
         return ins.result + " = " + ins.args[0] + "." + ins.args[1]
     if o == "SET_ATTR":
@@ -148,7 +178,7 @@ def _emit(ins):
         t = ins.args[0]
         idx = ins.args[1]
         val = ins.args[2]
-        return f"if rawget({t}, '_buf') then {t}[{idx}] = {val} else {t}[{idx} + 1] = {val} end"
+        return f"if rawget({t}, '_buf') or rawget({t}, '_py') then {t}[{idx}] = {val} else {t}[{idx} + 1] = {val} end"
     if o == "LIST_REPEAT":
         return ins.result + " = list_repeat(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "LIST_APPEND":
@@ -297,7 +327,7 @@ def generate(module, sourcemap=None):
                     classes.add(ins.args[0])
     for c in sorted(classes):
         out.append(c + " = " + c + " or {}")
-    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","bytes","type","_luthon_type","callable","issubclass","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib","repr"}
+    builtins = {"len","range","print","list","round","math","os","sys","json","random","re","str","int","float","abs","min","max","sum","sorted","reversed","enumerate","zip","map","filter","any","all","bool","datetime","collections","itertools","functools","pathlib","string","base64","io","struct","hashlib","typing","site","tempfile","open","dataclasses","subprocess","ast","array","matrix","ffi","bit","set","frozenset","table","dict","bytes","type","_luthon_type","callable","issubclass","_luthon_anchor","_luthon_release_anchor","_luthon_is_anchored","isinstance","super","getattr","hasattr","setattr","delattr","iter","tuple","globals","locals","__name__","_simd_lib","repr","_luthon_add"}
     # Hoist module-level and cross-function locals that are captured as upvalues
     hoisted_set = set()
     if all_upvalues:
@@ -333,17 +363,15 @@ def generate(module, sourcemap=None):
         else:
             locs = [l for l in fn.locals if l not in builtins and l not in _fnames and l not in _classes and l not in uv_set and l not in hoisted_set and l not in param_set]
 
-        # Find tmps that belong exclusively to a try block
+        # Find tmps that belong exclusively to a try or with block using LCA
         try_stack = []
-        try_map = {}
+        tmp_paths = {}
         outside_tmps = set()
         for b in fn.blocks:
             for ins in b.instrs:
-                if ins.op == "TRY_BEGIN":
-                    s = set()
-                    try_stack.append(s)
-                    try_map[id(ins)] = (ins, s)
-                elif ins.op == "END_TRY":
+                if ins.op in ("TRY_BEGIN", "WITH_BEGIN"):
+                    try_stack.append(ins)
+                elif ins.op in ("END_TRY", "FINALLY_BEGIN", "WITH_END"):
                     if try_stack:
                         try_stack.pop()
                 else:
@@ -359,23 +387,46 @@ def generate(module, sourcemap=None):
                             for item in a:
                                 if isinstance(item, str) and (item.startswith("_t") or item.startswith("_r")):
                                     ins_tmps.add(item)
-                    if try_stack:
-                        for s in try_stack:
-                            s.update(ins_tmps)
-                    else:
+                    if not try_stack:
                         outside_tmps.update(ins_tmps)
+                    else:
+                        path = list(try_stack)
+                        for t in ins_tmps:
+                            if t not in tmp_paths:
+                                tmp_paths[t] = []
+                            tmp_paths[t].append(path)
 
-        counts = {}
-        for _, (_, s) in try_map.items():
-            s.difference_update(outside_tmps)
-            for t in s:
-                counts[t] = counts.get(t, 0) + 1
+        block_locals = {}
+        for t, paths in tmp_paths.items():
+            if t in outside_tmps:
+                continue
+            lca = paths[0]
+            for p in paths[1:]:
+                new_lca = []
+                for x, y in zip(lca, p):
+                    if x is y:
+                        new_lca.append(x)
+                    else:
+                        break
+                lca = new_lca
+                if not lca:
+                    break
+            if lca:
+                target_ins = lca[-1]
+                target_id = id(target_ins)
+                if target_id not in block_locals:
+                    block_locals[target_id] = []
+                block_locals[target_id].append(t)
+            else:
+                outside_tmps.add(t)
 
         try_exclusive_all = set()
-        for _, (ins, s) in try_map.items():
-            exclusive = [t for t in sorted(s) if counts[t] == 1]
-            ins.args = exclusive
-            try_exclusive_all.update(exclusive)
+        for b in fn.blocks:
+            for ins in b.instrs:
+                if ins.op in ("TRY_BEGIN", "WITH_BEGIN"):
+                    tmps_for_ins = sorted(block_locals.get(id(ins), []))[:180]
+                    ins.args = tmps_for_ins
+                    try_exclusive_all.update(tmps_for_ins)
 
         total_var_count = len(locs) + len(getattr(fn, "tmps", []))
         if total_var_count > 100:
@@ -460,7 +511,8 @@ def generate(module, sourcemap=None):
         out.append(mt_setup)
         call_body = (
             "local self; "
-            "if rawget(" + c + ", '__new__') or (" + c + ".__new__ and " + c + ".__new__ ~= (rawget(_G, 'object') and _G.object.__new__)) then "
+            "if (rawget(" + c + ", '__new__') and not (type(" + c + ".__new__) == 'table' and rawget(" + c + ".__new__, '_py'))) or "
+            "(" + c + ".__new__ and not (type(" + c + ".__new__) == 'table' and rawget(" + c + ".__new__, '_py')) and " + c + ".__new__ ~= (rawget(_G, 'object') and _G.object.__new__)) then "
             "self = " + c + ".__new__(" + c + ", ...) "
             "else "
             "self = setmetatable({__class__ = " + c + "}, " + c + ".__instance_mt) "

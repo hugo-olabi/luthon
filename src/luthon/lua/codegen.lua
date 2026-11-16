@@ -55,8 +55,11 @@ local function _emit(ins)
       return ins.result .. " = nil"
     end
     if type(v) == "string" then
-      -- If already quoted (starts and ends with matching quotes)
-      if (v:sub(1,1) == '"' and v:sub(-1,-1) == '"') or (v:sub(1,1) == "'" and v:sub(-1,-1) == "'") then
+      if (v:sub(1,3) == '"""' and v:sub(-3,-1) == '"""') or (v:sub(1,3) == "'''" and v:sub(-3,-1) == "'''") then
+        local unquoted = v:sub(4, -4)
+        local escaped = unquoted:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+        return ins.result .. " = \"" .. escaped .. "\""
+      elseif (v:sub(1,1) == '"' and v:sub(-1,-1) == '"') or (v:sub(1,1) == "'" and v:sub(-1,-1) == "'") then
         local unquoted = v:sub(2, -2)
         local escaped = unquoted:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
         return ins.result .. " = \"" .. escaped .. "\""
@@ -96,6 +99,8 @@ local function _emit(ins)
       return ins.result .. " = bit.rshift(" .. l .. ", " .. r .. ")"
     elseif op_name == "matmul" or op_name == "@" then
       return ins.result .. " = " .. l .. ":matmul(" .. r .. ")"
+    elseif op_name == "add" or op_name == "+" then
+      return ins.result .. " = _luthon_add(" .. l .. ", " .. r .. ")"
     end
     local mapped = _lua_op(raw_op)
     return ins.result .. " = " .. l .. " " .. mapped .. " " .. r
@@ -146,19 +151,44 @@ local function _emit(ins)
       return ins.result .. " = " .. args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
     end
     return args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
-  elseif o == "TRY_BEGIN" then
+  elseif o == "TRY_BEGIN" or o == "WITH_BEGIN" then
     local scoped = {}
     for _, a in ipairs(args or {}) do table.insert(scoped, tostring(a)) end
     if #scoped > 0 then
+      if #scoped > 180 then
+        local capped = {}
+        for i = 1, 180 do table.insert(capped, scoped[i]) end
+        scoped = capped
+      end
       return "do\nlocal ok, err = pcall(function()\n  local " .. table.concat(scoped, ", ")
     end
     return "do\nlocal ok, err = pcall(function()"
+  elseif o == "WITH_END" then
+    local mgr = args[1]
+    return "end)\nif not ok then\n  local _suppressed = _luthon_with_exit(" .. mgr .. ", err)\n  if not _suppressed then error(err, 0) end\nelse\n  _luthon_with_exit(" .. mgr .. ", nil)\nend\nend"
   elseif o == "END_TRY" then
     return "end)\nif not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
+  elseif o == "CATCH_BEGIN" then
+    if #args > 0 and args[1] and args[1] ~= "" then
+      return "    if not _exc_matched and _luthon_exc_match(_exc, " .. args[1] .. ") then\n        _exc_matched = true"
+    end
+    return "    if not _exc_matched then\n        _exc_matched = true"
   elseif o == "END_CATCH" then
-    return "    _exc_matched = true"
+    return "    end"
   elseif o == "END_ALL_CATCH" then
-    return "    if not _exc_matched then error(tostring(_exc)) end\nend\nend"
+    return "    if not _exc_matched then error(err, 0) end"
+  elseif o == "TRY_ELSE" then
+    return "else\n    if not _luthon_has_ret then"
+  elseif o == "END_TRY_ELSE" then
+    return "    end"
+  elseif o == "TRY_CLOSE" then
+    return "end\nend"
+  elseif o == "FINALLY_BEGIN" then
+    return "end)"
+  elseif o == "FINALLY_END" then
+    return "if not ok then error(err, 0) end\nend"
+  elseif o == "TRY_UNWIND" then
+    return "-- try_unwind"
   elseif o == "DO" then
     return "do"
   elseif o == "END" then
@@ -191,6 +221,9 @@ local function _emit(ins)
     end
     return table.concat(lines, "\n")
   elseif o == "IMPORT" then
+    if #args > 2 and args[3] and args[3] ~= "" then
+      return args[1] .. " = _luthon_import(\"" .. args[2] .. "\", \"" .. args[3] .. "\")"
+    end
     return args[1] .. " = _luthon_import(\"" .. args[2] .. "\")"
   elseif o == "IMPORT_FROM" then
     return args[1] .. " = _luthon_import_from(\"" .. args[2] .. "\", \"" .. args[3] .. "\")"
@@ -202,8 +235,17 @@ local function _emit(ins)
     return ins.result .. " = {}"
   elseif o == "SUBSCR" then
     return ins.result .. " = __luthon_get(" .. args[1] .. ", " .. args[2] .. ")"
+  elseif o == "SUBSCR_DIRECT" then
+    local t = args[1]
+    local idx = args[2]
+    return ins.result .. " = ((rawget(" .. t .. ", '_buf') or rawget(" .. t .. ", '_py')) and " .. t .. "[" .. idx .. "] or " .. t .. "[" .. idx .. " + 1])"
   elseif o == "STORE_SUBSCR" then
     return "__luthon_set(" .. args[1] .. ", " .. args[2] .. ", " .. args[3] .. ")"
+  elseif o == "STORE_SUBSCR_DIRECT" then
+    local t = args[1]
+    local idx = args[2]
+    local val = args[3]
+    return "if rawget(" .. t .. ", '_buf') or rawget(" .. t .. ", '_py') then " .. t .. "[" .. idx .. "] = " .. val .. " else " .. t .. "[" .. idx .. " + 1] = " .. val .. " end"
   elseif o == "SET_ADD" then
     return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
   elseif o == "DICT_SET" then
@@ -272,7 +314,7 @@ function M.generate(module, skip_prelude, sourcemap)
     "Exception", "BaseException", "ValueError", "TypeError", "AssertionError",
     "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
     "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
-    "True", "False", "None"
+    "True", "False", "None", "_luthon_add"
   }
   local builtins_set = {}
   for _, b in ipairs(builtins) do builtins_set[b] = true end
@@ -350,17 +392,16 @@ function M.generate(module, skip_prelude, sourcemap)
         end
       end
     end
-    -- Find tmps exclusive to try blocks
+    -- Find tmps that belong exclusively to a try or with block using LCA
     local try_stack = {}
-    local try_map = {}
+    local tmp_paths = {}
     local outside_tmps = {}
+
     for _, b in ipairs(fn.blocks or {}) do
       for _, ins in ipairs(b.instrs or {}) do
-        if ins.op == "TRY_BEGIN" then
-          local s = {}
-          table.insert(try_stack, s)
-          try_map[ins] = s
-        elseif ins.op == "END_TRY" then
+        if ins.op == "TRY_BEGIN" or ins.op == "WITH_BEGIN" then
+          table.insert(try_stack, ins)
+        elseif ins.op == "END_TRY" or ins.op == "FINALLY_BEGIN" or ins.op == "WITH_END" then
           if #try_stack > 0 then table.remove(try_stack) end
         else
           local ins_tmps = {}
@@ -375,34 +416,63 @@ function M.generate(module, skip_prelude, sourcemap)
               ins_tmps[a] = true
             end
           end
-          if #try_stack > 0 then
-            for _, s in ipairs(try_stack) do
-              for t in pairs(ins_tmps) do s[t] = true end
-            end
-          else
+          if #try_stack == 0 then
             for t in pairs(ins_tmps) do outside_tmps[t] = true end
+          else
+            local path = {}
+            for i = 1, #try_stack do path[i] = try_stack[i] end
+            for t in pairs(ins_tmps) do
+              tmp_paths[t] = tmp_paths[t] or {}
+              table.insert(tmp_paths[t], path)
+            end
           end
         end
       end
     end
 
-    local counts = {}
-    for _, s in pairs(try_map) do
-      for t in pairs(outside_tmps) do s[t] = nil end
-      for t in pairs(s) do counts[t] = (counts[t] or 0) + 1 end
+    local block_locals = {}
+    for t, paths in pairs(tmp_paths) do
+      if not outside_tmps[t] then
+        local lca = paths[1]
+        for pi = 2, #paths do
+          local p = paths[pi]
+          local new_lca = {}
+          local min_len = math.min(#lca, #p)
+          for k = 1, min_len do
+            if lca[k] == p[k] then
+              table.insert(new_lca, lca[k])
+            else
+              break
+            end
+          end
+          lca = new_lca
+          if #lca == 0 then break end
+        end
+        if #lca > 0 then
+          local target_ins = lca[#lca]
+          block_locals[target_ins] = block_locals[target_ins] or {}
+          table.insert(block_locals[target_ins], t)
+        else
+          outside_tmps[t] = true
+        end
+      end
     end
 
     local try_exclusive_all = {}
-    for ins, s in pairs(try_map) do
-      local exclusive = {}
-      for t in pairs(s) do
-        if counts[t] == 1 then
-          table.insert(exclusive, t)
-          try_exclusive_all[t] = true
+    for _, b in ipairs(fn.blocks or {}) do
+      for _, ins in ipairs(b.instrs or {}) do
+        if ins.op == "TRY_BEGIN" or ins.op == "WITH_BEGIN" then
+          local tmps_for_ins = block_locals[ins] or {}
+          table.sort(tmps_for_ins)
+          if #tmps_for_ins > 180 then
+            local capped = {}
+            for i = 1, 180 do table.insert(capped, tmps_for_ins[i]) end
+            tmps_for_ins = capped
+          end
+          ins.args = tmps_for_ins
+          for _, t in ipairs(tmps_for_ins) do try_exclusive_all[t] = true end
         end
       end
-      table.sort(exclusive)
-      ins.args = exclusive
     end
 
     local tmps = {}
@@ -469,7 +539,7 @@ function M.generate(module, skip_prelude, sourcemap)
       "if type(eq) == 'function' then return eq(a, b) end; " ..
       "return rawequal(a, b) end}"
     table.insert(out, mt_setup)
-    local call_body = "local self; if rawget(" .. c .. ", '__new__') or (" .. c .. ".__new__ and " .. c .. ".__new__ ~= (rawget(_G, 'object') and _G.object.__new__)) then self = " .. c .. ".__new__(" .. c .. ", ...) else self = setmetatable({__class__ = " .. c .. "}, " .. c .. ".__instance_mt) end; if type(self) == 'table' and " .. c .. ".__init__ then " .. c .. ".__init__(self, ...) end; return self"
+    local call_body = "local self; if (rawget(" .. c .. ", '__new__') and not (type(" .. c .. ".__new__) == 'table' and rawget(" .. c .. ".__new__, '_py'))) or (" .. c .. ".__new__ and not (type(" .. c .. ".__new__) == 'table' and rawget(" .. c .. ".__new__, '_py')) and " .. c .. ".__new__ ~= (rawget(_G, 'object') and _G.object.__new__)) then self = " .. c .. ".__new__(" .. c .. ", ...) else self = setmetatable({__class__ = " .. c .. "}, " .. c .. ".__instance_mt) end; if type(self) == 'table' and " .. c .. ".__init__ then " .. c .. ".__init__(self, ...) end; return self"
     local cls_mt = "{__index = function(t, k) local b = rawget(t, '__base__'); return b and b[k] end, __call = function(cls, ...) " .. call_body .. " end}"
     table.insert(out, "setmetatable(" .. c .. ", " .. cls_mt .. ")")
   end
@@ -477,13 +547,29 @@ function M.generate(module, skip_prelude, sourcemap)
   -- Runtime helpers for exceptions, asserts and context managers.
   if not skip_prelude then
     table.insert(out, "function _luthon_exc_match(exc, cls)")
-    table.insert(out, "  if type(exc) ~= \"table\" then")
-    table.insert(out, "    if cls == \"Exception\" or cls == \"BaseException\" or cls == Exception or cls == BaseException then return true end")
+    table.insert(out, "  if cls == nil then return false end")
+    table.insert(out, "  if type(cls) == \"table\" and (rawget(cls, \"__is_tuple\") or (cls[1] and rawget(cls, \"__class__\") == nil)) then")
+    table.insert(out, "    for i = 1, #cls do if _luthon_exc_match(exc, cls[i]) then return true end end")
     table.insert(out, "    return false")
     table.insert(out, "  end")
-    table.insert(out, "  local tname = type(cls) == \"string\" and cls or (cls.__name or cls.__type or tostring(cls))")
-    table.insert(out, "  if tname == \"Exception\" or tname == \"BaseException\" then return true end")
-    table.insert(out, "  return exc.__type == tname or exc.__name == tname")
+    table.insert(out, "  local tname = type(cls) == \"string\" and cls or (cls.__name or cls.__name__ or cls.__type or tostring(cls))")
+    table.insert(out, "  if tname == \"Exception\" or tname == \"BaseException\" or cls == Exception or cls == BaseException then return true end")
+    table.insert(out, "  if type(exc) ~= \"table\" then")
+    table.insert(out, "    local str_exc = tostring(exc)")
+    table.insert(out, "    if str_exc:find(tname, 1, true) then return true end")
+    table.insert(out, "    if (tname == \"ImportError\" or cls == ImportError) and str_exc:find(\"ModuleNotFoundError\", 1, true) then return true end")
+    table.insert(out, "    if (tname == \"OSError\" or cls == OSError) and (str_exc:find(\"IOError\", 1, true) or str_exc:find(\"FileNotFoundError\", 1, true)) then return true end")
+    table.insert(out, "    return false")
+    table.insert(out, "  end")
+    table.insert(out, "  if exc.__type == tname or exc.__name == tname or exc.__name__ == tname then return true end")
+    table.insert(out, "  local exc_cls = exc.__class__ or exc")
+    table.insert(out, "  if type(cls) == \"table\" and issubclass and issubclass(exc_cls, cls) then return true end")
+    table.insert(out, "  local curr = exc_cls")
+    table.insert(out, "  while type(curr) == \"table\" do")
+    table.insert(out, "    if curr == cls or curr.__name == tname or curr.__type == tname or curr.__name__ == tname then return true end")
+    table.insert(out, "    curr = rawget(curr, \"__base__\")")
+    table.insert(out, "  end")
+    table.insert(out, "  return false")
     table.insert(out, "end")
     table.insert(out, "")
     table.insert(out, "function _luthon_assert_fail(test, msg)")
