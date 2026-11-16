@@ -351,6 +351,11 @@ PyProxy.__newindex = function(self, key, val)
   local cache = rawget(self, "__attr_cache__")
   if cache then cache[key] = nil end
 
+  if type(val) == "function" then
+    rawset(self, key, val)
+    return
+  end
+
   pybridge.get_lib()
   local py_val = lua_to_py(val)
   -- Try attribute first, then item
@@ -423,7 +428,24 @@ PyProxy.__call = function(self, ...)
   local py_kwargs = nil
   local last_arg = total_args > 0 and args[total_args] or nil
   local last_mt = type(last_arg) == "table" and getmetatable(last_arg) or nil
-  if total_args >= 2 and type(last_arg) == "table" and last_arg ~= _G._luthon_none and not rawget(last_arg, "_py") and not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__)) then
+  local is_kw = false
+  if total_args >= 2 and type(last_arg) == "table" and last_arg ~= _G._luthon_none and not rawget(last_arg, "_py") then
+    if rawget(last_arg, "__luthon_kw") or (last_mt and last_mt.__luthon_kw) then
+      is_kw = true
+    elseif not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__ or last_mt.__set__)) and
+           not rawget(last_arg, "__type") and not rawget(last_arg, "__msg") and
+           not rawget(last_arg, "__name") and not rawget(last_arg, "__class__") and
+           not rawget(last_arg, "_dict") and not (last_mt and last_mt.__dict__) then
+      local has_hole = false
+      for i = 1, total_args - 1 do
+        if args[i] == nil then has_hole = true break end
+      end
+      if has_hole then
+        is_kw = true
+      end
+    end
+  end
+  if is_kw then
     local pos_count = 0
     for i = 1, total_args - 1 do
       if args[i] ~= nil then pos_count = i end

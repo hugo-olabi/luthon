@@ -544,6 +544,16 @@ function M.load(name)
     return sys_modules[name] or nil
   end
 
+  if _MODULES and _MODULES[name] then
+    sys_modules[name] = _MODULES[name]
+    return _MODULES[name]
+  end
+
+  if name == "os.path" and _G.os and _G.os.path then
+    sys_modules[name] = _G.os.path
+    return _G.os.path
+  end
+
   -- 2. Pure Lua module
   local lua_path = M.find_lua_module(name)
   if lua_path then
