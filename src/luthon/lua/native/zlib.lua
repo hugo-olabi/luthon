@@ -60,6 +60,21 @@ function M.crc32(str)
 end
 
 function M.compress(str)
+  if type(str) == "table" and rawget(str, "_py") then
+    local pb = require("src/luthon/lua/pybridge")
+    local libpy = pb.get_lib()
+    local c_src = libpy.PyBytes_AsString(str._py)
+    local src_len = tonumber(libpy.PyBytes_Size(str._py))
+    local dest_len = ffi.new("unsigned long[1]", src_len + math.floor(src_len * 0.1) + 12)
+    local dest = ffi.new("uint8_t[?]", dest_len[0])
+    local res = libz.compress(dest, dest_len, ffi.cast("const uint8_t*", c_src), src_len)
+    if res ~= 0 then error("zlib compression failed with code: " .. tostring(res)) end
+    return ffi.string(dest, dest_len[0])
+  end
+  if type(str) == "table" and str[1] and type(str[1]) == "string" then
+    str = str[1]
+  end
+  str = tostring(str or "")
   local src_len = #str
   local dest_len = ffi.new("unsigned long[1]", src_len + math.floor(src_len * 0.1) + 12)
   local dest = ffi.new("uint8_t[?]", dest_len[0])
@@ -72,6 +87,28 @@ function M.compress(str)
 end
 
 function M.decompress(data)
+  if type(data) == "table" and rawget(data, "_py") then
+    local pb = require("src/luthon/lua/pybridge")
+    local libpy = pb.get_lib()
+    local c_src = libpy.PyBytes_AsString(data._py)
+    local src_len = tonumber(libpy.PyBytes_Size(data._py))
+    local buf_size = src_len * 4 + 1024
+    local dest_len = ffi.new("unsigned long[1]", buf_size)
+    local dest = ffi.new("uint8_t[?]", dest_len[0])
+    local res = libz.uncompress(dest, dest_len, ffi.cast("const uint8_t*", c_src), src_len)
+    while res == -5 do
+      buf_size = buf_size * 2
+      dest_len[0] = buf_size
+      dest = ffi.new("uint8_t[?]", dest_len[0])
+      res = libz.uncompress(dest, dest_len, ffi.cast("const uint8_t*", c_src), src_len)
+    end
+    if res ~= 0 then error("zlib decompression failed with code: " .. tostring(res)) end
+    return ffi.string(dest, dest_len[0])
+  end
+  if type(data) == "table" and data[1] and type(data[1]) == "string" then
+    data = data[1]
+  end
+  data = tostring(data or "")
   local src_len = #data
   local buf_size = src_len * 4 + 1024
   local dest_len = ffi.new("unsigned long[1]", buf_size)

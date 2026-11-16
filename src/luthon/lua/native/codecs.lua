@@ -223,4 +223,30 @@ function M.extract_channel(width, height, rgba_buf, channel_idx)
   return out_buf
 end
 
+local py_codecs = nil
+setmetatable(M, {
+  __index = function(t, k)
+    if not py_codecs then
+      local ok, pb = _G.pcall(_G.require, "src/luthon/lua/pybridge")
+      if not ok or not pb then
+        ok, pb = _G.pcall(_G.require, "luthon.lua.pybridge")
+      end
+      if ok and pb and pb.is_available() then
+        local ok_imp, mod = _G.pcall(pb.import, "codecs")
+        if ok_imp and mod then
+          py_codecs = mod
+        end
+      end
+    end
+    if py_codecs then
+      local val = py_codecs[k]
+      if val ~= nil then
+        rawset(t, k, val)
+        return val
+      end
+    end
+    return nil
+  end
+})
+
 return M
