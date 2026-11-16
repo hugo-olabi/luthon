@@ -39,12 +39,23 @@ local function _lua_op(op)
   return _OP_MAP[op:lower()] or op
 end
 
+local function _escape_for_quotes(s, q)
+  return (s:gsub("(\\*)(" .. q .. ")", function(slashes, quote)
+    if #slashes % 2 == 0 then
+      return slashes .. "\\" .. quote
+    else
+      return slashes .. quote
+    end
+  end))
+end
+
 local function _emit(ins)
   local o = ins.op
   local args = ins.args or {}
 
   if o == "CONST" then
     local v = args[1]
+    local is_raw = args[2] == true
     if v == true then
       return ins.result .. " = true"
     end
@@ -56,13 +67,23 @@ local function _emit(ins)
     end
     if type(v) == "string" then
       if (v:sub(1,3) == '"""' and v:sub(-3,-1) == '"""') or (v:sub(1,3) == "'''" and v:sub(-3,-1) == "'''") then
+        local q = v:sub(1, 1)
         local unquoted = v:sub(4, -4)
-        local escaped = unquoted:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
-        return ins.result .. " = \"" .. escaped .. "\""
+        if is_raw then
+          unquoted = unquoted:gsub("\\", "\\\\")
+        end
+        unquoted = unquoted:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "\\r")
+        local escaped = _escape_for_quotes(unquoted, q)
+        return ins.result .. " = " .. q .. escaped .. q
       elseif (v:sub(1,1) == '"' and v:sub(-1,-1) == '"') or (v:sub(1,1) == "'" and v:sub(-1,-1) == "'") then
+        local q = v:sub(1, 1)
         local unquoted = v:sub(2, -2)
-        local escaped = unquoted:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
-        return ins.result .. " = \"" .. escaped .. "\""
+        if is_raw then
+          unquoted = unquoted:gsub("\\", "\\\\")
+        end
+        unquoted = unquoted:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "\\r")
+        local escaped = _escape_for_quotes(unquoted, q)
+        return ins.result .. " = " .. q .. escaped .. q
       end
       local escaped = v:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
       return ins.result .. " = \"" .. escaped .. "\""
@@ -527,7 +548,22 @@ function M.generate(module, skip_prelude, sourcemap)
   -- Set up class metatables for __call (constructor emulation)
   for c in pairs(classes) do
     table.insert(out, c .. ".__index = " .. c)
-    local mt_setup = c .. ".__instance_mt = {__index = function(inst, k) local v = " .. c .. "[k]; if type(v) == 'table' and type(v.__get__) == 'function' then return v:__get__(inst, " .. c .. ") end; return v end, " ..
+    local mt_setup = c .. ".__instance_mt = {__index = function(inst, k) " ..
+      "if k == '__class__' then return rawget(inst, '__class__') end; " ..
+      "local ga = rawget(inst, '__getattribute__') or (rawget(inst, '__class__') and inst.__class__.__getattribute__); " ..
+      "if type(ga) == 'function' then return ga(inst, k) end; " ..
+      "local v = rawget(inst, k); if v ~= nil then return v end; " ..
+      "local cv = " .. c .. "[k]; " ..
+      "if type(cv) == 'table' and type(cv.__get__) == 'function' then return cv:__get__(inst, " .. c .. ") end; " ..
+      "if type(cv) == 'function' then " ..
+      "return function(...) if select(1, ...) == inst then return cv(...) else return cv(inst, ...) end end end; " ..
+      "if cv ~= nil then return cv end; " ..
+      "local g = rawget(inst, '__getattr__') or (rawget(inst, '__class__') and inst.__class__.__getattr__); " ..
+      "if type(g) == 'function' then return g(inst, k) end; " ..
+      "return nil end, " ..
+      "__newindex = function(inst, k, v) " ..
+      "local sa = rawget(inst, '__setattr__') or (rawget(inst, '__class__') and inst.__class__.__setattr__); " ..
+      "if type(sa) == 'function' then return sa(inst, k, v) else rawset(inst, k, v) end end, " ..
       "__tostring = function(inst) " ..
       "local s = inst.__str__; if type(s) == 'function' then return s(inst) end; " ..
       "local r = inst.__repr__; if type(r) == 'function' then return r(inst) end; " ..
