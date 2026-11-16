@@ -2862,6 +2862,20 @@ os.chmod = function(p, mode)
   end
   return 0
 end
+os.mkdir = os.mkdir or function(p, mode)
+  p = tostring(p or "")
+  mode = mode or 511
+  local rc = ffi.C.mkdir(p, mode)
+  if rc ~= 0 then
+    local err_fn = _G.FileExistsError or _G.OSError or FileExistsError or OSError
+    if err_fn then
+      error(err_fn("File exists: " .. p), 0)
+    else
+      error("FileExistsError: File exists: " .. p, 0)
+    end
+  end
+  return 0
+end
 os.makedirs = os.makedirs or function(p)
   p = tostring(p or "")
   if p == "" or os.path.isdir(p) then return end
@@ -6231,6 +6245,13 @@ _MODULES = _MODULES or {}
 _MODULES["concurrent"] = _concurrent
 _MODULES["concurrent.futures"] = _futures
 _MODULES["threading"] = _threading
+_MODULES["os"] = os
+_MODULES["os.path"] = os and os.path
+_MODULES["sys"] = sys
+_MODULES["time"] = time
+_MODULES["datetime"] = datetime
+_MODULES["math"] = math
+_MODULES["string"] = string
 
 -- Phase 39: math.simd runtime module
 local _simd_mod = {}
@@ -6389,6 +6410,13 @@ end
 function _luthon_import(mod_name, full_name)
   if mod_name == "__future__" then return {} end
   if mod_name == "types" and types then return types end
+  if mod_name == "os.path" and os and os.path then return os.path end
+  if mod_name == "datetime" and datetime then return datetime end
+  if mod_name == "os" and os then return os end
+  if mod_name == "sys" and sys then return sys end
+  if mod_name == "time" and time then return time end
+  if mod_name == "math" and math then return math end
+  if mod_name == "string" and string then return string end
 
   -- If full_name is provided (e.g. root = "mypkg", full_name = "mypkg.bar")
   if full_name and full_name ~= mod_name then
