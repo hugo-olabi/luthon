@@ -529,8 +529,11 @@ class IRLowerer:
                     self._emit("CATCH_BEGIN", [], result=self._new_tmp())
                 if h.name:
                     self._emit("STORE", [h.name, "_exc"])
+                prev_exc = getattr(self, "_active_exc", None)
+                self._active_exc = "_exc"
                 for s in h.body:
                     self.lower_stmt(s)
+                self._active_exc = prev_exc
                 self._emit("END_CATCH", [], result=self._new_tmp())
             self._emit("END_ALL_CATCH", [], result=self._new_tmp())
             if node.orelse:
@@ -605,8 +608,12 @@ class IRLowerer:
             has_eq = False
             prev_cur_class = getattr(self, "_cur_class", None)
             self._cur_class = node.name
+            method_counts = {}
             for stmt in node.body:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    method_counts[stmt.name] = method_counts.get(stmt.name, 0) + 1
+                    count = method_counts[stmt.name]
+                    fn_subname = stmt.name if count == 1 else f"{stmt.name}_{count}"
                     if stmt.name == "__init__":
                         has_init = True
                     if stmt.name == "__repr__":
@@ -618,7 +625,7 @@ class IRLowerer:
                     params = [_safe_var(a.arg) for a in stmt.args.args]
                     if stmt.args.vararg:
                         params.append("...")
-                    fn = Function(name=node.name + "." + stmt.name, params=params)
+                    fn = Function(name=node.name + "." + fn_subname, params=params)
                     sc = getattr(stmt, "_scope", None)
                     if sc is not None:
                         fn.locals = sorted(_safe_var(k) for k in sc.locals.keys())
@@ -660,11 +667,11 @@ class IRLowerer:
 
                     if is_gen or is_async:
                         wrapper_type = "make_generator" if is_gen else "make_coroutine"
-                        impl_name = node.name + "." + stmt.name + "_impl"
+                        impl_name = node.name + "." + fn_subname + "_impl"
                         fn.name = impl_name
                         self.module.functions.append(fn)
 
-                        wrapper_fn = Function(name=node.name + "." + stmt.name, params=list(params))
+                        wrapper_fn = Function(name=node.name + "." + fn_subname, params=list(params))
                         if sc is not None:
                             wrapper_fn.freevars = sorted(getattr(sc, "freevars", set()))
                             wrapper_fn.cellvars = sorted(getattr(sc, "cellvars", set()))
@@ -694,7 +701,7 @@ class IRLowerer:
                     if clean_params:
                         param_tuple = self._new_tmp()
                         self._emit("MAKE_TUPLE", [f'"{p}"' for p in clean_params], result=param_tuple)
-                        self._emit("CALL", ["_luthon_reg_fn", f"{node.name}.{stmt.name}", param_tuple])
+                        self._emit("CALL", ["_luthon_reg_fn", f"{node.name}.{fn_subname}", param_tuple])
                     if stmt.name == "__init__":
                         init_params = [p for p in clean_params[1:]]
                         if init_params:
@@ -703,47 +710,58 @@ class IRLowerer:
                             self._emit("CALL", ["_luthon_reg_fn", node.name, cls_param_tuple])
 
                     # Apply decorators on class method (innermost first)
-                    for dec in reversed(stmt.decorator_list):
-                        if isinstance(dec, ast.Name) and dec.id == "property":
-                            prop_tmp = self._new_tmp()
-                            prop_ref = f'{node.name}["{stmt.name}"]' if stmt.name in LUA_RESERVED_KEYWORDS else f"{node.name}.{stmt.name}"
-                            self._emit("CALL", ["property", prop_ref], result=prop_tmp)
-                            if stmt.name in LUA_RESERVED_KEYWORDS:
-                                self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
+                    if stmt.decorator_list:
+                        for dec in reversed(stmt.decorator_list):
+                            if isinstance(dec, ast.Name) and dec.id == "property":
+                                prop_tmp = self._new_tmp()
+                                prop_ref = f'{node.name}["{fn_subname}"]' if fn_subname in LUA_RESERVED_KEYWORDS else f"{node.name}.{fn_subname}"
+                                self._emit("CALL", ["property", prop_ref], result=prop_tmp)
+                                if stmt.name in LUA_RESERVED_KEYWORDS:
+                                    self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', prop_tmp])
+                                else:
+                                    self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
+                            elif isinstance(dec, ast.Attribute) and isinstance(dec.value, ast.Name) and dec.attr in ("setter", "deleter", "getter"):
+                                base_prop = self._new_tmp()
+                                if dec.value.id in LUA_RESERVED_KEYWORDS:
+                                    self._emit("SUBSCR", [node.name, f'"{dec.value.id}"'], result=base_prop)
+                                else:
+                                    self._emit("GET_ATTR", [node.name, dec.value.id], result=base_prop)
+                                dec_fn = self._new_tmp()
+                                self._emit("GET_ATTR", [base_prop, dec.attr], result=dec_fn)
+                                m_tmp = self._new_tmp()
+                                if fn_subname in LUA_RESERVED_KEYWORDS:
+                                    self._emit("SUBSCR", [node.name, f'"{fn_subname}"'], result=m_tmp)
+                                else:
+                                    self._emit("GET_ATTR", [node.name, fn_subname], result=m_tmp)
+                                res_tmp = self._new_tmp()
+                                self._emit("CALL", [dec_fn, m_tmp], result=res_tmp)
+                                if stmt.name in LUA_RESERVED_KEYWORDS:
+                                    self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', res_tmp])
+                                else:
+                                    self._emit("SET_ATTR", [node.name, stmt.name, res_tmp])
                             else:
-                                self._emit("SET_ATTR", [node.name, stmt.name, prop_tmp])
-                        elif isinstance(dec, ast.Attribute) and isinstance(dec.value, ast.Name) and dec.attr in ("setter", "deleter", "getter"):
-                            base_prop = self._new_tmp()
-                            if dec.value.id in LUA_RESERVED_KEYWORDS:
-                                self._emit("SUBSCR", [node.name, f'"{dec.value.id}"'], result=base_prop)
-                            else:
-                                self._emit("GET_ATTR", [node.name, dec.value.id], result=base_prop)
-                            dec_fn = self._new_tmp()
-                            self._emit("GET_ATTR", [base_prop, dec.attr], result=dec_fn)
-                            m_tmp = self._new_tmp()
-                            if stmt.name in LUA_RESERVED_KEYWORDS:
-                                self._emit("SUBSCR", [node.name, f'"{stmt.name}"'], result=m_tmp)
-                            else:
-                                self._emit("GET_ATTR", [node.name, stmt.name], result=m_tmp)
-                            res_tmp = self._new_tmp()
-                            self._emit("CALL", [dec_fn, m_tmp], result=res_tmp)
-                            if stmt.name in LUA_RESERVED_KEYWORDS:
-                                self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', res_tmp])
-                            else:
-                                self._emit("SET_ATTR", [node.name, stmt.name, res_tmp])
+                                dec_tmp = self.lower_expr(dec)
+                                m_tmp = self._new_tmp()
+                                if fn_subname in LUA_RESERVED_KEYWORDS:
+                                    self._emit("SUBSCR", [node.name, f'"{fn_subname}"'], result=m_tmp)
+                                else:
+                                    self._emit("GET_ATTR", [node.name, fn_subname], result=m_tmp)
+                                res_tmp = self._new_tmp()
+                                self._emit("CALL", [dec_tmp, m_tmp], result=res_tmp)
+                                if stmt.name in LUA_RESERVED_KEYWORDS:
+                                    self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', res_tmp])
+                                else:
+                                    self._emit("SET_ATTR", [node.name, stmt.name, res_tmp])
+                    elif count > 1:
+                        m_tmp = self._new_tmp()
+                        if fn_subname in LUA_RESERVED_KEYWORDS:
+                            self._emit("SUBSCR", [node.name, f'"{fn_subname}"'], result=m_tmp)
                         else:
-                            dec_tmp = self.lower_expr(dec)
-                            m_tmp = self._new_tmp()
-                            if stmt.name in LUA_RESERVED_KEYWORDS:
-                                self._emit("SUBSCR", [node.name, f'"{stmt.name}"'], result=m_tmp)
-                            else:
-                                self._emit("GET_ATTR", [node.name, stmt.name], result=m_tmp)
-                            res_tmp = self._new_tmp()
-                            self._emit("CALL", [dec_tmp, m_tmp], result=res_tmp)
-                            if stmt.name in LUA_RESERVED_KEYWORDS:
-                                self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', res_tmp])
-                            else:
-                                self._emit("SET_ATTR", [node.name, stmt.name, res_tmp])
+                            self._emit("GET_ATTR", [node.name, fn_subname], result=m_tmp)
+                        if stmt.name in LUA_RESERVED_KEYWORDS:
+                            self._emit("STORE_SUBSCR", [node.name, f'"{stmt.name}"', m_tmp])
+                        else:
+                            self._emit("SET_ATTR", [node.name, stmt.name, m_tmp])
             self._cur_class = prev_cur_class
 
             # Auto-generate __init__ if dataclass and not defined
@@ -835,7 +853,11 @@ class IRLowerer:
                 exc_tmp = self.lower_expr(node.exc)
                 self._emit("CALL", ["error", exc_tmp], result=self._new_tmp())
             else:
-                self._emit("CALL", ["error", '"RuntimeError"'], result=self._new_tmp())
+                active_exc = getattr(self, "_active_exc", None)
+                if active_exc:
+                    self._emit("CALL", ["error", active_exc], result=self._new_tmp())
+                else:
+                    self._emit("CALL", ["error", '"RuntimeError"'], result=self._new_tmp())
         elif isinstance(node, ast.Assert):
             cond_tmp = self.lower_expr(node.test)
             pass_lbl = self._new_label("assert_ok")
@@ -876,6 +898,17 @@ class IRLowerer:
             self._emit("CALL", ["coroutine.yield", val], result=self._new_tmp())
             self._emit("JUMP", [loop_lbl])
             self._cur_block = self._new_block(end_lbl)
+        elif isinstance(node, ast.Delete):
+            for t in node.targets:
+                if isinstance(t, ast.Subscript):
+                    t_tmp = self.lower_expr(t.value)
+                    idx_tmp = self.lower_expr(t.slice)
+                    self._emit("CALL", ["__luthon_delitem", t_tmp, idx_tmp], result=self._new_tmp())
+                elif isinstance(t, ast.Attribute):
+                    t_tmp = self.lower_expr(t.value)
+                    self._emit("SET_ATTR", [t_tmp, t.attr, "nil"])
+                elif isinstance(t, ast.Name):
+                    self._emit("STORE", [_safe_var(t.id), "nil"])
         elif hasattr(ast, "Match") and isinstance(node, ast.Match):
             self._lower_match(node)
         else:
@@ -1516,7 +1549,7 @@ class IRLowerer:
     def _cmpop(self, op):
         return {
             ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le",
-            ast.Gt: "gt", ast.GtE: "ge", ast.Is: "eq", ast.IsNot: "ne",
+            ast.Gt: "gt", ast.GtE: "ge", ast.Is: "is", ast.IsNot: "isnot",
             ast.In: "in", ast.NotIn: "notin",
         }.get(type(op), type(op).__name__)
 

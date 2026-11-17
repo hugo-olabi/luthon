@@ -25,8 +25,8 @@ local _CMP_MAP = {
   ["gt"] = ">", ["ge"] = ">=",
   ["Lt"] = "<", ["LtE"] = "<=", ["Gt"] = ">", ["GtE"] = ">=",
   ["Eq"] = "==", ["Neq"] = "~=",
-  ["Is"] = "==", ["IsNot"] = "~=",
-  ["is"] = "==", ["isnot"] = "~=",
+  ["Is"] = "is", ["IsNot"] = "isnot",
+  ["is"] = "is", ["isnot"] = "isnot",
   ["in"] = "_luthon_in", ["notin"] = "_luthon_not_in",
   ["In"] = "_luthon_in", ["NotIn"] = "_luthon_not_in",
 }

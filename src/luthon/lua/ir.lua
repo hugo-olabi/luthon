@@ -707,9 +707,12 @@ function IRLowerer:_lower_stmt_impl(node)
       if h.name then
         self:_emit("STORE", {h.name, "_exc"})
       end
+      local prev_exc = self._active_exc
+      self._active_exc = "_exc"
       for _, s in ipairs(h.body or {}) do
         self:lower_stmt(s)
       end
+      self._active_exc = prev_exc
       self:_emit("END_CATCH", {}, self:_new_tmp())
     end
     self:_emit("END_ALL_CATCH", {}, self:_new_tmp())
@@ -796,14 +799,18 @@ function IRLowerer:_lower_stmt_impl(node)
     local has_eq = false
     local prev_cur_class = self._cur_class
     self._cur_class = node.name
+    local method_counts = {}
     for _, stmt in ipairs(node.body or {}) do
       if stmt._type == "FunctionDef" or stmt._type == "AsyncFunctionDef" then
+        method_counts[stmt.name] = (method_counts[stmt.name] or 0) + 1
+        local count = method_counts[stmt.name]
+        local fn_subname = (count == 1) and stmt.name or (stmt.name .. "_" .. count)
         if stmt.name == "__init__" then has_init = true end
         if stmt.name == "__repr__" then has_repr = true end
         if stmt.name == "__eq__" then has_eq = true end
         local prev_method_first_arg = self._cur_method_first_arg
         self._cur_method_first_arg = stmt.args and stmt.args.args and stmt.args.args[1] and stmt.args.args[1].arg
-        local fn = Function.new(node.name .. "." .. stmt.name, {})
+        local fn = Function.new(node.name .. "." .. fn_subname, {})
         for _, a in ipairs(stmt.args and stmt.args.args or {}) do table.insert(fn.params, _safe_var(a.arg)) end
         if stmt.args and (stmt.args.vararg or stmt.args.kwarg) then
           table.insert(fn.params, "...")
@@ -878,13 +885,13 @@ function IRLowerer:_lower_stmt_impl(node)
         local is_async = (stmt._type == "AsyncFunctionDef")
         if is_gen or is_async then
           local wrapper_type = is_gen and "make_generator" or "make_coroutine"
-          local impl_name = node.name .. "." .. stmt.name .. "_impl"
+          local impl_name = node.name .. "." .. fn_subname .. "_impl"
           fn.name = impl_name
           table.insert(self.module.functions, fn)
 
           local wrapper_params = {}
           for _, p in ipairs(fn.params) do table.insert(wrapper_params, p) end
-          local wrapper_fn = Function.new(node.name .. "." .. stmt.name, wrapper_params)
+          local wrapper_fn = Function.new(node.name .. "." .. fn_subname, wrapper_params)
           if sc then
             wrapper_fn.freevars = {}
             for k in pairs(sc.freevars or {}) do table.insert(wrapper_fn.freevars, _safe_var(k)) end
@@ -924,7 +931,7 @@ function IRLowerer:_lower_stmt_impl(node)
         if #clean_params > 0 then
           local param_tuple = self:_new_tmp()
           self:_emit("MAKE_TUPLE", clean_params, param_tuple)
-          self:_emit("CALL", {"_luthon_reg_fn", node.name .. "." .. stmt.name, param_tuple})
+          self:_emit("CALL", {"_luthon_reg_fn", node.name .. "." .. fn_subname, param_tuple})
         end
         if stmt.name == "__init__" then
           local init_params = {}
@@ -937,42 +944,65 @@ function IRLowerer:_lower_stmt_impl(node)
         end
 
         -- Apply decorators on class method (innermost first)
-        for i = #(stmt.decorator_list or {}), 1, -1 do
-          local dec = stmt.decorator_list[i]
-          if dec._type == "Name" and dec.id == "property" then
-            local prop_tmp = self:_new_tmp()
-            local prop_ref = node.name .. "." .. stmt.name
-            self:_emit("CALL", {"property", prop_ref}, prop_tmp)
-            self:_emit("SET_ATTR", {node.name, stmt.name, prop_tmp})
-          elseif dec._type == "Attribute" and dec.value and dec.value._type == "Name" and (dec.attr == "setter" or dec.attr == "deleter" or dec.attr == "getter") then
-            local base_prop = self:_new_tmp()
-            if LUA_RESERVED_KEYWORDS[dec.value.id] then
-              self:_emit("SUBSCR", {node.name, "\"" .. dec.value.id .. "\""}, base_prop)
+        local dec_list = stmt.decorator_list or {}
+        if #dec_list > 0 then
+          for i = #dec_list, 1, -1 do
+            local dec = dec_list[i]
+            if dec._type == "Name" and dec.id == "property" then
+              local prop_tmp = self:_new_tmp()
+              local prop_ref = node.name .. "." .. fn_subname
+              self:_emit("CALL", {"property", prop_ref}, prop_tmp)
+              self:_emit("SET_ATTR", {node.name, stmt.name, prop_tmp})
+            elseif dec._type == "Attribute" and dec.value and dec.value._type == "Name" and (dec.attr == "setter" or dec.attr == "deleter" or dec.attr == "getter") then
+              local base_prop = self:_new_tmp()
+              if LUA_RESERVED_KEYWORDS[dec.value.id] then
+                self:_emit("SUBSCR", {node.name, "\"" .. dec.value.id .. "\""}, base_prop)
+              else
+                self:_emit("GET_ATTR", {node.name, dec.value.id}, base_prop)
+              end
+              local dec_fn = self:_new_tmp()
+              self:_emit("GET_ATTR", {base_prop, dec.attr}, dec_fn)
+              local m_tmp = self:_new_tmp()
+              if LUA_RESERVED_KEYWORDS[fn_subname] then
+                self:_emit("SUBSCR", {node.name, "\"" .. fn_subname .. "\""}, m_tmp)
+              else
+                self:_emit("GET_ATTR", {node.name, fn_subname}, m_tmp)
+              end
+              local res_tmp = self:_new_tmp()
+              self:_emit("CALL", {dec_fn, m_tmp}, res_tmp)
+              if LUA_RESERVED_KEYWORDS[stmt.name] then
+                self:_emit("STORE_SUBSCR", {node.name, "\"" .. stmt.name .. "\"", res_tmp})
+              else
+                self:_emit("SET_ATTR", {node.name, stmt.name, res_tmp})
+              end
             else
-              self:_emit("GET_ATTR", {node.name, dec.value.id}, base_prop)
+              local dec_tmp = self:lower_expr(dec)
+              local m_tmp = self:_new_tmp()
+              if LUA_RESERVED_KEYWORDS[fn_subname] then
+                self:_emit("SUBSCR", {node.name, "\"" .. fn_subname .. "\""}, m_tmp)
+              else
+                self:_emit("GET_ATTR", {node.name, fn_subname}, m_tmp)
+              end
+              local res_tmp = self:_new_tmp()
+              self:_emit("CALL", {dec_tmp, m_tmp}, res_tmp)
+              if LUA_RESERVED_KEYWORDS[stmt.name] then
+                self:_emit("STORE_SUBSCR", {node.name, "\"" .. stmt.name .. "\"", res_tmp})
+              else
+                self:_emit("SET_ATTR", {node.name, stmt.name, res_tmp})
+              end
             end
-            local dec_fn = self:_new_tmp()
-            self:_emit("GET_ATTR", {base_prop, dec.attr}, dec_fn)
-            local m_tmp = self:_new_tmp()
-            if LUA_RESERVED_KEYWORDS[stmt.name] then
-              self:_emit("SUBSCR", {node.name, "\"" .. stmt.name .. "\""}, m_tmp)
-            else
-              self:_emit("GET_ATTR", {node.name, stmt.name}, m_tmp)
-            end
-            local res_tmp = self:_new_tmp()
-            self:_emit("CALL", {dec_fn, m_tmp}, res_tmp)
-            if LUA_RESERVED_KEYWORDS[stmt.name] then
-              self:_emit("STORE_SUBSCR", {node.name, "\"" .. stmt.name .. "\"", res_tmp})
-            else
-              self:_emit("SET_ATTR", {node.name, stmt.name, res_tmp})
-            end
+          end
+        elseif count > 1 then
+          local m_tmp = self:_new_tmp()
+          if LUA_RESERVED_KEYWORDS[fn_subname] then
+            self:_emit("SUBSCR", {node.name, "\"" .. fn_subname .. "\""}, m_tmp)
           else
-            local dec_tmp = self:lower_expr(dec)
-            local m_tmp = self:_new_tmp()
-            self:_emit("GET_ATTR", {node.name, stmt.name}, m_tmp)
-            local res_tmp = self:_new_tmp()
-            self:_emit("CALL", {dec_tmp, m_tmp}, res_tmp)
-            self:_emit("SET_ATTR", {node.name, stmt.name, res_tmp})
+            self:_emit("GET_ATTR", {node.name, fn_subname}, m_tmp)
+          end
+          if LUA_RESERVED_KEYWORDS[stmt.name] then
+            self:_emit("STORE_SUBSCR", {node.name, "\"" .. stmt.name .. "\"", m_tmp})
+          else
+            self:_emit("SET_ATTR", {node.name, stmt.name, m_tmp})
           end
         end
       end
@@ -1055,7 +1085,12 @@ function IRLowerer:_lower_stmt_impl(node)
       local exc_tmp = self:lower_expr(node.exc)
       self:_emit("CALL", {"error", exc_tmp}, self:_new_tmp())
     else
-      self:_emit("CALL", {"error", "nil"}, self:_new_tmp())
+      local active_exc = self._active_exc
+      if active_exc then
+        self:_emit("CALL", {"error", active_exc}, self:_new_tmp())
+      else
+        self:_emit("CALL", {"error", "\"RuntimeError\""}, self:_new_tmp())
+      end
     end
   elseif t == "With" then
     local mgrs = {}
@@ -1105,6 +1140,19 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("CALL", {"coroutine.yield", val}, self:_new_tmp())
     self:_emit("JUMP", {loop_lbl})
     self._cur_block = self:_new_block(end_lbl)
+  elseif t == "Delete" then
+    for _, trg in ipairs(node.targets or {}) do
+      if trg._type == "Subscript" then
+        local t_tmp = self:lower_expr(trg.value)
+        local idx_tmp = self:lower_expr(trg.slice)
+        self:_emit("CALL", {"__luthon_delitem", t_tmp, idx_tmp}, self:_new_tmp())
+      elseif trg._type == "Attribute" then
+        local t_tmp = self:lower_expr(trg.value)
+        self:_emit("SET_ATTR", {t_tmp, trg.attr, "nil"})
+      elseif trg._type == "Name" then
+        self:_emit("STORE", {_safe_var(trg.id), "nil"})
+      end
+    end
   else
     -- fallback: record unsupported
     self:_emit("NOP", {type(node).__name__ or type(node)})
