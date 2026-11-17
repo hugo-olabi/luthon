@@ -203,7 +203,15 @@ function pybridge.get_lib()
       libpy.PyRun_SimpleString([[
 import sys, os
 venv = os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX")
+if not venv and os.path.isdir(".venv"):
+    venv = os.path.abspath(".venv")
 if venv:
+    for py_bin in [os.path.join(venv, "bin", "python"), os.path.join(venv, "bin", "python3")]:
+        if os.path.isfile(py_bin):
+            sys.executable = py_bin
+            if hasattr(sys, "_base_executable"):
+                sys._base_executable = py_bin
+            break
     for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
         sp = os.path.join(venv, "lib", f"python{ver}", "site-packages")
         if os.path.isdir(sp) and sp not in sys.path:
@@ -224,6 +232,18 @@ try:
             res.append(inspect.FrameInfo(None, '<luthon>', 1, '<module>', None, None))
         return res
     inspect.stack = _safe_inspect_stack
+except Exception:
+    pass
+try:
+    from twisted.internet import defer, reactor
+    _orig_add_timeout = defer.Deferred.addTimeout
+    def _safe_add_timeout(self, timeout=None, clock=None, *args, **kwargs):
+        if timeout is None:
+            timeout = 5.0
+        if clock is None:
+            clock = reactor
+        return _orig_add_timeout(self, timeout, clock, *args, **kwargs)
+    defer.Deferred.addTimeout = _safe_add_timeout
 except Exception:
     pass
 ]])
