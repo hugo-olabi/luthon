@@ -2759,7 +2759,8 @@ if _G.__LUTHON_FN_PARAMS then
 end
 
 local _STD_EXCEPTIONS = {
-  "BaseException", "ValueError", "TypeError", "AssertionError",
+  "BaseException", "SystemExit", "KeyboardInterrupt", "GeneratorExit",
+  "ValueError", "TypeError", "AssertionError",
   "NameError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
   "StopIteration", "ZeroDivisionError", "FileNotFoundError", "IOError", "OSError",
   "ImportError", "ModuleNotFoundError", "Warning", "UserWarning",
@@ -2793,6 +2794,16 @@ for _, cls_name in ipairs(_STD_EXCEPTIONS) do
   _G[cls_name] = exc
   if _G.__LUTHON_FN_PARAMS then
     _G.__LUTHON_FN_PARAMS[exc] = setmetatable({"message"}, _tuple_mt or {})
+  end
+end
+
+if _G.SystemExit then
+  _G.SystemExit.__init__ = function(self, code, ...)
+    local c = (code == nil) and 0 or code
+    self.code = c
+    self.args = setmetatable({c, ...}, _tuple_mt or {})
+    self.message = tostring(c)
+    self.__msg = tostring(c)
   end
 end
 
@@ -3399,19 +3410,41 @@ os.difftime = os.difftime or os.difftime
 os.execute = os.execute or function(cmd) return os.execute(cmd) end
 
 -- sys
-sys.argv = setmetatable({}, _list_mt)
-if arg and type(arg) == "table" then
-  table.insert(sys.argv, arg[0] or "luthon")
-  local n = #arg
-  for i = 1, n do table.insert(sys.argv, arg[i]) end
+local _sys_table = sys or {}
+_sys_table.argv = _sys_table.argv or setmetatable({}, _list_mt)
+_sys_table.path = _sys_table.path or setmetatable({}, _list_mt)
+_sys_table.version = _sys_table.version or "3.14"
+_sys_table.version_info = _sys_table.version_info or setmetatable({3, 14, 0, "final", 0}, _list_mt)
+_sys_table.platform = "linux"
+_sys_table.exit = function(code)
+  code = (code == nil) and 0 or code
+  if SystemExit then error(SystemExit(code), 2) else os.exit(code) end
 end
-sys.path = sys.path or {}
-sys.version = sys.version or "3.14"
-sys.platform = "linux"
-sys.exit = os.exit
-sys.stdout = io.stdout
-sys.stderr = io.stderr
-sys.stdin = io.stdin
+_sys_table.stdout = io.stdout
+_sys_table.stderr = io.stderr
+_sys_table.stdin = io.stdin
+
+if arg and type(arg) == "table" then
+  _sys_table.argv = setmetatable({}, _list_mt)
+  table.insert(_sys_table.argv, arg[0] or "luthon")
+  local n = #arg
+  for i = 1, n do table.insert(_sys_table.argv, arg[i]) end
+end
+
+sys = setmetatable({}, {
+  __index = _sys_table,
+  __newindex = function(t, k, v)
+    _sys_table[k] = v
+    if k == "argv" then
+      pcall(function()
+        local pb = _G.pybridge or package.loaded["pybridge"] or package.loaded["luthon.lua.pybridge"] or package.loaded["src/luthon/lua/pybridge"]
+        if pb and pb.sync_sys_argv then
+          pb.sync_sys_argv(v)
+        end
+      end)
+    end
+  end
+})
 
 -- collections
 collections = {}
