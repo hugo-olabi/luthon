@@ -592,7 +592,7 @@ function _luthon_call_kw(fn, kw_table, ...)
       return args[1]
     end
   end
-  if type(fn) == "table" and rawget(fn, "_py") then
+  if type(fn) == "table" and rawget(fn, "_py") and not rawget(fn, "__instance_mt") then
     local ok_pb, pb = pcall(require, "src/luthon/lua/pybridge")
     if not ok_pb or not pb then ok_pb, pb = pcall(require, "luthon.lua.pybridge") end
     if ok_pb and pb and pb.get_lib then
@@ -618,9 +618,11 @@ function _luthon_call_kw(fn, kw_table, ...)
       if type(kw_table) == "table" and next(kw_table) ~= nil then
         py_kw = libpy.PyDict_New()
         for k, v in pairs(kw_table) do
-          local py_v = pb.lua_to_py(v)
-          libpy.PyDict_SetItemString(py_kw, tostring(k), py_v)
-          libpy.Py_DecRef(py_v)
+          if k ~= "__luthon_kw" then
+            local py_v = pb.lua_to_py(v)
+            libpy.PyDict_SetItemString(py_kw, tostring(k), py_v)
+            libpy.Py_DecRef(py_v)
+          end
         end
       end
       local res = libpy.PyObject_Call(fn._py, tuple, py_kw)
@@ -656,6 +658,9 @@ function _luthon_call_kw(fn, kw_table, ...)
   end
   local args = { ... }
   if kw_table ~= nil and next(kw_table) ~= nil then
+    if not (getmetatable(kw_table) and getmetatable(kw_table).__luthon_kw) and not rawget(kw_table, "__luthon_kw") then
+      rawset(kw_table, "__luthon_kw", true)
+    end
     table.insert(args, kw_table)
   end
   return fn(unpack(args))
@@ -670,7 +675,35 @@ function _luthon_call_starred(fn, args, kw)
   end
 end
 
+function _luthon_extract_kwargs(...)
+  local n = select("#", ...)
+  if n > 0 then
+    local last = select(n, ...)
+    if type(last) == "table" and (rawget(last, "__luthon_kw") or (getmetatable(last) and getmetatable(last).__luthon_kw)) then
+      local kw = {}
+      for k, v in pairs(last) do
+        if k ~= "__luthon_kw" then
+          kw[k] = v
+        end
+      end
+      return setmetatable(kw, _dict_mt or {})
+    end
+  end
+  return setmetatable({}, _dict_mt or {})
+end
+
 function _tuple_pack(...)
+  local n = select("#", ...)
+  if n > 0 then
+    local last = select(n, ...)
+    if type(last) == "table" and (rawget(last, "__luthon_kw") or (getmetatable(last) and getmetatable(last).__luthon_kw)) then
+      local t = {}
+      for i = 1, n - 1 do
+        t[i] = select(i, ...)
+      end
+      return setmetatable(t, _tuple_mt or {})
+    end
+  end
   return setmetatable({...}, _tuple_mt or {})
 end
 
@@ -1207,7 +1240,14 @@ end
 
 local _list_methods = {
   append = function(self, x) table.insert(self, x) end,
-  extend = function(self, other) local n = #other; for i=1,n do table.insert(self, other[i]) end end,
+  extend = function(self, other)
+    local it = iter(other)
+    while true do
+      local v = it()
+      if v == nil then break end
+      table.insert(self, v)
+    end
+  end,
   pop = function(self, idx)
     idx = idx or (#self - 1)
     if idx < 0 then idx = #self + idx end
@@ -1264,15 +1304,17 @@ local _list_methods = {
 }
 local function _list_add(a, b)
   local r = setmetatable({}, _list_mt)
-  if type(a) == "table" then
-    for i = 1, #a do
-      r[#r + 1] = a[i]
-    end
+  local ita = iter(a)
+  while true do
+    local v = ita()
+    if v == nil then break end
+    r[#r + 1] = v
   end
-  if type(b) == "table" then
-    for i = 1, #b do
-      r[#r + 1] = b[i]
-    end
+  local itb = iter(b)
+  while true do
+    local v = itb()
+    if v == nil then break end
+    r[#r + 1] = v
   end
   return r
 end
@@ -1706,6 +1748,31 @@ _str_methods = {
     end
     return res
   end,
+  splitlines = function(s, keepends)
+    local r = setmetatable({}, _list_mt)
+    if s == "" then return r end
+    local pos = 1
+    local len = #s
+    while pos <= len do
+      local nl_start = string.find(s, "[\r\n]", pos)
+      if nl_start then
+        local nl_end = nl_start
+        if string.sub(s, nl_start, nl_start + 1) == "\r\n" then
+          nl_end = nl_start + 1
+        end
+        if keepends then
+          table.insert(r, string.sub(s, pos, nl_end))
+        else
+          table.insert(r, string.sub(s, pos, nl_start - 1))
+        end
+        pos = nl_end + 1
+      else
+        table.insert(r, string.sub(s, pos))
+        break
+      end
+    end
+    return r
+  end,
   partition = function(s, sep)
     if sep == nil or sep == "" then error("ValueError: empty separator") end
     local s_start, s_end = _lua_raw_str_find(s, sep, 1, true)
@@ -1965,6 +2032,17 @@ function make_coroutine(fn, ...)
 end
 
 function iter(t)
+  if t == nil or t == _G._luthon_none or (type(t) == "table" and rawget(t, "__is_none__")) then
+    return function() return nil end
+  end
+  if type(t) == "string" then
+    local i = 0
+    return function()
+      i = i + 1
+      if i <= #t then return string.sub(t, i, i) end
+      return nil
+    end
+  end
   if type(t) == "table" and t.__anext__ then
     return function() return t:__anext__() end
   end
@@ -2008,6 +2086,7 @@ function iter(t)
   if type(t) == "userdata" and io.type(t) == "file" then return t:lines() end
   if type(t) == "table" and t.lines then return t:lines() end
   if type(t) == "function" then return t end
+  if type(t) ~= "table" then return function() return nil end end
   local i = 0
   return function()
     i = i + 1
@@ -2238,9 +2317,26 @@ function issubclass(sub, sup)
     return false
   end
   if sub == sup then return true end
+  if type(sub) == "table" and rawget(sub, "_py") and type(sup) == "table" and rawget(sup, "_py") then
+    local ok_pb, pb = pcall(require, "src/luthon/lua/pybridge")
+    if not ok_pb or not pb then ok_pb, pb = pcall(require, "luthon.lua.pybridge") end
+    if ok_pb and pb and pb.get_lib then
+      local lib = pb.get_lib()
+      local s_py = rawget(sub, "_py")
+      if type(s_py) == "table" and rawget(s_py, "_py") then s_py = rawget(s_py, "_py") end
+      local sup_py = rawget(sup, "_py")
+      if type(sup_py) == "table" and rawget(sup_py, "_py") then sup_py = rawget(sup_py, "_py") end
+      local res = lib.PyObject_IsSubclass(s_py, sup_py)
+      if res == -1 then
+        lib.PyErr_Clear()
+        return false
+      end
+      return res == 1
+    end
+  end
   local c = sub.__base__ or (getmetatable(sub) and getmetatable(sub).__index)
   while c do
-    if c == sup or (sup.__name__ and c.__name__ == sup.__name__) or c.__name == sup.__name then
+    if c == sup or (sup.__name__ and c.__name__ == sup.__name__) or (sup.__name and c.__name and c.__name == sup.__name) then
       return true
     end
     c = c.__base__ or (getmetatable(c) and getmetatable(c).__index)
@@ -2414,7 +2510,27 @@ function map(f,t)
   end
   return r
 end
-function filter(f,t) local r={}; local n=#t; for i=1,n do local v=t[i]; if f(v) then r[#r+1]=v end end; return r end
+function filter(f,t)
+  local r = setmetatable({}, _list_mt)
+  local check = f
+  if check == nil or check == _G._luthon_none or (type(check) == "table" and rawget(check, "__is_none__")) then
+    check = bool
+  end
+  if type(t) == "table" then
+    local n = #t
+    for i = 1, n do
+      local v = t[i]
+      if check(v) then r[#r+1] = v end
+    end
+  elseif type(t) == "function" then
+    while true do
+      local v = t()
+      if v == nil then break end
+      if check(v) then r[#r+1] = v end
+    end
+  end
+  return r
+end
 function any(t) local n=#t; for i=1,n do if t[i] then return true end end; return false end
 function all(t) local n=#t; for i=1,n do if not t[i] then return false end end; return true end
 
@@ -2542,6 +2658,56 @@ function isinstance(val, cls)
     end
     return false
   end
+  if type(val) == "table" and rawget(val, "_py") then
+    local ok_pb, pb = pcall(require, "src/luthon/lua/pybridge")
+    if not ok_pb or not pb then ok_pb, pb = pcall(require, "luthon.lua.pybridge") end
+    if ok_pb and pb and pb.get_lib then
+      local lib = pb.get_lib()
+      local v_py = rawget(val, "_py")
+      if type(v_py) == "table" and rawget(v_py, "_py") then v_py = rawget(v_py, "_py") end
+      if type(cls) == "table" and rawget(cls, "_py") then
+        local c_py = rawget(cls, "_py")
+        if type(c_py) == "table" and rawget(c_py, "_py") then c_py = rawget(c_py, "_py") end
+        local res = lib.PyObject_IsInstance(v_py, c_py)
+        if res == -1 then lib.PyErr_Clear(); return false end
+        return res == 1
+      end
+      local ffi = require("ffi")
+      if cls == "dict" or cls == dict then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyDict_Type)) == 1 end
+      if cls == "list" or cls == list then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyList_Type)) == 1 end
+      if cls == "tuple" or cls == tuple then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyTuple_Type)) == 1 end
+      if cls == "str" or cls == str then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyUnicode_Type)) == 1 end
+      if cls == "int" or cls == int then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyLong_Type)) == 1 end
+      if cls == "float" or cls == float then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyFloat_Type)) == 1 end
+      if cls == "bool" or cls == bool then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyBool_Type)) == 1 end
+      if cls == "bytes" or cls == bytes then return lib.PyObject_IsInstance(v_py, ffi.cast("PyObject*", lib.PyBytes_Type)) == 1 end
+      local target_name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or rawget(cls, "__name") or cls.__name__))
+      if target_name then
+        local c = val.__class__
+        while c do
+          local cname = type(c) == "table" and (rawget(c, "__name__") or rawget(c, "__name") or c.__name__)
+          if cname and cname == target_name then return true end
+          c = rawget(c, "__base__") or c.__base__
+        end
+      end
+    end
+  end
+  if type(cls) == "table" and rawget(cls, "_py") then
+    local ok_pb, pb = pcall(require, "src/luthon/lua/pybridge")
+    if not ok_pb or not pb then ok_pb, pb = pcall(require, "luthon.lua.pybridge") end
+    if ok_pb and pb and pb.get_lib then
+      local lib = pb.get_lib()
+      local c_py = rawget(cls, "_py")
+      if type(c_py) == "table" and rawget(c_py, "_py") then c_py = rawget(c_py, "_py") end
+      local py_val = pb.lua_to_py(val)
+      if py_val ~= nil then
+        local res = lib.PyObject_IsInstance(py_val, c_py)
+        lib.Py_DecRef(py_val)
+        if res == -1 then lib.PyErr_Clear(); return false end
+        return res == 1
+      end
+    end
+  end
   local is_none = (val == nil or val == _G._luthon_none or (type(val) == "table" and rawget(val, "__is_none__") == true))
   if is_none then
     local cls_name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or cls.__name__))
@@ -2574,7 +2740,7 @@ function isinstance(val, cls)
     if cls == "dict" or cls == dict then return true end
     local c = val.__class__ or (getmetatable(val) and getmetatable(val).__index)
     while c do
-      if c == cls or (cls.__name__ and c.__name__ == cls.__name__) or c.__name == cls.__name then
+      if c == cls or (cls.__name__ and c.__name__ == cls.__name__) or (cls.__name and c.__name and c.__name == cls.__name) then
         return true
       end
       c = c.__base__ or (getmetatable(c) and getmetatable(c).__index)
