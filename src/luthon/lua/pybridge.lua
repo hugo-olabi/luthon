@@ -144,6 +144,16 @@ ffi.cdef[[
   PyObject* PyErr_Occurred(void);
   void PyErr_Clear(void);
   void PyErr_Fetch(PyObject **ptype, PyObject **pvalue, PyObject **ptraceback);
+
+  typedef PyObject *(*PyCFunctionWithKeywords)(PyObject *, PyObject *, PyObject *);
+  typedef struct PyMethodDef {
+    const char *ml_name;
+    PyCFunctionWithKeywords ml_meth;
+    int ml_flags;
+    const char *ml_doc;
+  } PyMethodDef;
+  PyObject* PyCFunction_NewEx(PyMethodDef *ml, PyObject *self, PyObject *mod);
+  void PyErr_SetString(PyObject *type, const char *message);
 ]]
 
 local libpy = nil
@@ -605,6 +615,256 @@ make_proxy = function(py_obj)
 end
 pybridge.make_proxy = make_proxy
 
+local py_fn_registry = {}
+local py_fn_counter = 0
+local py_fn_cache = setmetatable({}, { __mode = "k" })
+local py_callback = nil
+
+local function get_py_callback()
+  if py_callback then return py_callback end
+  py_callback = ffi.cast("PyCFunctionWithKeywords", function(self_ptr, args_ptr, kwargs_ptr)
+    local id = tonumber(libpy.PyLong_AsLongLong(self_ptr))
+    local fn = py_fn_registry[id]
+    if not fn then
+      local builtins = libpy.PyImport_ImportModule("builtins")
+      local exc_type = libpy.PyObject_GetAttrString(builtins, "RuntimeError")
+      decref(builtins)
+      libpy.PyErr_SetString(exc_type, "luthon pybridge: callback function not found")
+      decref(exc_type)
+      return nil
+    end
+
+    local sz = args_ptr ~= nil and tonumber(libpy.PyTuple_Size(args_ptr)) or 0
+    local lua_args = {}
+    for i = 0, sz - 1 do
+      local item = libpy.PyTuple_GetItem(args_ptr, i)
+      table.insert(lua_args, py_to_lua(item))
+    end
+
+    if kwargs_ptr ~= nil and tonumber(libpy.PyDict_Size(kwargs_ptr)) > 0 then
+      local kw = py_to_lua(kwargs_ptr, true)
+      if type(kw) == "table" then
+        kw.__luthon_kw = true
+        table.insert(lua_args, kw)
+      end
+    end
+
+    local ok, res = pcall(fn, unpack(lua_args))
+    if not ok then
+      local builtins = libpy.PyImport_ImportModule("builtins")
+      local exc_type = libpy.PyObject_GetAttrString(builtins, "Exception")
+      decref(builtins)
+      libpy.PyErr_SetString(exc_type, tostring(res))
+      decref(exc_type)
+      return nil
+    end
+
+    return lua_to_py(res)
+  end)
+  return py_callback
+end
+
+local function py_fn_from_lua(fn)
+  if py_fn_cache[fn] then
+    libpy.Py_IncRef(py_fn_cache[fn])
+    return py_fn_cache[fn]
+  end
+
+  local cb = get_py_callback()
+  local mdef = ffi.new("PyMethodDef")
+  mdef.ml_name = "luthon_callback"
+  mdef.ml_meth = cb
+  mdef.ml_flags = 3 -- METH_VARARGS | METH_KEYWORDS
+  mdef.ml_doc = nil
+
+  py_fn_counter = py_fn_counter + 1
+  py_fn_registry[py_fn_counter] = fn
+
+  local self_obj = libpy.PyLong_FromLongLong(py_fn_counter)
+  local py_fn = libpy.PyCFunction_NewEx(mdef, self_obj, nil)
+  decref(self_obj)
+
+  py_fn_cache[fn] = py_fn
+  rawset(py_fn_registry, "mdef_" .. tostring(py_fn_counter), mdef)
+
+  return py_fn
+end
+
+local active_patches = {}
+
+local function resolve_lua_target(path)
+  if not path or path == "" then return nil end
+  local sys_modules = _G._luthon_sys_modules
+  local mm = _G._luthon_modules
+  if not sys_modules or not mm then
+    for _, cand in ipairs({"luthon.lua.modules", "src/luthon/lua/modules", "modules", "luthon.modules"}) do
+      if package.loaded[cand] then
+        mm = package.loaded[cand]
+        break
+      end
+    end
+    if not mm then
+      for _, cand in ipairs({"luthon.lua.modules", "src/luthon/lua/modules", "modules", "luthon.modules"}) do
+        local ok, m = pcall(require, cand)
+        if ok and m then mm = m; break end
+      end
+    end
+    sys_modules = (mm and mm.sys_modules) or _G._luthon_sys_modules or {}
+  end
+
+  local parts = {}
+  for part in path:gmatch("[^%.]+") do
+    table.insert(parts, part)
+  end
+  if #parts == 0 then return nil end
+
+  -- Try longest prefix match in sys_modules
+  for i = #parts, 1, -1 do
+    local mod_name = table.concat(parts, ".", 1, i)
+    local cur = sys_modules[mod_name] or (_MODULES and _MODULES[mod_name]) or _G[mod_name]
+    if cur == nil and mm and mm.load then
+      local ok_load, loaded = pcall(mm.load, mod_name)
+      if ok_load and loaded then
+        cur = loaded
+      end
+    end
+    if cur ~= nil then
+      local found = true
+      for j = i + 1, #parts do
+        if type(cur) == "table" and cur[parts[j]] ~= nil then
+          cur = cur[parts[j]]
+        else
+          found = false
+          break
+        end
+      end
+      if found then
+        return cur
+      end
+    end
+  end
+
+  local cur = _G[parts[1]]
+  if cur ~= nil then
+    for j = 2, #parts do
+      if type(cur) == "table" and cur[parts[j]] ~= nil then
+        cur = cur[parts[j]]
+      else
+        return nil
+      end
+    end
+    return cur
+  end
+
+  return nil
+end
+
+local function lua_patch_start(patch_id, target_path, attr, mock_obj)
+  local target_obj = resolve_lua_target(target_path)
+  if target_obj and type(target_obj) == "table" and attr and attr ~= "" then
+    local orig_val = target_obj[attr]
+    active_patches[patch_id] = {
+      target_obj = target_obj,
+      attr = attr,
+      orig_val = orig_val,
+      has_orig = (orig_val ~= nil)
+    }
+    target_obj[attr] = mock_obj
+  end
+  return true
+end
+
+local function lua_patch_stop(patch_id)
+  local entry = active_patches[patch_id]
+  if entry then
+    active_patches[patch_id] = nil
+    if entry.has_orig then
+      entry.target_obj[entry.attr] = entry.orig_val
+    else
+      entry.target_obj[entry.attr] = nil
+    end
+  end
+  return true
+end
+
+local _patch_hook_installed = false
+function pybridge.ensure_patch_hook()
+  if _patch_hook_installed then return end
+  _patch_hook_installed = true
+  local lib = pybridge.get_lib()
+  if not lib then return end
+
+  local py_start = py_fn_from_lua(lua_patch_start)
+  local py_stop = py_fn_from_lua(lua_patch_stop)
+
+  local sys_mod = libpy.PyImport_ImportModule("sys")
+  if sys_mod ~= nil then
+    libpy.PyObject_SetAttrString(sys_mod, "_luthon_patch_start", py_start)
+    libpy.PyObject_SetAttrString(sys_mod, "_luthon_patch_stop", py_stop)
+    decref(sys_mod)
+  end
+  decref(py_start)
+  decref(py_stop)
+
+  libpy.PyRun_SimpleString([[
+try:
+    import sys, unittest.mock, functools
+
+    def _extract_target_path(p):
+        if hasattr(p, 'getter') and hasattr(p.getter, 'args') and p.getter.args:
+            return str(p.getter.args[0])
+        tgt = getattr(p, 'target', None)
+        if tgt is None and hasattr(p, 'getter'):
+            try:
+                tgt = p.getter()
+            except Exception:
+                tgt = None
+        if tgt is not None:
+            mod = getattr(tgt, '__module__', None)
+            name = getattr(tgt, '__qualname__', None) or getattr(tgt, '__name__', None)
+            if mod and name:
+                return f"{mod}.{name}"
+            elif name:
+                return str(name)
+            elif mod:
+                return str(mod)
+        return ""
+
+    if not getattr(unittest.mock._patch, '_luthon_hooked', False):
+        _orig_enter = unittest.mock._patch.__enter__
+        _orig_exit = unittest.mock._patch.__exit__
+
+        def _hooked_enter(self):
+            res = _orig_enter(self)
+            try:
+                handler = getattr(sys, '_luthon_patch_start', None)
+                if handler:
+                    tgt_path = _extract_target_path(self)
+                    attr = str(getattr(self, 'attribute', '') or '')
+                    pid = id(self)
+                    handler(pid, tgt_path, attr, res)
+            except Exception:
+                pass
+            return res
+
+        def _hooked_exit(self, *args):
+            try:
+                handler = getattr(sys, '_luthon_patch_stop', None)
+                if handler:
+                    pid = id(self)
+                    handler(pid)
+            except Exception:
+                pass
+            return _orig_exit(self, *args)
+
+        unittest.mock._patch.__enter__ = _hooked_enter
+        unittest.mock._patch.__exit__ = _hooked_exit
+        unittest.mock._patch._luthon_hooked = True
+except Exception:
+    pass
+]])
+end
+
 -- Convert Lua value to PyObject*
 lua_to_py = function(v, visited)
   pybridge.get_lib()
@@ -816,8 +1076,9 @@ lua_to_py = function(v, visited)
       end
       return dict
     end
-  elseif type(v) == "function" or type(v) == "userdata" then
-    -- When a Lua function or opaque userdata is passed across the bridge to CPython, wrap with None
+  elseif type(v) == "function" then
+    return py_fn_from_lua(v)
+  elseif type(v) == "userdata" then
     libpy.Py_IncRef(none_ptr)
     return none_ptr
   elseif type(v) == "cdata" then
@@ -916,6 +1177,9 @@ function pybridge.import(name)
   pybridge.get_lib()
   if name == "asyncio" or name == "websockets" then
     pybridge.ensure_event_loop()
+  end
+  if name == "unittest.mock" or name == "unittest" or name:find("^unittest%..*") then
+    pcall(pybridge.ensure_patch_hook)
   end
   local mod = libpy.PyImport_ImportModule(name)
   if mod == nil then
