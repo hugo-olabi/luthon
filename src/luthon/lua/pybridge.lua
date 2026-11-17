@@ -10,9 +10,17 @@
       call syntax, string conversion, and length operator.
 --]]
 
+if _G._luthon_pybridge then
+  return _G._luthon_pybridge
+end
+
 local ffi = require("ffi")
 
 local pybridge = {}
+_G._luthon_pybridge = pybridge
+package.loaded["pybridge"] = pybridge
+package.loaded["luthon.lua.pybridge"] = pybridge
+package.loaded["src/luthon/lua/pybridge"] = pybridge
 
 -- Track non-implemented features accessed via PyBridge fallback
 local _nyi_features = {}
@@ -439,10 +447,10 @@ PyProxy.__call = function(self, ...)
   local last_arg = total_args > 0 and args[total_args] or nil
   local last_mt = type(last_arg) == "table" and getmetatable(last_arg) or nil
   local is_kw = false
-  if total_args >= 2 and type(last_arg) == "table" and last_arg ~= _G._luthon_none and not rawget(last_arg, "_py") then
+  if total_args >= 1 and type(last_arg) == "table" and last_arg ~= _G._luthon_none and not rawget(last_arg, "_py") then
     if rawget(last_arg, "__luthon_kw") or (last_mt and last_mt.__luthon_kw) then
       is_kw = true
-    elseif not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__ or last_mt.__set__)) and
+    elseif total_args >= 2 and not (last_mt and (last_mt.__tuple__ or last_mt.__bytes__ or last_mt.__set__)) and
            not rawget(last_arg, "__type") and not rawget(last_arg, "__msg") and
            not rawget(last_arg, "__name") and not rawget(last_arg, "__class__") and
            not rawget(last_arg, "_dict") and not (last_mt and last_mt.__dict__) then
@@ -462,10 +470,12 @@ PyProxy.__call = function(self, ...)
     end
     py_kwargs = libpy.PyDict_New()
     for k, val in pairs(last_arg) do
-      local py_val = lua_to_py(val)
-      if py_val ~= nil then
-        libpy.PyDict_SetItemString(py_kwargs, tostring(k), py_val)
-        decref(py_val)
+      if k ~= "__luthon_kw" then
+        local py_val = lua_to_py(val)
+        if py_val ~= nil then
+          libpy.PyDict_SetItemString(py_kwargs, tostring(k), py_val)
+          decref(py_val)
+        end
       end
     end
     local tuple = libpy.PyTuple_New(pos_count)
@@ -690,6 +700,110 @@ local function py_fn_from_lua(fn)
   return py_fn
 end
 
+local py_file_wrapper_cls = nil
+
+local function get_py_file_wrapper_cls()
+  if py_file_wrapper_cls ~= nil then return py_file_wrapper_cls end
+  pybridge.get_lib()
+  local code = [[
+class _LuthonFileWrapper:
+    def __init__(self, write=None, read=None, readline=None, flush=None, close=None, seek=None, tell=None):
+        self._write_fn = write
+        self._read_fn = read
+        self._readline_fn = readline
+        self._flush_fn = flush
+        self._close_fn = close
+        self._seek_fn = seek
+        self._tell_fn = tell
+        self.closed = False
+    def write(self, data):
+        return self._write_fn(data)
+    def read(self, *args):
+        res = self._read_fn(*args) if self._read_fn else b""
+        if isinstance(res, str):
+            return res.encode('latin1')
+        return res
+    def readline(self, *args):
+        res = self._readline_fn(*args) if self._readline_fn else b""
+        if isinstance(res, str):
+            return res.encode('latin1')
+        return res
+    def flush(self):
+        if self._flush_fn:
+            return self._flush_fn()
+    def close(self):
+        self.closed = True
+        if self._close_fn:
+            return self._close_fn()
+    def seek(self, offset, whence=0):
+        if self._seek_fn:
+            return self._seek_fn(offset, whence)
+        return 0
+    def tell(self):
+        if self._tell_fn:
+            return self._tell_fn()
+        return 0
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.close()
+]]
+  libpy.PyRun_SimpleString(code)
+  local main_mod = libpy.PyImport_ImportModule("__main__")
+  if main_mod ~= nil then
+    py_file_wrapper_cls = libpy.PyObject_GetAttrString(main_mod, "_LuthonFileWrapper")
+    decref(main_mod)
+  end
+  return py_file_wrapper_cls
+end
+
+local function wrap_lua_file(f)
+  local cls = get_py_file_wrapper_cls()
+  if cls == nil then
+    libpy.Py_IncRef(none_ptr)
+    return none_ptr
+  end
+  local write_fn = py_fn_from_lua(function(data)
+    f:write(data)
+    return #data
+  end)
+  local read_fn = py_fn_from_lua(function(size)
+    local s = f:read(size or "*a")
+    return s or ""
+  end)
+  local readline_fn = py_fn_from_lua(function()
+    local s = f:read("*l")
+    if s then return s .. "\n" end
+    return ""
+  end)
+  local flush_fn = py_fn_from_lua(function()
+    pcall(function() f:flush() end)
+  end)
+  local close_fn = py_fn_from_lua(function()
+    pcall(function() f:close() end)
+  end)
+  local seek_fn = py_fn_from_lua(function(offset, whence)
+    local w = whence == 0 and "set" or (whence == 1 and "cur" or "end")
+    local ok, res = pcall(function() return f:seek(w, offset) end)
+    return ok and res or 0
+  end)
+  local tell_fn = py_fn_from_lua(function()
+    local ok, res = pcall(function() return f:seek() end)
+    return ok and res or 0
+  end)
+  local args = libpy.PyTuple_New(7)
+  libpy.PyTuple_SetItem(args, 0, write_fn)
+  libpy.PyTuple_SetItem(args, 1, read_fn)
+  libpy.PyTuple_SetItem(args, 2, readline_fn)
+  libpy.PyTuple_SetItem(args, 3, flush_fn)
+  libpy.PyTuple_SetItem(args, 4, close_fn)
+  libpy.PyTuple_SetItem(args, 5, seek_fn)
+  libpy.PyTuple_SetItem(args, 6, tell_fn)
+  local py_inst = libpy.PyObject_CallObject(cls, args)
+  decref(args)
+  return py_inst
+end
+
 local active_patches = {}
 
 local function resolve_lua_target(path)
@@ -868,7 +982,7 @@ end
 -- Convert Lua value to PyObject*
 lua_to_py = function(v, visited)
   pybridge.get_lib()
-  if v == nil or v == _G._luthon_none or (type(v) == "table" and v.__is_none__) then
+  if v == nil or v == _G._luthon_none or (type(v) == "table" and rawget(v, "__is_none__") == true) then
     libpy.Py_IncRef(none_ptr)
     return none_ptr
   elseif type(v) == "boolean" then
@@ -1030,6 +1144,12 @@ lua_to_py = function(v, visited)
       return py_bio
     end
 
+    if rawget(v, "_file") and (io.type(rawget(v, "_file")) == "file" or io.type(rawget(v, "_file")) == "closed file") then
+      local py_f = wrap_lua_file(rawget(v, "_file"), rawget(v, "name") or rawget(v, "_name"))
+      visited[v] = py_f
+      return py_f
+    end
+
     -- Check if sequential array
     local is_array = true
     local n = #v
@@ -1079,6 +1199,9 @@ lua_to_py = function(v, visited)
   elseif type(v) == "function" then
     return py_fn_from_lua(v)
   elseif type(v) == "userdata" then
+    if io.type(v) == "file" or io.type(v) == "closed file" then
+      return wrap_lua_file(v)
+    end
     libpy.Py_IncRef(none_ptr)
     return none_ptr
   elseif type(v) == "cdata" then
