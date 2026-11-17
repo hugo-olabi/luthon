@@ -323,7 +323,7 @@ class IRLowerer:
             self._fn_counter[node.name] = count
             unique_fn_name = node.name if count == 1 else f"{node.name}_{count}"
             params = [_safe_var(a.arg) for a in node.args.args]
-            if node.args.vararg:
+            if node.args.vararg or node.args.kwarg:
                 params.append("...")
             is_nested = (self._cur_fn is not None and not getattr(self._cur_fn, "is_entry_point", False))
             fn = Function(name=unique_fn_name, params=params)
@@ -359,7 +359,7 @@ class IRLowerer:
             if node.args.kwarg:
                 kwarg_name = _safe_var(node.args.kwarg.arg)
                 t_kw = self._new_tmp()
-                self._emit("MAKE_DICT", [], result=t_kw)
+                self._emit("CALL", ["_luthon_extract_kwargs", "..."], result=t_kw)
                 self._emit("STORE", [kwarg_name, t_kw])
             # initialize cell boxes for captured variables
             for cv in getattr(fn, "cellvars", []):
@@ -623,7 +623,7 @@ class IRLowerer:
                     prev_method_first_arg = getattr(self, "_cur_method_first_arg", None)
                     self._cur_method_first_arg = stmt.args.args[0].arg if stmt.args.args else None
                     params = [_safe_var(a.arg) for a in stmt.args.args]
-                    if stmt.args.vararg:
+                    if stmt.args.vararg or stmt.args.kwarg:
                         params.append("...")
                     fn = Function(name=node.name + "." + fn_subname, params=params)
                     sc = getattr(stmt, "_scope", None)
@@ -655,7 +655,7 @@ class IRLowerer:
                     if stmt.args.kwarg:
                         kwarg_name = _safe_var(stmt.args.kwarg.arg)
                         t_kw = self._new_tmp()
-                        self._emit("MAKE_DICT", [], result=t_kw)
+                        self._emit("CALL", ["_luthon_extract_kwargs", "..."], result=t_kw)
                         self._emit("STORE", [kwarg_name, t_kw])
                     for s2 in stmt.body:
                         self.lower_stmt(s2)
@@ -1453,7 +1453,7 @@ class IRLowerer:
             if node.args.kwarg:
                 kwarg_name = _safe_var(node.args.kwarg.arg)
                 t_kw = self._new_tmp()
-                self._emit("MAKE_DICT", [], result=t_kw)
+                self._emit("CALL", ["_luthon_extract_kwargs", "..."], result=t_kw)
                 self._emit("STORE", [kwarg_name, t_kw])
             body_tmp = self.lower_expr(node.body)
             self._emit("RETURN", [body_tmp])
@@ -1464,6 +1464,11 @@ class IRLowerer:
             # Emit MAKE_FUNCTION that references the nested function
             t = self._new_tmp()
             self._emit("MAKE_FUNCTION", [fn.name], result=t)
+            if node.args and node.args.args:
+                param_names = [f'"{a.arg}"' for a in node.args.args]
+                param_tuple = self._new_tmp()
+                self._emit("MAKE_TUPLE", param_names, result=param_tuple)
+                self._emit("CALL", ["_luthon_reg_fn", t, param_tuple])
             return t
         if isinstance(node, ast.JoinedStr):
             # f-string: concatenate all parts

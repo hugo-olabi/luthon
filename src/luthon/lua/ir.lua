@@ -501,7 +501,7 @@ function IRLowerer:_lower_stmt_impl(node)
     if node.args and node.args.kwarg then
       local kwarg_name = node.args.kwarg.arg
       local t_kw = self:_new_tmp()
-      self:_emit("MAKE_DICT", {}, t_kw)
+      self:_emit("CALL", {"_luthon_extract_kwargs", "..."}, t_kw)
       self:_emit("STORE", {kwarg_name, t_kw})
     end
     -- Unpack default parameter values
@@ -854,7 +854,7 @@ function IRLowerer:_lower_stmt_impl(node)
         if stmt.args and stmt.args.kwarg then
           local kwarg_name = stmt.args.kwarg.arg
           local t_kw = self:_new_tmp()
-          self:_emit("MAKE_DICT", {}, t_kw)
+          self:_emit("CALL", {"_luthon_extract_kwargs", "..."}, t_kw)
           self:_emit("STORE", {kwarg_name, t_kw})
         end
         -- Unpack default parameter values
@@ -1334,12 +1334,17 @@ function IRLowerer:_lower_expr_impl(node)
     local pos_args = {}
     if node.func._type == "Attribute" then
       local is_module = false
-      local root = node.func.value
-      while root._type == "Attribute" do root = root.value end
-      if root._type == "Name" and (BUILTIN_MODULES[root.id] or (self._imported_modules and self._imported_modules[root.id])) then
-        is_module = true
-      end
-      if not is_module and node.func.value._type == "Attribute" then
+      local known_submodules = {
+        ["os.path"] = true, ["urllib.parse"] = true, ["urllib.request"] = true,
+        ["urllib.error"] = true, ["http.client"] = true, ["http.server"] = true,
+        ["collections.abc"] = true, ["ffi.C"] = true, ["math.simd"] = true,
+      }
+      if node.func.value._type == "Name" then
+        local id = node.func.value.id
+        if BUILTIN_MODULES[id] or (self._imported_modules and self._imported_modules[id]) then
+          is_module = true
+        end
+      elseif node.func.value._type == "Attribute" then
         local parts = {}
         local curr = node.func.value
         while curr._type == "Attribute" do
@@ -1349,7 +1354,7 @@ function IRLowerer:_lower_expr_impl(node)
         if curr._type == "Name" then
           table.insert(parts, 1, curr.id)
           local dotted = table.concat(parts, ".")
-          if self._imported_modules and self._imported_modules[dotted] then
+          if known_submodules[dotted] or (self._imported_modules and self._imported_modules[dotted]) then
             is_module = true
           end
         end
@@ -1629,7 +1634,7 @@ function IRLowerer:_lower_expr_impl(node)
     if node.args and node.args.kwarg then
       local kwarg_name = node.args.kwarg.arg
       local t_kw = self:_new_tmp()
-      self:_emit("MAKE_DICT", {}, t_kw)
+      self:_emit("CALL", {"_luthon_extract_kwargs", "..."}, t_kw)
       self:_emit("STORE", {kwarg_name, t_kw})
     end
     local body_tmp = self:lower_expr(node.body)
@@ -1641,6 +1646,15 @@ function IRLowerer:_lower_expr_impl(node)
     -- Emit MAKE_FUNCTION that references the nested function
     local res = self:_new_tmp()
     self:_emit("MAKE_FUNCTION", {fn.name}, res)
+    if node.args and node.args.args and #node.args.args > 0 then
+      local param_names = {}
+      for _, a in ipairs(node.args.args) do
+        table.insert(param_names, '"' .. (a.arg or a) .. '"')
+      end
+      local param_tuple = self:_new_tmp()
+      self:_emit("MAKE_TUPLE", param_names, param_tuple)
+      self:_emit("CALL", {"_luthon_reg_fn", res, param_tuple})
+    end
     return res
   elseif t == "JoinedStr" then
     -- f-string: concatenate all parts using Lua's .. operator.
