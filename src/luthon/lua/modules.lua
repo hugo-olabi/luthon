@@ -15,8 +15,10 @@ local M = {}
 -- sys.modules cache
 ------------------------------------------------------------------------------
 
-local sys_modules = {}
+local sys_modules = _G._luthon_sys_modules or {}
 M.sys_modules = sys_modules
+_G._luthon_sys_modules = sys_modules
+_G._luthon_modules = M
 
 local loading = {}
 
