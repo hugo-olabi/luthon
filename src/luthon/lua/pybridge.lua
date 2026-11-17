@@ -222,14 +222,20 @@ for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
         sys.path.insert(0, local_sp)
 try:
     import inspect
+    class _DummyFrame:
+        def __init__(self):
+            self.f_locals = {}
+            self.f_globals = {}
     _orig_inspect_stack = inspect.stack
     def _safe_inspect_stack(*args, **kwargs):
         try:
             res = _orig_inspect_stack(*args, **kwargs)
+            if res and res[0].function == '_safe_inspect_stack':
+                res = res[1:]
         except (ValueError, IndexError):
             res = []
         while len(res) < 4:
-            res.append(inspect.FrameInfo(None, '<luthon>', 1, '<module>', None, None))
+            res.append(inspect.FrameInfo(_DummyFrame(), '<luthon>', 1, '<module>', ['class Dummy:\n'], 0))
         return res
     inspect.stack = _safe_inspect_stack
 except Exception:
@@ -245,6 +251,18 @@ try:
         return _orig_add_timeout(self, timeout, clock, *args, **kwargs)
     defer.Deferred.addTimeout = _safe_add_timeout
 except Exception:
+    pass
+try:
+    import gi
+    try:
+        gi.require_version('Gtk', '3.0')
+    except (ValueError, AttributeError):
+        pass
+    try:
+        gi.require_version('Gdk', '3.0')
+    except (ValueError, AttributeError):
+        pass
+except (ImportError, Exception):
     pass
 ]])
     end)
