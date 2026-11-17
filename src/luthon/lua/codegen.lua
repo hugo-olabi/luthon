@@ -631,7 +631,20 @@ function M.generate(module, skip_prelude, sourcemap)
   end
 
   -- Run module-level code
-  table.insert(out, "_luthon_module_entry()")
+  table.insert(out, "local _entry_ok, _entry_err = xpcall(_luthon_module_entry, debug.traceback)")
+  table.insert(out, "if not _entry_ok then")
+  table.insert(out, "  if type(_entry_err) == 'table' and (_entry_err.__type == 'SystemExit' or (_entry_err.__class__ and _entry_err.__class__.__name__ == 'SystemExit')) then")
+  table.insert(out, "    local _code = _entry_err.code or (_entry_err.args and _entry_err.args[1]) or 0")
+  table.insert(out, "    if type(_code) == 'string' then io.stderr:write(_code .. '\\n'); os.exit(1) else os.exit(tonumber(_code) or 0) end")
+  table.insert(out, "  elseif tostring(_entry_err):find('SystemExit:%s*0') or tostring(_entry_err):find('SystemExit:%s*nil') then")
+  table.insert(out, "    os.exit(0)")
+  table.insert(out, "  elseif tostring(_entry_err):find('SystemExit:%s*(%d+)') then")
+  table.insert(out, "    local _c = tonumber(tostring(_entry_err):match('SystemExit:%s*(%d+)'))")
+  table.insert(out, "    os.exit(_c or 0)")
+  table.insert(out, "  else")
+  table.insert(out, "    error(_entry_err, 0)")
+  table.insert(out, "  end")
+  table.insert(out, "end")
 
   return table.concat(out, "\n") .. "\n"
 end

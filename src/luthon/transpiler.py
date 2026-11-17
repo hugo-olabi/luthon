@@ -642,7 +642,23 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
             if total_vars > 80:
                 allocate_registers_function(fn)
     has_module_entry = any(getattr(f, "is_entry_point", False) for f in module.functions)
-    entry_call = "_luthon_module_entry()" if has_module_entry else "main()"
+    base_fn = "_luthon_module_entry" if has_module_entry else "main"
+    entry_call = (
+        f"local _entry_ok, _entry_err = xpcall({base_fn}, debug.traceback)\n"
+        "if not _entry_ok then\n"
+        "  if type(_entry_err) == 'table' and (_entry_err.__type == 'SystemExit' or (_entry_err.__class__ and _entry_err.__class__.__name__ == 'SystemExit')) then\n"
+        "    local _code = _entry_err.code or (_entry_err.args and _entry_err.args[1]) or 0\n"
+        "    if type(_code) == 'string' then io.stderr:write(_code .. '\\n'); os.exit(1) else os.exit(tonumber(_code) or 0) end\n"
+        "  elseif tostring(_entry_err):find('SystemExit:%s*0') or tostring(_entry_err):find('SystemExit:%s*nil') then\n"
+        "    os.exit(0)\n"
+        "  elseif tostring(_entry_err):find('SystemExit:%s*(%d+)') then\n"
+        "    local _c = tonumber(tostring(_entry_err):match('SystemExit:%s*(%d+)'))\n"
+        "    os.exit(_c or 0)\n"
+        "  else\n"
+        "    error(_entry_err, 0)\n"
+        "  end\n"
+        "end"
+    )
     module_export = "\nlocal _M = setmetatable({}, {\n  __index = function(t, k) return _G[k] end,\n  __newindex = function(t, k, v) _G[k] = v end,\n})\nreturn _M"
     file_prefix = ""
     from pathlib import Path
