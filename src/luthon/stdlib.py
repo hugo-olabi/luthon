@@ -482,8 +482,14 @@ function __luthon_get(t, i)
     return t[i]
   end
   local val = t[i]
-  if val == nil and type(t) == "table" and _dict_methods[i] ~= nil then
-    return _dict_methods[i]
+  if val == nil and type(t) == "table" then
+    local getitem = t.__getitem__ or (t.__class__ and t.__class__.__getitem__)
+    if type(getitem) == "function" then
+      return getitem(t, i)
+    end
+    if _dict_methods and _dict_methods[i] ~= nil then
+      return _dict_methods[i]
+    end
   end
   if type(val) == "table" and type(val.__get__) == "function" then
     return val:__get__(t, t.__class__)
@@ -706,6 +712,13 @@ function __luthon_set(t, i, v)
   if type(t) == "table" and rawget(t, "_py") then
     t[i] = v
     return
+  end
+  if type(t) == "table" and not rawget(t, "_dict") and not rawget(t, "_list") then
+    local setitem = t.__setitem__ or (t.__class__ and t.__class__.__setitem__)
+    if type(setitem) == "function" then
+      setitem(t, i, v)
+      return
+    end
   end
   i = _luthon_key_repr(i)
   local mt = getmetatable(t)
@@ -2376,7 +2389,7 @@ function super(cls, obj)
         visited[target] = true
         if target[k] ~= nil then
           local m = target[k]
-          if type(m) == "function" then
+          if type(m) == "function" or (type(m) == "table" and (rawget(m, "_py") or (getmetatable(m) and getmetatable(m).__call))) then
             local wrapper = function(first_arg, ...)
               if first_arg == proxy then
                 local arg1 = ...
@@ -2416,6 +2429,12 @@ function isinstance(val, cls)
     return false
   end
   local t = type(val)
+  if t == "function" then
+    if cls == "function" or cls == (types and types.FunctionType) or cls == (types and types.LambdaType) or cls == (types and types.BuiltinFunctionType) then return true end
+    local name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or cls.__name__))
+    if name == "function" or name == "FunctionType" or name == "builtin_function_or_method" or name == "BuiltinFunctionType" then return true end
+    return false
+  end
   if t == "number" then
     if cls == "int" or cls == "float" or cls == int or cls == float then return true end
     local name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or cls.__name__))
@@ -2506,7 +2525,16 @@ function locals()
 end
 
 types = types or {}
+types.FunctionType = { __name__ = "function" }
+types.LambdaType = types.FunctionType
+types.BuiltinFunctionType = { __name__ = "builtin_function_or_method" }
+types.MethodType = { __name__ = "method" }
+types.GeneratorType = { __name__ = "generator" }
+types.CoroutineType = { __name__ = "coroutine" }
 types.ModuleType = types.ModuleType or { __name__ = "ModuleType" }
+types.TracebackType = { __name__ = "traceback" }
+types.FrameType = { __name__ = "frame" }
+types.CodeType = { __name__ = "code" }
 types.MappingProxyType = function(d)
   local proxy = {}
   return setmetatable(proxy, {
@@ -2875,6 +2903,25 @@ os.mkdir = os.mkdir or function(p, mode)
     end
   end
   return 0
+end
+local _urandom_f = nil
+os.urandom = os.urandom or function(n)
+  n = tonumber(n or 0)
+  if n <= 0 then return "" end
+  if not _urandom_f then
+    _urandom_f = io.open("/dev/urandom", "rb")
+  end
+  if _urandom_f then
+    local data = _urandom_f:read(n)
+    if data and #data == n then
+      return data
+    end
+  end
+  local chars = {}
+  for i = 1, n do
+    chars[i] = string.char(math.random(0, 255))
+  end
+  return table.concat(chars)
 end
 os.makedirs = os.makedirs or function(p)
   p = tostring(p or "")
@@ -3818,9 +3865,6 @@ _date_mt.__name__ = "date"
 _date_mt.__class__ = datetime.date
 datetime.date.__name__ = "date"
 
-_timedelta_mt.__name__ = "timedelta"
-_timedelta_mt.__class__ = datetime.timedelta
-
 datetime.timedelta = function(days, seconds, microseconds, milliseconds, minutes, hours, weeks)
   if type(days) == "table" and seconds == nil then
     local kw = days
@@ -3846,6 +3890,12 @@ datetime.timedelta = function(days, seconds, microseconds, milliseconds, minutes
   return setmetatable({days = d, seconds = s, microseconds = us}, _timedelta_mt)
 end
 _luthon_reg_fn(datetime.timedelta, {"days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks"})
+
+_timedelta_mt.__name__ = "timedelta"
+_timedelta_mt.__class__ = datetime.timedelta
+datetime.datetime.timedelta = datetime.timedelta
+datetime.datetime.date = datetime.date
+datetime.datetime.time = datetime.time
 
 -- time
 time = time or {}
@@ -4571,58 +4621,73 @@ do
     return nil
   end
 
-  local function make_hash_obj(data, hex_str)
+  local function make_hash_obj(data, evp_fn, out_len, fallback_fn)
+    local buffer = {}
+    if data ~= nil and data ~= "" then
+      table.insert(buffer, tostring(data))
+    end
     local obj = {
-      _data = data,
-      _hex = hex_str,
-      hexdigest = function(self) return self._hex end,
+      _buffer = buffer,
+      update = function(self, chunk)
+        if chunk ~= nil then
+          table.insert(self._buffer, tostring(chunk))
+        end
+        return self
+      end,
+      hexdigest = function(self)
+        local all_data = table.concat(self._buffer)
+        if libcrypto and evp_fn then
+          local hex = evp_digest(all_data, evp_fn, out_len)
+          if hex then return hex end
+        end
+        return fallback_fn(all_data)
+      end,
       digest = function(self)
+        local hex = self:hexdigest()
         local bytes = {}
-        for i = 1, #self._hex, 2 do
-          table.insert(bytes, string.char(tonumber(self._hex:sub(i, i+1), 16)))
+        for i = 1, #hex, 2 do
+          table.insert(bytes, string.char(tonumber(hex:sub(i, i+1), 16)))
         end
         return table.concat(bytes)
+      end,
+      copy = function(self)
+        local new_obj = make_hash_obj("", evp_fn, out_len, fallback_fn)
+        for _, c in ipairs(self._buffer) do table.insert(new_obj._buffer, c) end
+        return new_obj
       end
     }
-    setmetatable(obj, {__tostring = function(self) return self._hex end})
+    setmetatable(obj, {__tostring = function(self) return self:hexdigest() end})
     return obj
   end
 
   hashlib.md5 = function(data)
-    data = tostring(data or "")
-    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_md5, 16)
-    if real_hex then return make_hash_obj(data, real_hex) end
-    local h = 0
-    for i = 1, #data do h = (h * 31 + data:byte(i)) % 4294967296 end
-    local hex = string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296)
-    return make_hash_obj(data, hex)
+    return make_hash_obj(data, libcrypto and libcrypto.EVP_md5, 16, function(d)
+      local h = 0
+      for i = 1, #d do h = (h * 31 + d:byte(i)) % 4294967296 end
+      return string.format("%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296)
+    end)
   end
 
   hashlib.sha1 = function(data)
-    data = tostring(data or "")
-    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_sha1, 20)
-    if real_hex then return make_hash_obj(data, real_hex) end
-    local h = 0
-    for i = 1, #data do h = (h * 37 + data:byte(i)) % 4294967296 end
-    local hex = string.format("%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
-    return make_hash_obj(data, hex)
+    return make_hash_obj(data, libcrypto and libcrypto.EVP_sha1, 20, function(d)
+      local h = 0
+      for i = 1, #d do h = (h * 37 + d:byte(i)) % 4294967296 end
+      return string.format("%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296)
+    end)
   end
 
   hashlib.sha256 = function(data)
-    data = tostring(data or "")
-    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_sha256, 32)
-    if real_hex then return make_hash_obj(data, real_hex) end
-    local h = 0
-    for i = 1, #data do h = (h * 41 + data:byte(i)) % 4294967296 end
-    local hex = string.format("%08x%08x%08x%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296, h * 1103515245 % 4294967296, h * 12345 % 4294967296, h * 99991 % 4294967296)
-    return make_hash_obj(data, hex)
+    return make_hash_obj(data, libcrypto and libcrypto.EVP_sha256, 32, function(d)
+      local h = 0
+      for i = 1, #d do h = (h * 41 + d:byte(i)) % 4294967296 end
+      return string.format("%08x%08x%08x%08x%08x%08x%08x%08x", h, h * 2654435761 % 4294967296, h * 1566083941 % 4294967296, h * 40503 % 4294967296, h * 1664525 % 4294967296, h * 1103515245 % 4294967296, h * 12345 % 4294967296, h * 99991 % 4294967296)
+    end)
   end
 
   hashlib.sha512 = function(data)
-    data = tostring(data or "")
-    local real_hex = evp_digest(data, libcrypto and libcrypto.EVP_sha512, 64)
-    if real_hex then return make_hash_obj(data, real_hex) end
-    return make_hash_obj(data, hashlib.sha256(data):hexdigest() .. hashlib.sha256(data .. "salt"):hexdigest())
+    return make_hash_obj(data, libcrypto and libcrypto.EVP_sha512, 64, function(d)
+      return hashlib.sha256(d):hexdigest() .. hashlib.sha256(d .. "salt"):hexdigest()
+    end)
   end
 end
 
@@ -5594,11 +5659,21 @@ _socket_mod.inet_ntop = function(family, packed_ip)
   return ffi.string(ptr)
 end
 
+local _socket_gaierror = function(msg)
+  local exc = { __type = "gaierror", __msg = tostring(msg or ""), __class__ = { __name__ = "gaierror" } }
+  return setmetatable(exc, { __tostring = function(e) return "gaierror: " .. e.__msg end })
+end
+_socket_mod.gaierror = _socket_gaierror
+_socket_mod.herror = _socket_gaierror
+_socket_mod.timeout = _G.TimeoutError or OSError
+_socket_mod.error = _G.OSError or OSError
+
 local _py_socket = nil
 setmetatable(_socket_mod, {
   __index = function(t, k)
     if _py_socket == nil then
       local ok, pb = pcall(require, "src/luthon/lua/pybridge")
+      if not ok or not pb then ok, pb = pcall(require, "luthon.lua.pybridge") end
       if ok and pb and pb.is_available() then
         local ok_s, s = pcall(pb.import, "socket")
         if ok_s and s then _py_socket = s end
@@ -6252,6 +6327,9 @@ _MODULES["time"] = time
 _MODULES["datetime"] = datetime
 _MODULES["math"] = math
 _MODULES["string"] = string
+_MODULES["types"] = types
+_MODULES["socket"] = _socket_mod
+_MODULES["hashlib"] = hashlib
 
 -- Phase 39: math.simd runtime module
 local _simd_mod = {}
@@ -6410,13 +6488,6 @@ end
 function _luthon_import(mod_name, full_name)
   if mod_name == "__future__" then return {} end
   if mod_name == "types" and types then return types end
-  if mod_name == "os.path" and os and os.path then return os.path end
-  if mod_name == "datetime" and datetime then return datetime end
-  if mod_name == "os" and os then return os end
-  if mod_name == "sys" and sys then return sys end
-  if mod_name == "time" and time then return time end
-  if mod_name == "math" and math then return math end
-  if mod_name == "string" and string then return string end
 
   -- If full_name is provided (e.g. root = "mypkg", full_name = "mypkg.bar")
   if full_name and full_name ~= mod_name then
@@ -6436,11 +6507,15 @@ function _luthon_import(mod_name, full_name)
   end
 
   if _MODULES and type(_MODULES[mod_name]) == "table" then return _MODULES[mod_name] end
+  if mod_name == "os.path" and os and os.path then return os.path end
   if type(_G[mod_name]) == "table" then return _G[mod_name] end
   local mm = _get_modules_mod()
   if mm and mm.load then
     local ok2, m2 = pcall(mm.load, mod_name)
     if ok2 and type(m2) == "table" then return m2 end
+    if not ok2 and m2 and (tostring(m2):find("Error executing") or tostring(m2):find("Syntax error")) then
+      error(m2, 0)
+    end
   end
   local ok, m = pcall(require, mod_name)
   if ok and type(m) == "table" then return m end
@@ -6469,7 +6544,10 @@ function _luthon_import_from(mod_name, item_name)
   end
   -- Try loading submodule mod_name .. "." .. item_name
   local ok_sub, sub = pcall(_luthon_import, mod_name .. "." .. item_name)
-  if ok_sub and sub ~= nil and sub ~= _G[mod_name] and type(sub) == "table" and next(sub) ~= nil then return sub end
+  if ok_sub and sub ~= nil and sub ~= _G[mod_name] and type(sub) == "table" and (next(sub) ~= nil or rawget(sub, "__name__") or rawget(sub, "_py")) then return sub end
+  if not ok_sub and sub and (tostring(sub):find("Error executing") or tostring(sub):find("Syntax error")) then
+    error(sub, 0)
+  end
   if ok and type(m) == "table" and m[item_name] ~= nil then return m[item_name] end
   if _G[item_name] ~= nil then return _G[item_name] end
   if not ok then error(m, 0) end
