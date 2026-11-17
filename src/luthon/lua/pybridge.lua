@@ -89,6 +89,7 @@ ffi.cdef[[
 
   PyObject* PyLong_FromLongLong(long long v);
   long long PyLong_AsLongLong(PyObject *obj);
+  long PyLong_AsLong(PyObject *obj);
   PyObject* PyFloat_FromDouble(double v);
   double PyFloat_AsDouble(PyObject *obj);
   PyObject* PyUnicode_FromStringAndSize(const char *u, Py_ssize_t size);
@@ -184,6 +185,32 @@ function pybridge.get_lib()
   local env_lib = os.getenv("LUTHON_LIBPYTHON")
   local libs = {}
   if env_lib and env_lib ~= "" then table.insert(libs, env_lib) end
+
+  local venv = os.getenv("VIRTUAL_ENV") or os.getenv("CONDA_PREFIX")
+  if not venv and io.open(".venv/pyvenv.cfg", "r") then
+    venv = ".venv"
+  end
+  if venv then
+    local cfg = io.open(venv .. "/pyvenv.cfg", "r")
+    if cfg then
+      local content = cfg:read("*a")
+      cfg:close()
+      local home_dir = content:match("home%s*=%s*([^\r\n]+)")
+      if home_dir then
+        local base_py = home_dir:match("^(.-)/bin$") or home_dir
+        for _, v in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
+          table.insert(libs, base_py .. "/lib/libpython" .. v .. ".so")
+          table.insert(libs, base_py .. "/lib/libpython" .. v .. ".so.1.0")
+        end
+        table.insert(libs, base_py .. "/lib/libpython3.so")
+      end
+    end
+    for _, v in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
+      table.insert(libs, venv .. "/lib/libpython" .. v .. ".so")
+      table.insert(libs, venv .. "/lib/libpython" .. v .. ".so.1.0")
+    end
+  end
+
   for _, l in ipairs(candidate_libs) do table.insert(libs, l) end
   for _, soname in ipairs(libs) do
     -- Ensure libpython symbols are exported globally for C extensions (RTLD_NOW | RTLD_GLOBAL = 258)
@@ -202,6 +229,25 @@ function pybridge.get_lib()
     pcall(function()
       libpy.PyRun_SimpleString([[
 import sys, os
+try:
+    import site
+except ImportError:
+    site = None
+
+def _add_site_dir(d):
+    if not os.path.isdir(d):
+        return
+    if site and hasattr(site, "addsitedir"):
+        site.addsitedir(d)
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    else:
+        try:
+            sys.path.remove(d)
+            sys.path.insert(0, d)
+        except ValueError:
+            pass
+
 venv = os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX")
 if not venv and os.path.isdir(".venv"):
     venv = os.path.abspath(".venv")
@@ -214,12 +260,15 @@ if venv:
             break
     for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
         sp = os.path.join(venv, "lib", f"python{ver}", "site-packages")
-        if os.path.isdir(sp) and sp not in sys.path:
-            sys.path.insert(0, sp)
+        _add_site_dir(sp)
 for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
     local_sp = os.path.abspath(os.path.join(".", ".venv", "lib", f"python{ver}", "site-packages"))
-    if os.path.isdir(local_sp) and local_sp not in sys.path:
-        sys.path.insert(0, local_sp)
+    _add_site_dir(local_sp)
+pp = os.environ.get("PYTHONPATH")
+if pp:
+    for p in pp.split(os.pathsep):
+        if p and os.path.isdir(p) and p not in sys.path:
+            sys.path.insert(0, p)
 try:
     import inspect
     class _DummyFrame:
@@ -309,13 +358,20 @@ local function check_py_error()
     local ptb = ffi.new("PyObject*[1]")
     libpy.PyErr_Fetch(ptype, pval, ptb)
     local is_stop_iter = false
+    local is_system_exit = false
+    local exc_name = ""
     if ptype[0] ~= nil then
       local name_obj = libpy.PyObject_GetAttrString(ptype[0], "__name__")
       if name_obj ~= nil then
         local sz = ffi.new("Py_ssize_t[1]")
         local s = libpy.PyUnicode_AsUTF8AndSize(name_obj, sz)
-        if s ~= nil and ffi.string(s, sz[0]) == "StopIteration" then
-          is_stop_iter = true
+        if s ~= nil then
+          exc_name = ffi.string(s, sz[0])
+          if exc_name == "StopIteration" then
+            is_stop_iter = true
+          elseif exc_name == "SystemExit" then
+            is_system_exit = true
+          end
         end
         decref(name_obj)
       end
@@ -325,6 +381,40 @@ local function check_py_error()
       decref(pval[0])
       decref(ptb[0])
       return nil
+    end
+    if is_system_exit then
+      local exit_code = 0
+      if pval[0] ~= nil then
+        local code_obj = libpy.PyObject_GetAttrString(pval[0], "code")
+        if code_obj ~= nil then
+          if code_obj == none_ptr then
+            exit_code = 0
+          else
+            local py_long = libpy.PyLong_AsLong(code_obj)
+            if py_long ~= -1 or libpy.PyErr_Occurred() == nil then
+              exit_code = tonumber(py_long)
+            else
+              libpy.PyErr_Clear()
+              local sz = ffi.new("Py_ssize_t[1]")
+              local s = libpy.PyUnicode_AsUTF8AndSize(code_obj, sz)
+              if s ~= nil then
+                exit_code = ffi.string(s, sz[0])
+              else
+                exit_code = 1
+              end
+            end
+          end
+          decref(code_obj)
+        end
+      end
+      decref(ptype[0])
+      decref(pval[0])
+      decref(ptb[0])
+      if _G.SystemExit then
+        error(_G.SystemExit(exit_code), 3)
+      else
+        error({__type = "SystemExit", code = exit_code}, 3)
+      end
     end
     local msg = "Python error"
     if pval[0] ~= nil then
@@ -1369,5 +1459,35 @@ function pybridge.import(name)
   decref(mod)
   return proxy
 end
+
+local function sync_sys_argv(custom_args)
+  pcall(function()
+    local py_sys = pybridge.import("sys")
+    if py_sys then
+      local argv_list = {}
+      local src_args = custom_args or (_G.sys and _G.sys.argv) or _G.arg
+      if src_args and type(src_args) == "table" then
+        if custom_args then
+          for i = 1, #custom_args do
+            table.insert(argv_list, tostring(custom_args[i]))
+          end
+        elseif _G.sys and _G.sys.argv and #_G.sys.argv > 0 then
+          for i = 1, #_G.sys.argv do
+            table.insert(argv_list, tostring(_G.sys.argv[i]))
+          end
+        elseif _G.arg then
+          table.insert(argv_list, _G.arg[0] or "luthon")
+          for i = 1, #_G.arg do
+            table.insert(argv_list, tostring(_G.arg[i]))
+          end
+        end
+      end
+      if #argv_list == 0 then table.insert(argv_list, "luthon") end
+      py_sys.argv = lua_to_py(argv_list)
+    end
+  end)
+end
+pybridge.sync_sys_argv = sync_sys_argv
+sync_sys_argv()
 
 return pybridge
