@@ -550,6 +550,8 @@ function M.generate(module, skip_prelude, sourcemap)
   -- Set up class metatables for __call (constructor emulation)
   for c in pairs(classes) do
     table.insert(out, c .. ".__index = " .. c)
+    table.insert(out, c .. ".__name__ = '" .. c .. "'")
+    table.insert(out, c .. ".__name = '" .. c .. "'")
     local mt_setup = c .. ".__instance_mt = {__index = function(inst, k) " ..
       "if k == '__class__' then return rawget(inst, '__class__') end; " ..
       "local ga = rawget(inst, '__getattribute__') or (rawget(inst, '__class__') and inst.__class__.__getattribute__); " ..
@@ -560,12 +562,14 @@ function M.generate(module, skip_prelude, sourcemap)
       "if type(cv) == 'function' then " ..
       "return function(...) if select(1, ...) == inst then return cv(...) else return cv(inst, ...) end end end; " ..
       "if cv ~= nil then return cv end; " ..
+      "local py = rawget(inst, '_py'); if py ~= nil then local ok, res = pcall(function() return py[k] end); if ok and res ~= nil then return res end end; " ..
       "local g = rawget(inst, '__getattr__') or (rawget(inst, '__class__') and inst.__class__.__getattr__); " ..
       "if type(g) == 'function' then return g(inst, k) end; " ..
       "return nil end, " ..
       "__newindex = function(inst, k, v) " ..
       "local sa = rawget(inst, '__setattr__') or (rawget(inst, '__class__') and inst.__class__.__setattr__); " ..
-      "if type(sa) == 'function' then return sa(inst, k, v) else rawset(inst, k, v) end end, " ..
+      "if type(sa) == 'function' then sa(inst, k, v) else rawset(inst, k, v) end; " ..
+      "local py = rawget(inst, '_py'); if py ~= nil then pcall(function() py[k] = v end) end end, " ..
       "__tostring = function(inst) " ..
       "local s = inst.__str__; if type(s) == 'function' then return s(inst) end; " ..
       "local r = inst.__repr__; if type(r) == 'function' then return r(inst) end; " ..
