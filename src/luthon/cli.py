@@ -314,9 +314,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         if args.code is not None:
+            script_args = ([args.input] if args.input else []) + (args.args or []) + extra
             return run_code(
                 code=args.code,
-                script_args=(args.args or []) + extra,
+                script_args=script_args,
                 use_ir=args.ir,
                 optimize=args.optimize,
                 profile=args.profile,
