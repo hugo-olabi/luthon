@@ -448,6 +448,9 @@ function M.load_via_cpython(name)
     if not ok or not pb then
       ok, pb = pcall(require, "src/luthon/lua/pybridge")
     end
+    if not ok or not pb then
+      ok, pb = pcall(require, "pybridge")
+    end
     if ok and pb and pb.is_available() then
       pybridge_module = pb
     end

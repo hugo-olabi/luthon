@@ -120,7 +120,11 @@ ffi.cdef[[
   extern PyTypeObject PyTuple_Type;
   extern PyTypeObject PyBool_Type;
   extern PyTypeObject PyBytes_Type;
+  extern PyTypeObject PyType_Type;
   extern PyObject _Py_NoneStruct;
+
+  int PyObject_IsInstance(PyObject *inst, PyObject *cls);
+  int PyObject_IsSubclass(PyObject *derived, PyObject *cls);
 
   PyObject* PyBytes_FromStringAndSize(const char *v, Py_ssize_t len);
   char* PyBytes_AsString(PyObject *op);
@@ -163,6 +167,7 @@ ffi.cdef[[
   } PyMethodDef;
   PyObject* PyCFunction_NewEx(PyMethodDef *ml, PyObject *self, PyObject *mod);
   void PyErr_SetString(PyObject *type, const char *message);
+  void PyErr_SetObject(PyObject *type, PyObject *value);
 ]]
 
 local libpy = nil
@@ -189,6 +194,10 @@ function pybridge.get_lib()
   local venv = os.getenv("VIRTUAL_ENV") or os.getenv("CONDA_PREFIX")
   if not venv and io.open(".venv/pyvenv.cfg", "r") then
     venv = ".venv"
+  end
+  local home = os.getenv("HOME") or ""
+  if not venv and home ~= "" and io.open(home .. "/Projects/luthon/.venv/pyvenv.cfg", "r") then
+    venv = home .. "/Projects/luthon/.venv"
   end
   if venv then
     local cfg = io.open(venv .. "/pyvenv.cfg", "r")
@@ -251,6 +260,9 @@ def _add_site_dir(d):
 venv = os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX")
 if not venv and os.path.isdir(".venv"):
     venv = os.path.abspath(".venv")
+home_env = os.environ.get("HOME", "")
+if not venv and home_env and os.path.isdir(os.path.join(home_env, "Projects", "luthon", ".venv")):
+    venv = os.path.join(home_env, "Projects", "luthon", ".venv")
 if venv:
     for py_bin in [os.path.join(venv, "bin", "python"), os.path.join(venv, "bin", "python3")]:
         if os.path.isfile(py_bin):
@@ -529,7 +541,9 @@ PyProxy.__call = function(self, ...)
   local dropped_self = false
   local self_obj = libpy.PyObject_GetAttrString(self._py, "__self__")
   if self_obj ~= nil then
-    if total_args > 0 and type(args[1]) == "table" and rawget(args[1], "_py") == self_obj then
+    local arg1_py = (total_args > 0 and type(args[1]) == "table") and (rawget(args[1], "_py") or (type(rawget(args[1], "_py")) == "table" and rawget(args[1]._py, "_py"))) or nil
+    if type(arg1_py) == "table" and rawget(arg1_py, "_py") then arg1_py = rawget(arg1_py, "_py") end
+    if total_args > 0 and type(args[1]) == "table" and (rawget(args[1], "_py") == self_obj or arg1_py == self_obj) then
       table.remove(args, 1)
       total_args = total_args - 1
       dropped_self = true
@@ -537,8 +551,31 @@ PyProxy.__call = function(self, ...)
     decref(self_obj)
   else
     libpy.PyErr_Clear()
+    if total_args >= 2 then
+      local arg1_py = lua_to_py(args[1])
+      if arg1_py ~= nil then
+        local t1 = libpy.PyObject_Type(arg1_py)
+        local is_type = (libpy.PyType_IsSubtype(t1, libpy.PyType_Type) ~= 0)
+        decref(t1)
+        if is_type then
+          local arg2_py = lua_to_py(args[2])
+          if arg2_py ~= nil then
+            if libpy.PyObject_IsInstance(arg2_py, arg1_py) == 1 then
+              table.remove(args, 1)
+              total_args = total_args - 1
+              dropped_self = true
+            end
+            decref(arg2_py)
+          else
+            libpy.PyErr_Clear()
+          end
+        end
+        decref(arg1_py)
+      else
+        libpy.PyErr_Clear()
+      end
+    end
   end
-  -- If calling exec() with only 1 argument from LuaJIT, CPython's PyEval_GetGlobals()
   -- fails because there is no Python execution frame on the C call stack.
   -- Provide default empty globals dict if calling exec with 1 argument.
   local py_name = nil
@@ -779,20 +816,47 @@ local function get_py_callback()
       table.insert(lua_args, py_to_lua(item))
     end
 
+    local kw = nil
     if kwargs_ptr ~= nil and tonumber(libpy.PyDict_Size(kwargs_ptr)) > 0 then
-      local kw = py_to_lua(kwargs_ptr, true)
-      if type(kw) == "table" then
-        kw.__luthon_kw = true
-        table.insert(lua_args, kw)
-      end
+      kw = py_to_lua(kwargs_ptr, true)
     end
 
-    local ok, res = pcall(fn, unpack(lua_args))
+    local ok, res
+    if kw ~= nil and type(kw) == "table" and _G._luthon_call_kw then
+      ok, res = pcall(_G._luthon_call_kw, fn, kw, unpack(lua_args))
+    else
+      ok, res = pcall(fn, unpack(lua_args))
+    end
+
     if not ok then
       local builtins = libpy.PyImport_ImportModule("builtins")
-      local exc_type = libpy.PyObject_GetAttrString(builtins, "Exception")
+      local exc_type_name = "Exception"
+      local exit_code = nil
+      if type(res) == "table" and (res.__type == "SystemExit" or (res.__class__ and res.__class__.__name__ == "SystemExit") or res.code ~= nil) then
+        exc_type_name = "SystemExit"
+        exit_code = res.code or (res.args and res.args[1]) or 0
+      elseif type(res) == "string" and (res:find("SystemExit") or res:find("SystemExit:%s*%d+")) then
+        exc_type_name = "SystemExit"
+        exit_code = tonumber(res:match("SystemExit:%s*(%d+)")) or 0
+      end
+
+      local exc_type = libpy.PyObject_GetAttrString(builtins, exc_type_name)
       decref(builtins)
-      libpy.PyErr_SetString(exc_type, tostring(res))
+      if exc_type_name == "SystemExit" then
+        local code_py = lua_to_py(exit_code or 0)
+        local args = libpy.PyTuple_New(1)
+        libpy.PyTuple_SetItem(args, 0, code_py)
+        local exc_inst = libpy.PyObject_CallObject(exc_type, args)
+        decref(args)
+        if exc_inst ~= nil then
+          libpy.PyErr_SetObject(exc_type, exc_inst)
+          decref(exc_inst)
+        else
+          libpy.PyErr_SetString(exc_type, tostring(exit_code or 0))
+        end
+      else
+        libpy.PyErr_SetString(exc_type, tostring(res))
+      end
       decref(exc_type)
       return nil
     end
@@ -883,6 +947,26 @@ class _LuthonFileWrapper:
     decref(main_mod)
   end
   return py_file_wrapper_cls
+end
+
+local py_wrap_method_fn = nil
+
+local function get_py_wrap_method_fn()
+  if py_wrap_method_fn ~= nil then return py_wrap_method_fn end
+  pybridge.get_lib()
+  local code = [[
+def _luthon_wrap_method(fn):
+    def method(self, *args, **kwargs):
+        return fn(self, *args, **kwargs)
+    return method
+]]
+  libpy.PyRun_SimpleString(code)
+  local main_mod = libpy.PyImport_ImportModule("__main__")
+  if main_mod ~= nil then
+    py_wrap_method_fn = libpy.PyObject_GetAttrString(main_mod, "_luthon_wrap_method")
+    decref(main_mod)
+  end
+  return py_wrap_method_fn
 end
 
 local function wrap_lua_file(f)
@@ -1130,8 +1214,12 @@ lua_to_py = function(v, visited)
     return libpy.PyBytes_FromStringAndSize(v, #v)
   elseif type(v) == "table" then
     if rawget(v, "_py") then
-      libpy.Py_IncRef(rawget(v, "_py"))
-      return rawget(v, "_py")
+      local p = rawget(v, "_py")
+      if type(p) == "table" and rawget(p, "_py") then
+        p = rawget(p, "_py")
+      end
+      libpy.Py_IncRef(p)
+      return p
     end
     if rawget(v, "_p") and type(rawget(v, "_p")) == "string" and rawget(v, "is_absolute") then
       local py_path_mod = libpy.PyImport_ImportModule("pathlib")
@@ -1158,9 +1246,9 @@ lua_to_py = function(v, visited)
     end
 
     -- Check if this is a Luthon class
-    local is_class = (rawget(v, "__class__") == nil and (rawget(v, "__instance_mt") ~= nil or rawget(v, "__index") == v) and type(rawget(v, "__name__")) == "string")
+    local is_class = (rawget(v, "__class__") == nil and (rawget(v, "__instance_mt") ~= nil or rawget(v, "__index") == v) and type(rawget(v, "__name__") or rawget(v, "__name")) == "string")
     if is_class then
-      local cls_name = rawget(v, "__name__") or "CustomClass"
+      local cls_name = rawget(v, "__name__") or rawget(v, "__name") or "CustomClass"
       local builtins_mod = libpy.PyImport_ImportModule("builtins")
       if builtins_mod ~= nil then
         local builtin_cls = libpy.PyObject_GetAttrString(builtins_mod, cls_name)
@@ -1173,7 +1261,7 @@ lua_to_py = function(v, visited)
       end
       local dotted_name = cls_name:find("%.") and cls_name or ("_luthon." .. cls_name)
       local base_cls = rawget(v, "__base__")
-      local is_exc = (cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") or cls_name:match("Warning$") or (type(base_cls) == "table" and tostring(base_cls.__name__):match("Exception|Error|Failure|Warning")))
+      local is_exc = (cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") or cls_name:match("Warning$") or (type(base_cls) == "table" and tostring(base_cls.__name__ or base_cls.__name):match("Exception|Error|Failure|Warning")))
       local py_base = nil
       if base_cls ~= nil and base_cls ~= _G.object then
         py_base = lua_to_py(base_cls, visited)
@@ -1193,6 +1281,29 @@ lua_to_py = function(v, visited)
           bases_tuple = libpy.PyTuple_New(0)
         end
         local empty_dict = libpy.PyDict_New()
+        local wrap_fn = get_py_wrap_method_fn()
+        for m_name, m_val in pairs(v) do
+          if type(m_val) == "function" and type(m_name) == "string" and not m_name:match("^__instance") then
+            pcall(function()
+              local py_fn = py_fn_from_lua(m_val)
+              if py_fn then
+                local wrapped = nil
+                if wrap_fn then
+                  local args = libpy.PyTuple_New(1)
+                  libpy.PyTuple_SetItem(args, 0, py_fn)
+                  wrapped = libpy.PyObject_CallObject(wrap_fn, args)
+                  decref(args)
+                else
+                  wrapped = py_fn
+                end
+                if wrapped then
+                  libpy.PyDict_SetItemString(empty_dict, m_name, wrapped)
+                  decref(wrapped)
+                end
+              end
+            end)
+          end
+        end
         local args = libpy.PyTuple_New(3)
         libpy.PyTuple_SetItem(args, 0, name_py)
         libpy.PyTuple_SetItem(args, 1, bases_tuple)
@@ -1211,8 +1322,8 @@ lua_to_py = function(v, visited)
 
     -- Check if this is an instance of a Luthon class
     local inst_class = rawget(v, "__class__")
-    if inst_class and type(inst_class) == "table" and type(rawget(inst_class, "__name__")) == "string" then
-      local cls_name = rawget(inst_class, "__name__")
+    if inst_class and type(inst_class) == "table" and type(rawget(inst_class, "__name__") or rawget(inst_class, "__name")) == "string" then
+      local cls_name = rawget(inst_class, "__name__") or rawget(inst_class, "__name")
       if cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") then
         local py_cls = lua_to_py(inst_class, visited)
         local msg = v.message or v.msg or (v.args and v.args[1]) or tostring(v)
@@ -1222,8 +1333,57 @@ lua_to_py = function(v, visited)
         local exc_inst = libpy.PyObject_CallObject(py_cls, args)
         decref(args)
         if exc_inst then
+          libpy.Py_IncRef(exc_inst)
+          local gc_exc = ffi.gc(exc_inst, function(p)
+            if libpy and libpy.Py_IsInitialized() ~= 0 then
+              libpy.Py_DecRef(p)
+            end
+          end)
           visited[v] = exc_inst
+          rawset(v, "_py", gc_exc)
           return exc_inst
+        end
+      else
+        local py_cls = lua_to_py(inst_class, visited)
+        if py_cls and py_cls ~= none_ptr then
+          local builtins_mod = libpy.PyImport_ImportModule("builtins")
+          local object_cls = libpy.PyObject_GetAttrString(builtins_mod, "object")
+          decref(builtins_mod)
+          local new_fn = object_cls and libpy.PyObject_GetAttrString(object_cls, "__new__")
+          if object_cls then decref(object_cls) end
+          local py_inst = nil
+          if new_fn then
+            local args = libpy.PyTuple_New(1)
+            libpy.Py_IncRef(py_cls)
+            libpy.PyTuple_SetItem(args, 0, py_cls)
+            py_inst = libpy.PyObject_CallObject(new_fn, args)
+            decref(args)
+            decref(new_fn)
+            if py_inst == nil then libpy.PyErr_Clear() end
+          end
+          if py_inst then
+            for k, val in pairs(v) do
+              if type(k) == "string" and not k:match("^__") and k ~= "_py" then
+                pcall(function()
+                  local py_val = lua_to_py(val, visited)
+                  if py_val then
+                    libpy.PyObject_SetAttrString(py_inst, k, py_val)
+                    decref(py_val)
+                  end
+                end)
+              end
+            end
+            libpy.Py_IncRef(py_inst)
+            local gc_py = ffi.gc(py_inst, function(p)
+              if libpy and libpy.Py_IsInitialized() ~= 0 then
+                libpy.Py_DecRef(p)
+              end
+            end)
+            local proxy = setmetatable({_py = gc_py}, PyProxy)
+            rawset(v, "_py", proxy)
+            visited[v] = py_inst
+            return py_inst
+          end
         end
       end
     end
@@ -1278,7 +1438,9 @@ lua_to_py = function(v, visited)
       return py_f
     end
 
-    -- Check if sequential array
+    -- Check if list or sequential array
+    local mt = getmetatable(v)
+    local is_list_obj = (mt and (mt == _G._list_mt or rawget(mt, "__index") == _G._list_methods)) or rawget(v, "_list")
     local is_array = true
     local n = #v
     if n > 0 then
@@ -1289,10 +1451,10 @@ lua_to_py = function(v, visited)
         end
       end
     else
-      is_array = (next(v) == nil)
+      is_array = is_list_obj or (next(v) == nil and is_list_obj)
     end
 
-    if is_array and n > 0 then
+    if is_list_obj or (is_array and n > 0) then
       local list = libpy.PyList_New(n)
       visited[v] = list
       for i = 1, n do
