@@ -368,11 +368,13 @@ local _dict_methods = {
   get = function(self, k, default)
     local v = rawget(self, k)
     if v ~= nil then return v end
+    if default == nil then return _G._luthon_none end
     return default
   end,
   setdefault = function(self, k, default)
     local v = rawget(self, k)
     if v ~= nil then return v end
+    if default == nil then default = _G._luthon_none end
     rawset(self, k, default)
     return default
   end,
@@ -383,14 +385,18 @@ local _dict_methods = {
       return v
     end
     if default ~= nil then return default end
-    error("KeyError: " .. tostring(k))
+    local ke = _G.KeyError or KeyError
+    if ke then error(ke(tostring(k)), 0) end
+    error("KeyError: " .. tostring(k), 0)
   end,
   popitem = function(self)
     for k, v in pairs(self) do
       rawset(self, k, nil)
       return {k, v}
     end
-    error("KeyError: popitem(): dictionary is empty")
+    local ke = _G.KeyError or KeyError
+    if ke then error(ke("popitem(): dictionary is empty"), 0) end
+    error("KeyError: popitem(): dictionary is empty", 0)
   end,
   keys = function(self)
     local r = setmetatable({}, _list_mt)
@@ -405,6 +411,17 @@ local _dict_methods = {
   items = function(self)
     local r = setmetatable({}, _list_mt)
     for k, v in pairs(self) do table.insert(r, {k, v}) end
+    return r
+  end,
+  update = function(self, other)
+    return _dict_update(self, other)
+  end,
+  clear = function(self)
+    for k in pairs(self) do rawset(self, k, nil) end
+  end,
+  copy = function(self)
+    local r = setmetatable({}, _dict_mt)
+    for k, v in pairs(self) do r[k] = v end
     return r
   end,
 }
@@ -475,11 +492,49 @@ function __luthon_get(t, i)
   end
   local mt = getmetatable(t)
   if type(t) == "table" and (rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt)))) then
-    return t[i]
+    local v = rawget(t, i)
+    if v == nil then
+      if _dict_methods and _dict_methods[i] ~= nil then
+        return _dict_methods[i]
+      end
+      local ke = _G.KeyError or KeyError
+      if ke then error(ke(tostring(i)), 0) end
+      error("KeyError: " .. tostring(i), 0)
+    end
+    return v
   end
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
     return t[i]
+  end
+  local raw_val = type(t) == "table" and rawget(t, i) or nil
+  if raw_val ~= nil then
+    if type(raw_val) == "table" and rawget(raw_val, "_py") then
+      local pb = _G._luthon_pybridge
+      if not pb then
+        local ok, pbmod = pcall(require, "pybridge")
+        if not ok or not pbmod or not pbmod.get_lib then ok, pbmod = pcall(require, "luthon.lua.pybridge") end
+        if not ok or not pbmod or not pbmod.get_lib then ok, pbmod = pcall(require, "src/luthon/lua/pybridge") end
+        if ok and pbmod and pbmod.get_lib then pb = pbmod end
+      end
+      if pb and pb.get_lib then
+        local libpy = pb.get_lib()
+        local self_obj = libpy.PyObject_GetAttrString(raw_val._py, "__self__")
+        if self_obj ~= nil then
+          libpy.Py_DecRef(self_obj)
+          return function(self_arg, ...)
+            if self_arg == t then
+              return raw_val(...)
+            else
+              return raw_val(self_arg, ...)
+            end
+          end
+        else
+          libpy.PyErr_Clear()
+        end
+      end
+    end
+    return raw_val
   end
   local val = t[i]
   if val == nil and type(t) == "table" then
@@ -499,8 +554,14 @@ end
 
 function _dict_update(target, src)
   if type(target) == "table" and type(src) == "table" then
-    for k, v in pairs(src) do
-      target[k] = v
+    if #src > 0 and type(src[1]) == "table" and src[1][1] ~= nil then
+      for _, kv in ipairs(src) do
+        target[kv[1]] = kv[2]
+      end
+    else
+      for k, v in pairs(src) do
+        target[k] = v
+      end
     end
   end
   return target
@@ -626,7 +687,7 @@ end
 
 function _luthon_with_enter(mgr)
   if mgr == nil then return nil end
-  local enter = type(mgr) == "table" and (mgr.__enter__ or mgr.__aenter__ or mgr.enter)
+  local enter = (type(mgr) == "table" or type(mgr) == "userdata") and (mgr.__enter__ or mgr.__aenter__ or mgr.enter)
   if _is_callable(enter) then
     return enter(mgr)
   end
@@ -635,7 +696,11 @@ end
 
 function _luthon_with_exit(mgr, exc)
   if mgr == nil then return false end
-  local exit_fn = type(mgr) == "table" and (mgr.__exit__ or mgr.__aexit__ or mgr.exit)
+  local exit_fn = (type(mgr) == "table" or type(mgr) == "userdata") and (mgr.__exit__ or mgr.__aexit__ or mgr.exit)
+  if not exit_fn and type(mgr) == "userdata" and io.type(mgr) == "file" then
+    pcall(function() mgr:close() end)
+    return false
+  end
   if _is_callable(exit_fn) then
     if exc ~= nil then
       local exc_type = (type(exc) == "table" and (exc.__class__ or exc)) or "Exception"
@@ -667,7 +732,8 @@ function _luthon_exc_match(exc, cls)
     local str_exc = tostring(exc)
     if str_exc:find(tname, 1, true) then return true end
     if (tname == "ImportError" or cls == ImportError) and str_exc:find("ModuleNotFoundError", 1, true) then return true end
-    if (tname == "OSError" or cls == OSError) and (str_exc:find("IOError", 1, true) or str_exc:find("FileNotFoundError", 1, true)) then return true end
+    if (tname == "OSError" or cls == OSError) and (str_exc:find("IOError", 1, true) or str_exc:find("FileNotFoundError", 1, true) or str_exc:find("No such file", 1, true) or str_exc:find("cannot create temp file", 1, true)) then return true end
+    if (tname == "FileNotFoundError" or cls == FileNotFoundError) and str_exc:find("No such file", 1, true) then return true end
     return false
   end
   if exc.__type == tname or exc.__name == tname or exc.__name__ == tname then return true end
@@ -723,6 +789,7 @@ function __luthon_set(t, i, v)
   i = _luthon_key_repr(i)
   local mt = getmetatable(t)
   if type(t) == "table" and (rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt)))) then
+    if v == nil then v = _G._luthon_none end
     t[i] = v
     return
   end
@@ -731,6 +798,16 @@ function __luthon_set(t, i, v)
     t[i] = v
   else
     t[i] = v
+  end
+end
+
+function __luthon_delitem(t, k)
+  if type(t) == "table" then
+    local delitem = t.__delitem__ or (t.__class__ and t.__class__.__delitem__)
+    if type(delitem) == "function" then
+      return delitem(t, k)
+    end
+    t[k] = nil
   end
 end
 
@@ -817,16 +894,25 @@ function _luthon_add(a, b)
 end
 
 function _luthon_cmp(op, a, b)
-  local a_is_none = (a == nil) or (a == _G._luthon_none) or (type(a) == "table" and a.__is_none__)
-  local b_is_none = (b == nil) or (b == _G._luthon_none) or (type(b) == "table" and b.__is_none__)
+  if op == "is" then
+    local a_is_none = (a == nil) or (a == _G._luthon_none) or (type(a) == "table" and rawget(a, "__is_none__") == true)
+    local b_is_none = (b == nil) or (b == _G._luthon_none) or (type(b) == "table" and rawget(b, "__is_none__") == true)
+    if a_is_none and b_is_none then return true end
+    if a_is_none or b_is_none then return false end
+    return rawequal(a, b)
+  elseif op == "isnot" then
+    return not _luthon_cmp("is", a, b)
+  end
+  local a_is_none = (a == nil) or (a == _G._luthon_none) or (type(a) == "table" and rawget(a, "__is_none__") == true)
+  local b_is_none = (b == nil) or (b == _G._luthon_none) or (type(b) == "table" and rawget(b, "__is_none__") == true)
   if a_is_none or b_is_none then
     if a_is_none and b_is_none then
-      if op == "==" or op == "eq" or op == "is" then return true end
-      if op == "~=" or op == "ne" or op == "!=" or op == "isnot" then return false end
+      if op == "==" or op == "eq" then return true end
+      if op == "~=" or op == "ne" or op == "!=" then return false end
       return false
     else
-      if op == "==" or op == "eq" or op == "is" then return false end
-      if op == "~=" or op == "ne" or op == "!=" or op == "isnot" then return true end
+      if op == "==" or op == "eq" then return false end
+      if op == "~=" or op == "ne" or op == "!=" then return true end
       return false
     end
   end
@@ -908,32 +994,41 @@ function _luthon_cmp(op, a, b)
         return not _luthon_cmp("==", a, b)
       end
     end
+    local is_a_list = (mta and (mta.__list__ or mta.__tuple__)) or rawget(a, "_list")
+    local is_b_list = (mtb and (mtb.__list__ or mtb.__tuple__)) or rawget(b, "_list")
     local na, nb = #a, #b
-    if op == "==" or op == "eq" then
-      if na ~= nb then return false end
-      for i = 1, na do
-        if not _luthon_cmp("==", a[i], b[i]) then return false end
+    if is_a_list or is_b_list or na > 0 or nb > 0 then
+      if op == "==" or op == "eq" then
+        if na ~= nb then return false end
+        for i = 1, na do
+          if not _luthon_cmp("==", a[i], b[i]) then return false end
+        end
+        return true
       end
-      return true
-    end
-    if op == "~=" or op == "ne" or op == "!=" then
-      return not _luthon_cmp("==", a, b)
-    end
-    local min_n = math.min(na, nb)
-    for i = 1, min_n do
-      local va, vb = a[i], b[i]
-      if not _luthon_cmp("==", va, vb) then
-        if op == "<" or op == "lt" or op == "<=" or op == "le" then
-          return _luthon_cmp("<", va, vb)
-        else
-          return _luthon_cmp(">", va, vb)
+      if op == "~=" or op == "ne" or op == "!=" then
+        return not _luthon_cmp("==", a, b)
+      end
+      local min_n = math.min(na, nb)
+      for i = 1, min_n do
+        local va, vb = a[i], b[i]
+        if not _luthon_cmp("==", va, vb) then
+          if op == "<" or op == "lt" or op == "<=" or op == "le" then
+            return _luthon_cmp("<", va, vb)
+          else
+            return _luthon_cmp(">", va, vb)
+          end
         end
       end
+      if op == "<" or op == "lt" then return na < nb end
+      if op == "<=" or op == "le" then return na <= nb end
+      if op == ">" or op == "gt" then return na > nb end
+      if op == ">=" or op == "ge" then return na >= nb end
     end
-    if op == "<" or op == "lt" then return na < nb end
-    if op == "<=" or op == "le" then return na <= nb end
-    if op == ">" or op == "gt" then return na > nb end
-    if op == ">=" or op == "ge" then return na >= nb end
+    if op == "==" or op == "eq" then
+      return rawequal(a, b)
+    elseif op == "~=" or op == "ne" or op == "!=" then
+      return not rawequal(a, b)
+    end
   end
   if type(a) == "table" then
     local mta = getmetatable(a)
@@ -1428,11 +1523,13 @@ local _dict_methods = {
   get = function(self, k, default)
     local v = rawget(self, k)
     if v ~= nil then return v end
+    if default == nil then return _G._luthon_none end
     return default
   end,
   setdefault = function(self, k, default)
     local v = rawget(self, k)
     if v ~= nil then return v end
+    if default == nil then default = _G._luthon_none end
     rawset(self, k, default)
     return default
   end,
@@ -1443,14 +1540,18 @@ local _dict_methods = {
       return v
     end
     if default ~= nil then return default end
-    error("KeyError: " .. tostring(k))
+    local ke = _G.KeyError or KeyError
+    if ke then error(ke(tostring(k)), 0) end
+    error("KeyError: " .. tostring(k), 0)
   end,
   popitem = function(self)
     for k, v in pairs(self) do
       rawset(self, k, nil)
       return {k, v}
     end
-    error("KeyError: popitem(): dictionary is empty")
+    local ke = _G.KeyError or KeyError
+    if ke then error(ke("popitem(): dictionary is empty"), 0) end
+    error("KeyError: popitem(): dictionary is empty", 0)
   end,
   keys = function(self)
     local r = setmetatable({}, _list_mt)
@@ -1465,6 +1566,17 @@ local _dict_methods = {
   items = function(self)
     local r = setmetatable({}, _list_mt)
     for k, v in pairs(self) do table.insert(r, {k, v}) end
+    return r
+  end,
+  update = function(self, other)
+    return _dict_update(self, other)
+  end,
+  clear = function(self)
+    for k in pairs(self) do rawset(self, k, nil) end
+  end,
+  copy = function(self)
+    local r = setmetatable({}, _dict_mt)
+    for k, v in pairs(self) do r[k] = v end
     return r
   end,
 }
@@ -1909,7 +2021,7 @@ function unpack_list(t)
 end
 function list_repeat(t, n) local r={}; for i=1,n do for _,v in ipairs(t) do r[#r+1]=v end end; return r end
 local _raw_str = function(x)
-  if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return "None" end
+  if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return "None" end
   return tostring(x or "")
 end
 local _raw_int = function(x, base)
@@ -1948,7 +2060,7 @@ local _raw_float = function(x)
 end
 function abs(x) return math.abs(x) end
 function repr(x)
-  if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return "None" end
+  if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return "None" end
   if type(x) == "string" then
     return string.format("%q", x)
   elseif type(x) == "boolean" then
@@ -1982,7 +2094,7 @@ function repr(x)
   return tostring(x)
 end
 local _raw_bool = function(x)
-  if x == nil or x == false or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return false end
+  if x == nil or x == false or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return false end
   if type(x) == "number" then return x ~= 0 end
   if type(x) == "string" then return #x > 0 end
   if type(x) == "table" then
@@ -2033,7 +2145,7 @@ _luthon_type = _create_builtin_type("type", function(...)
   local n = select("#", ...)
   if n == 1 then
     local x = select(1, ...)
-    if x == nil or x == _G._luthon_none or (type(x) == "table" and x.__is_none__) then return _builtin_types["NoneType"] end
+    if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return _builtin_types["NoneType"] end
     local lt = type(x)
     if lt == "number" then
       if math.floor(x) == x and not (x == 1/0 or x == -1/0) then
@@ -2358,13 +2470,16 @@ function property(fget, fset, fdel)
   prop.__delete__ = function(self, obj)
     if self.fdel then self.fdel(obj) end
   end
-  prop.setter = function(f)
+  prop.setter = function(self_or_f, maybe_f)
+    local f = (maybe_f ~= nil or self_or_f == prop) and maybe_f or self_or_f
     return property(prop.fget, f, prop.fdel)
   end
-  prop.deleter = function(f)
+  prop.deleter = function(self_or_f, maybe_f)
+    local f = (maybe_f ~= nil or self_or_f == prop) and maybe_f or self_or_f
     return property(prop.fget, prop.fset, f)
   end
-  prop.getter = function(f)
+  prop.getter = function(self_or_f, maybe_f)
+    local f = (maybe_f ~= nil or self_or_f == prop) and maybe_f or self_or_f
     return property(f, prop.fset, prop.fdel)
   end
   return prop
@@ -2421,10 +2536,18 @@ function super(cls, obj)
 end
 
 function isinstance(val, cls)
-  if val == nil or cls == nil then return false end
+  if cls == nil then return false end
   if type(cls) == "table" and (cls.__tuple__ or (getmetatable(cls) and getmetatable(cls).__tuple) or (rawget(cls, 1) and rawget(cls, "__name__") == nil)) then
     for i = 1, #cls do
       if isinstance(val, cls[i]) then return true end
+    end
+    return false
+  end
+  local is_none = (val == nil or val == _G._luthon_none or (type(val) == "table" and rawget(val, "__is_none__") == true))
+  if is_none then
+    local cls_name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or cls.__name__))
+    if cls_name == "NoneType" or cls == (_builtin_types and _builtin_types["NoneType"]) or (types and types.NoneType and cls == types.NoneType) then
+      return true
     end
     return false
   end
@@ -2770,6 +2893,17 @@ os.path.abspath = os.path.abspath or function(p)
   if ok and res then cwd = res end
   if p == "" or p == "." then return cwd end
   return cwd .. "/" .. p
+end
+os.path.realpath = function(p)
+  p = tostring(p or "")
+  local ok, res = pcall(function()
+    ffi.cdef[[ char *realpath(const char *path, char *resolved_path); ]]
+    local buf = ffi.new("char[4096]")
+    local ptr = ffi.C.realpath(p, buf)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end)
+  if ok and res then return res end
+  return os.path.abspath(p)
 end
 os.path.expanduser = function(p)
   p = tostring(p or "")
@@ -5046,6 +5180,17 @@ os.path.abspath = function(p)
   if p == "" or p == "." then return cwd end
   return cwd .. "/" .. p
 end
+os.path.realpath = function(p)
+  p = tostring(p or "")
+  local ok, res = pcall(function()
+    ffi.cdef[[ char *realpath(const char *path, char *resolved_path); ]]
+    local buf = ffi.new("char[4096]")
+    local ptr = ffi.C.realpath(p, buf)
+    if ptr ~= nil then return ffi.string(ptr) end
+  end)
+  if ok and res then return res end
+  return os.path.abspath(p)
+end
 os.path.expanduser = function(p)
   p = tostring(p or "")
   local home = os.getenv("HOME") or "/"
@@ -5250,6 +5395,31 @@ tempfile.NamedTemporaryFile = function(suffix, prefix, dir, delete, mode, _kw)
     delete = nil
     mode = nil
   end
+
+  local pb = _G._luthon_pybridge
+  if not pb then
+    local ok, pbmod = pcall(require, "luthon.lua.pybridge")
+    if not ok or not pbmod or not pbmod.get_lib then ok, pbmod = pcall(require, "src/luthon/lua/pybridge") end
+    if not ok or not pbmod or not pbmod.get_lib then ok, pbmod = pcall(require, "pybridge") end
+    if ok and pbmod and pbmod.get_lib then pb = pbmod end
+  end
+  if pb and pb.get_lib then
+    local py_tempfile = pb.import("tempfile")
+    if py_tempfile and py_tempfile.NamedTemporaryFile then
+      local kw_table = {}
+      if _kw then
+        for k, v in pairs(_kw) do kw_table[k] = v end
+      end
+      if suffix ~= nil then kw_table.suffix = suffix end
+      if prefix ~= nil then kw_table.prefix = prefix end
+      if dir ~= nil then kw_table.dir = dir end
+      if delete ~= nil then kw_table.delete = delete end
+      if mode ~= nil then kw_table.mode = mode end
+      kw_table.__luthon_kw = true
+      return py_tempfile.NamedTemporaryFile(kw_table)
+    end
+  end
+
   suffix = _kw and _kw.suffix or suffix or ""
   prefix = _kw and _kw.prefix or prefix or "tmp"
   dir = _kw and _kw.dir or dir or tempfile.gettempdir()
@@ -5261,13 +5431,15 @@ tempfile.NamedTemporaryFile = function(suffix, prefix, dir, delete, mode, _kw)
   local name = base .. "/" .. prefix .. tostring(os.time()) .. "_" .. tempfile._counter .. suffix
   local f = io.open(name, mode)
   if not f then error("cannot create temp file: " .. name) end
-  local self = {_file = f, _name = name, _delete = delete}
+  local self = {_file = f, name = name, _name = name, _delete = delete}
   function self:write(...) return self._file:write(...) end
   function self:read(...) return self._file:read(...) end
   function self:close() self._file:close(); if self._delete then os.remove(self._name) end end
-  function self:name() return self._name end
   function self:flush() return self._file:flush() end
   function self:seek(...) return self._file:seek(...) end
+  function self:fileno() return -1 end
+  function self:__enter__() return self end
+  function self:__exit__() self:close() end
   return self
 end
 tempfile.TemporaryFile = function(mode, _kw)
@@ -5278,6 +5450,59 @@ tempfile.TemporaryFile = function(mode, _kw)
   end
   mode = _kw and _kw.mode or mode or "w+"
   return tempfile.NamedTemporaryFile("", "tmp", nil, true, mode, _kw)
+end
+
+-- shutil
+shutil = shutil or {}
+shutil.move = function(src, dst)
+  src = tostring(src)
+  dst = tostring(dst)
+  if not os.path.exists(src) then
+    local fnfe = _G.FileNotFoundError or FileNotFoundError
+    if fnfe then error(fnfe("No such file or directory: '" .. src .. "'"), 0) end
+    local ose = _G.OSError or OSError
+    if ose then error(ose("No such file or directory: '" .. src .. "'"), 0) end
+    error("FileNotFoundError: [Errno 2] No such file or directory: '" .. src .. "'", 0)
+  end
+  local ok, err = os.rename(src, dst)
+  if not ok then
+    local inf = io.open(src, "rb")
+    if not inf then
+      local ose = _G.OSError or OSError
+      if ose then error(ose(err or ("Cannot open " .. src)), 0) end
+      error("OSError: " .. tostring(err or ("Cannot open " .. src)), 0)
+    end
+    local outf = io.open(dst, "wb")
+    if not outf then
+      inf:close()
+      local ose = _G.OSError or OSError
+      if ose then error(ose(err or ("Cannot open " .. dst)), 0) end
+      error("OSError: " .. tostring(err or ("Cannot open " .. dst)), 0)
+    end
+    outf:write(inf:read("*a"))
+    inf:close()
+    outf:close()
+    os.remove(src)
+  end
+  return dst
+end
+shutil.copy = function(src, dst)
+  src = tostring(src)
+  dst = tostring(dst)
+  local inf = io.open(src, "rb")
+  if not inf then error("Cannot open " .. src) end
+  local outf = io.open(dst, "wb")
+  if not outf then inf:close(); error("Cannot open " .. dst) end
+  outf:write(inf:read("*a"))
+  inf:close()
+  outf:close()
+  return dst
+end
+shutil.copy2 = shutil.copy
+shutil.copyfile = shutil.copy
+shutil.rmtree = function(path)
+  path = tostring(path)
+  os.execute("rm -rf " .. string.format("%q", path))
 end
 
 -- dataclasses
@@ -6513,7 +6738,7 @@ function _luthon_import(mod_name, full_name)
   if mm and mm.load then
     local ok2, m2 = pcall(mm.load, mod_name)
     if ok2 and type(m2) == "table" then return m2 end
-    if not ok2 and m2 and (tostring(m2):find("Error executing") or tostring(m2):find("Syntax error")) then
+    if not ok2 and m2 and (tostring(m2):find("Error executing") or tostring(m2):find("Syntax error") or tostring(m2):find("module load error")) then
       error(m2, 0)
     end
   end
