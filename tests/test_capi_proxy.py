@@ -509,6 +509,170 @@ print("NUMPY_CAPI_REFLECTION_PASSED")
         self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
         self.assertIn("PYBRIDGE_BUILTIN_LAZY_REACTOR_ARGV_OK", res.stdout)
 
+    def test_capi_elf_symbol_preflight_rejection(self):
+        """Verify ELF symbol preflight rejects missing symbols and verifies init symbol existence."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            # Binary referencing unsupported Py C-API symbol
+            bad_c = """
+            extern int Py_NonExistent_Unsupported_Symbol_123(void);
+            int bad_func(void) { return Py_NonExistent_Unsupported_Symbol_123(); }
+            """
+            bad_so = tmp / "bad.so"
+            self._compile_c_extension(bad_c, bad_so)
+
+            # Binary with valid C-API symbols
+            good_c = """
+            #include <stdint.h>
+            typedef struct _object PyObject;
+            typedef struct PyMethodDef { const char *ml_name; void *ml_meth; int ml_flags; const char *ml_doc; } PyMethodDef;
+            typedef struct PyModuleDef_Base {
+                long long ob_refcnt;
+                void *ob_type;
+                void* (*m_init)(void);
+                long long m_index;
+                void *m_copy;
+            } PyModuleDef_Base;
+            typedef struct PyModuleDef {
+                PyModuleDef_Base m_base;
+                const char *m_name;
+                const char *m_doc;
+                long long m_size;
+                PyMethodDef *m_methods;
+            } PyModuleDef;
+
+            extern PyObject* PyModule_Create2(PyModuleDef *def, int apiver);
+            static PyMethodDef Methods[] = {{0, 0, 0, 0}};
+            static PyModuleDef Mod = {{ 1, 0, 0, 0, 0 }, "good_mod", "doc", -1, Methods };
+            __attribute__((visibility("default"))) PyObject* PyInit_good_mod(void) { return PyModule_Create2(&Mod, 3); }
+            """
+            good_so = tmp / "good.so"
+            self._compile_c_extension(good_c, good_so)
+
+            script = f"""
+            local ffi = require('ffi')
+            ffi.cdef[[
+                int luthon_capi_can_load_extension(const char *so_path, const char *init_symbol);
+            ]]
+            local capi = ffi.load('{self.capi_lib}', true)
+
+            -- Missing external symbol must be rejected
+            local can_bad = capi.luthon_capi_can_load_extension('{bad_so}', nil)
+            assert(can_bad == 0, 'bad.so with missing symbol must return 0')
+
+            -- Good module with valid CAPI symbols and matching init_symbol
+            local can_good = capi.luthon_capi_can_load_extension('{good_so}', 'PyInit_good_mod')
+            assert(can_good == 1, 'good.so with PyInit_good_mod must return 1')
+
+            -- Good module but wrong init_symbol must be rejected
+            local can_wrong_init = capi.luthon_capi_can_load_extension('{good_so}', 'PyInit_wrong')
+            assert(can_wrong_init == 0, 'good.so with nonexistent init symbol must return 0')
+
+            print("CAPI_ELF_PREFLIGHT_TEST_OK")
+            """
+            runner = tmp / "run_preflight.lua"
+            runner.write_text(script, encoding="utf-8")
+            res = subprocess.run(["luajit", str(runner)], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+            self.assertIn("CAPI_ELF_PREFLIGHT_TEST_OK", res.stdout)
+
+    def test_capi_pep489_module_init_and_call_cfunction(self):
+        """Verify luthon_capi_init_module, get_module_methods, and call_cfunction dispatch."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            c_code = """
+            #include <stdint.h>
+            typedef struct _object PyObject;
+            typedef struct PyMethodDef { const char *ml_name; void *ml_meth; int ml_flags; const char *ml_doc; } PyMethodDef;
+            typedef struct PyModuleDef_Base {
+                long long ob_refcnt;
+                void *ob_type;
+                void* (*m_init)(void);
+                long long m_index;
+                void *m_copy;
+            } PyModuleDef_Base;
+            typedef struct PyModuleDef {
+                PyModuleDef_Base m_base;
+                const char *m_name;
+                const char *m_doc;
+                long long m_size;
+                PyMethodDef *m_methods;
+            } PyModuleDef;
+
+            extern PyObject* PyModule_Create2(PyModuleDef *def, int apiver);
+            extern PyObject* PyLong_FromLongLong(long long v);
+            extern long long PyLong_AsLongLong(PyObject *obj);
+
+            static PyObject* c_noargs(PyObject *self, PyObject *unused) {
+                return PyLong_FromLongLong(100);
+            }
+            static PyObject* c_meth_o(PyObject *self, PyObject *arg) {
+                long long v = PyLong_AsLongLong(arg);
+                return PyLong_FromLongLong(v * 2);
+            }
+
+            static PyMethodDef Methods[] = {
+                {"noargs", (void*)c_noargs, 4, "No arguments function"},
+                {"double_it", (void*)c_meth_o, 8, "Unary function"},
+                {0, 0, 0, 0}
+            };
+            static PyModuleDef Mod = {{ 1, 0, 0, 0, 0 }, "dispatch_mod", "doc", -1, Methods };
+            __attribute__((visibility("default"))) PyObject* PyInit_dispatch_mod(void) { return PyModule_Create2(&Mod, 3); }
+            """
+            so_file = tmp / "dispatch_mod.so"
+            self._compile_c_extension(c_code, so_file)
+
+            script = f"""
+            local ffi = require('ffi')
+            ffi.cdef[[
+                typedef struct _object PyObject;
+                typedef struct PyMethodDef {{
+                    const char *ml_name;
+                    void *ml_meth;
+                    int ml_flags;
+                    const char *ml_doc;
+                }} PyMethodDef;
+
+                PyObject* PyInit_dispatch_mod(void);
+                PyObject* luthon_capi_init_module(void *init_fn_ptr, const char *name);
+                PyMethodDef* luthon_capi_get_module_methods(PyObject *mod);
+                PyObject* luthon_capi_call_cfunction(void *meth_ptr, int ml_flags, PyObject *self, PyObject *args, PyObject *kwargs);
+                PyObject* PyLong_FromLongLong(long long v);
+                long long PyLong_AsLongLong(PyObject *obj);
+                PyObject* PyTuple_New(int size);
+                int PyTuple_SetItem(PyObject *tuple, int pos, PyObject *item);
+            ]]
+            local capi = ffi.load('{self.capi_lib}', true)
+            local mod_lib = ffi.load('{so_file}')
+
+            local init_ptr = ffi.cast('void*', mod_lib.PyInit_dispatch_mod)
+            local mod_obj = capi.luthon_capi_init_module(init_ptr, 'dispatch_mod')
+            assert(mod_obj ~= nil, 'mod_obj must not be nil')
+
+            local methods = capi.luthon_capi_get_module_methods(mod_obj)
+            assert(methods ~= nil, 'methods must not be nil')
+            assert(ffi.string(methods[0].ml_name) == 'noargs', 'method 0 name must be noargs')
+            assert(ffi.string(methods[1].ml_name) == 'double_it', 'method 1 name must be double_it')
+
+            -- Test METH_NOARGS
+            local res1 = capi.luthon_capi_call_cfunction(methods[0].ml_meth, methods[0].ml_flags, nil, nil, nil)
+            assert(res1 ~= nil, 'res1 must not be nil')
+            assert(capi.PyLong_AsLongLong(res1) == 100LL, 'noargs must return 100')
+
+            -- Test METH_O with direct arg
+            local arg = capi.PyLong_FromLongLong(21)
+            local res2 = capi.luthon_capi_call_cfunction(methods[1].ml_meth, methods[1].ml_flags, nil, arg, nil)
+            assert(res2 ~= nil, 'res2 must not be nil')
+            assert(capi.PyLong_AsLongLong(res2) == 42LL, 'double_it must return 42')
+
+            print("CAPI_DISPATCH_TEST_OK")
+            """
+            runner = tmp / "run_dispatch.lua"
+            runner.write_text(script, encoding="utf-8")
+            res = subprocess.run(["luajit", str(runner)], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+            self.assertIn("CAPI_DISPATCH_TEST_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
