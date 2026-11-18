@@ -4,14 +4,32 @@
 --
 -- Usage: luajit luthon_lua.lua input.py [output.lua]
 
-local parser = require("src/luthon/lua/parser")
-local semantic = require("src/luthon/lua/semantic")
-local ir = require("src/luthon/lua/ir")
-local codegen = require("src/luthon/lua/codegen")
+local _src_info = debug.getinfo(1, "S")
+local _src_path = _src_info and _src_info.source and _src_info.source:match("^@?(.*)$") or ""
+local _script_dir = _src_path:match("^(.*)/[^/]+$") or "src/luthon/lua"
+
+local function _require_lua_mod(name)
+  for _, candidate in ipairs({"src/luthon/lua/" .. name, "luthon.lua." .. name, name}) do
+    local ok, mod = pcall(require, candidate)
+    if ok and mod then
+      return mod
+    end
+  end
+  local f, err = loadfile(_script_dir .. "/" .. name .. ".lua")
+  if f then
+    return f()
+  end
+  error("luthon_lua: failed to load module '" .. name .. "': " .. tostring(err))
+end
+
+local parser = _require_lua_mod("parser")
+local semantic = _require_lua_mod("semantic")
+local ir = _require_lua_mod("ir")
+local codegen = _require_lua_mod("codegen")
 
 local M = {}
 
-function M.transpile_file(source_path, package)
+function M.transpile_file(source_path, package, omit_bootstrap)
   local f = io.open(source_path, "r")
   if not f then return nil end
   local source = f:read("*a")
@@ -21,10 +39,13 @@ function M.transpile_file(source_path, package)
   local scope = semantic.analyze(tree)
   local lowerer = ir.IRLowerer.new(package)
   local module = lowerer:lower_module(tree, scope)
-  local lua = codegen.generate(module, true)
+  if omit_bootstrap then
+    local lua = codegen.generate(module, true)
+    return lua .. "\n"
+  end
 
-  local bootstrap_path = "src/luthon/lua/bootstrap.lua"
-  local bootstrap_f = io.open(bootstrap_path, "r")
+  local lua = codegen.generate(module, true)
+  local bootstrap_f = io.open(_script_dir .. "/bootstrap.lua", "r") or io.open("src/luthon/lua/bootstrap.lua", "r")
   local bootstrap = ""
   if bootstrap_f then
     bootstrap = bootstrap_f:read("*a")

@@ -599,7 +599,7 @@ function M.load(name)
       local pkg = py_path:match("__init__%.py$") and name or (name:match("^(.*)%.[^%.]+$") or "")
       local lua_out = transpile_cache[py_path]
       if not lua_out then
-        local ok_transpile, out = pcall(driver.transpile_file, py_path, pkg)
+        local ok_transpile, out = pcall(driver.transpile_file, py_path, pkg, true)
         if ok_transpile and out then
           lua_out = out
           transpile_cache[py_path] = out
