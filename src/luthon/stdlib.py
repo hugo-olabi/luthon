@@ -365,26 +365,27 @@ function array(typecode, initializer)
 end
 
 local _dict_methods = {
-  get = function(self, k, default)
+  get = function(self, k, ...)
     local v = rawget(self, k)
     if v ~= nil then return v end
-    if default == nil then return _G._luthon_none end
-    return default
+    if select("#", ...) > 0 then return select(1, ...) end
+    return _G._luthon_none
   end,
-  setdefault = function(self, k, default)
+  setdefault = function(self, k, ...)
     local v = rawget(self, k)
     if v ~= nil then return v end
-    if default == nil then default = _G._luthon_none end
-    rawset(self, k, default)
-    return default
+    local def = _G._luthon_none
+    if select("#", ...) > 0 then def = select(1, ...) end
+    rawset(self, k, def)
+    return def
   end,
-  pop = function(self, k, default)
+  pop = function(self, k, ...)
     local v = rawget(self, k)
     if v ~= nil then
       rawset(self, k, nil)
       return v
     end
-    if default ~= nil then return default end
+    if select("#", ...) > 0 then return select(1, ...) end
     local ke = _G.KeyError or KeyError
     if ke then error(ke(tostring(k)), 0) end
     error("KeyError: " .. tostring(k), 0)
@@ -1562,26 +1563,27 @@ function tuple(t)
   return r
 end
 local _dict_methods = {
-  get = function(self, k, default)
+  get = function(self, k, ...)
     local v = rawget(self, k)
     if v ~= nil then return v end
-    if default == nil then return _G._luthon_none end
-    return default
+    if select("#", ...) > 0 then return select(1, ...) end
+    return _G._luthon_none
   end,
-  setdefault = function(self, k, default)
+  setdefault = function(self, k, ...)
     local v = rawget(self, k)
     if v ~= nil then return v end
-    if default == nil then default = _G._luthon_none end
-    rawset(self, k, default)
-    return default
+    local def = _G._luthon_none
+    if select("#", ...) > 0 then def = select(1, ...) end
+    rawset(self, k, def)
+    return def
   end,
-  pop = function(self, k, default)
+  pop = function(self, k, ...)
     local v = rawget(self, k)
     if v ~= nil then
       rawset(self, k, nil)
       return v
     end
-    if default ~= nil then return default end
+    if select("#", ...) > 0 then return select(1, ...) end
     local ke = _G.KeyError or KeyError
     if ke then error(ke(tostring(k)), 0) end
     error("KeyError: " .. tostring(k), 0)
@@ -3352,7 +3354,7 @@ os.walk = os.walk or function(top)
   return results
 end
 
-sys = {argv = {}, path = setmetatable({}, _list_mt), meta_path = setmetatable({}, _list_mt), version = "3.14", version_info = setmetatable({3, 14, 0, "final", 0}, _list_mt), implementation = {name = "cpython", version = setmetatable({3, 14, 0, "final", 0}, _list_mt)}, modules = setmetatable({}, {__index = function(t, k) return _luthon_import(k) end})}
+sys = {argv = {}, path = setmetatable({}, _list_mt), meta_path = setmetatable({}, _list_mt), version = "3.14", version_info = setmetatable({3, 14, 0, "final", 0}, _list_mt), implementation = {name = "cpython", version = setmetatable({3, 14, 0, "final", 0}, _list_mt)}, modules = setmetatable({}, {__index = function(t, k) if _dict_methods and _dict_methods[k] ~= nil then return _dict_methods[k] end; local ok, m = pcall(_luthon_import, k); if ok and m ~= nil then return m end; return nil end})}
 __import__ = function(name) return _luthon_import(name) end
 
 json = {}
@@ -5327,15 +5329,24 @@ site = {}
 site.getsitepackages = function()
   local paths = {}
   local home = os.getenv("HOME") or "/"
-  paths[#paths+1] = home .. "/.local/lib/python3.14/site-packages"
-  paths[#paths+1] = "/usr/lib/python3.14/site-packages"
-  paths[#paths+1] = "/usr/local/lib/python3.14/site-packages"
+  paths[#paths+1] = home .. "/.luthon/site-packages"
+  for _, v in ipairs({"3.15", "3.14", "3.13", "3.12"}) do
+    paths[#paths+1] = home .. "/.local/lib/python" .. v .. "/site-packages"
+    paths[#paths+1] = "/usr/lib64/python" .. v .. "/site-packages"
+    paths[#paths+1] = "/usr/lib/python" .. v .. "/site-packages"
+    paths[#paths+1] = "/usr/local/lib/python" .. v .. "/site-packages"
+  end
   return paths
 end
 site.getusersitepackages = function()
-  return os.getenv("HOME") .. "/.local/lib/python3.14/site-packages"
+  local home = os.getenv("HOME") or "/"
+  return home .. "/.luthon/site-packages"
 end
-site.addsitedir = function(dir) end
+site.addsitedir = function(dir)
+  if sys and sys.path and dir then
+    table.insert(sys.path, 1, dir)
+  end
+end
 
 os.sep = "/"
 os.name = "posix"
@@ -5343,6 +5354,7 @@ os.linesep = "\n"
 os.curdir = "."
 os.pardir = ".."
 os.devnull = "/dev/null"
+os.utime = function(p, times) return nil end
 os.path = os.path or {}
 os.path.sep = "/"
 os.path.curdir = "."
