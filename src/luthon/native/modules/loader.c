@@ -513,6 +513,8 @@ EXPORT PyObject* luthon_capi_call_cfunction(void *meth_ptr, int ml_flags, PyObje
         PyObject *arg = Py_None;
         if (args && args->tag == PY_TAG_TUPLE && args->as.seq_val.size > 0) {
             arg = args->as.seq_val.items[0];
+        } else if (args) {
+            arg = args;
         }
         return fn(self, arg);
     } else {

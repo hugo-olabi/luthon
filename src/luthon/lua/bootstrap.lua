@@ -885,20 +885,45 @@ function _luthon_slice_desc(lower, upper, step)
 end
 
 function _luthon_slice(obj, lower, upper, step)
+  step = step or 1
   if type(obj) == "string" then
     local n = #obj
-    local l = 1
-    if lower ~= nil then
-      if lower >= 0 then l = lower + 1
-      else l = n + lower + 1; if l < 1 then l = 1 end end
+    if step > 0 then
+      local l = 1
+      if lower ~= nil then
+        if lower >= 0 then l = lower + 1
+        else l = n + lower + 1; if l < 1 then l = 1 end end
+      end
+      local u = n
+      if upper ~= nil then
+        if upper >= 0 then u = upper
+        else u = n + upper; if u < 0 then u = 0 end end
+      end
+      if l > u then return "" end
+      if step == 1 then
+        return string.sub(obj, l, u)
+      else
+        local chars = {}
+        for i = l, u, step do table.insert(chars, string.sub(obj, i, i)) end
+        return table.concat(chars)
+      end
+    else
+      local l = n
+      if lower ~= nil then
+        if lower >= 0 then l = lower + 1
+        else l = n + lower + 1 end
+        if l > n then l = n end
+      end
+      local u = 1
+      if upper ~= nil then
+        if upper >= 0 then u = upper + 2
+        else u = n + upper + 2 end
+        if u < 1 then u = 1 end
+      end
+      local chars = {}
+      for i = l, u, step do table.insert(chars, string.sub(obj, i, i)) end
+      return table.concat(chars)
     end
-    local u = n
-    if upper ~= nil then
-      if upper >= 0 then u = upper
-      else u = n + upper; if u < 0 then u = 0 end end
-    end
-    if l > u then return "" end
-    return string.sub(obj, l, u)
   elseif type(obj) == "table" then
     -- High-performance unboxed array slice view via ffi.copy
     if rawget(obj, "_buf") and rawget(obj, "_len") then
@@ -909,23 +934,34 @@ function _luthon_slice(obj, lower, upper, step)
       else error("TypeError: unhashable type: 'slice'", 0) end
     end
     local n = #obj
-    lower = lower or 0
-    if lower < 0 then lower = n + lower end
-    lower = lower + 1
-    if upper == nil then
-      upper = n
-    else
-      if upper < 0 then upper = n + upper end
-    end
-    step = step or 1
     local r = {}
-    if step == 1 and lower <= upper and table.move then
-      -- Vectorized slice copy via table.move (fast native C loop in LuaJIT)
-      table.move(obj, lower, upper, 1, r)
-    elseif step > 0 then
-      for i = lower, upper, step do table.insert(r, obj[i]) end
+    if step > 0 then
+      local l = lower or 0
+      if l < 0 then l = n + l end
+      l = l + 1
+      local u = upper
+      if u == nil then u = n
+      else if u < 0 then u = n + u end end
+      if step == 1 and l <= u and table.move then
+        -- Vectorized slice copy via table.move (fast native C loop in LuaJIT)
+        table.move(obj, l, u, 1, r)
+      else
+        for i = l, u, step do table.insert(r, obj[i]) end
+      end
     else
-      for i = lower, upper, step do table.insert(r, obj[i]) end
+      local l = n
+      if lower ~= nil then
+        if lower >= 0 then l = lower + 1
+        else l = n + lower + 1 end
+        if l > n then l = n end
+      end
+      local u = 1
+      if upper ~= nil then
+        if upper >= 0 then u = upper + 2
+        else u = n + upper + 2 end
+        if u < 1 then u = 1 end
+      end
+      for i = l, u, step do table.insert(r, obj[i]) end
     end
     return setmetatable(r, _list_mt)
   end
@@ -3526,13 +3562,14 @@ re.A = 256
 local _Pattern = {}
 _Pattern.__index = _Pattern
 
-local function _make_pcre2_match(subj, code, mdata, count)
+local function _make_pcre2_match(subj, code, mdata, count, named_groups)
   local ovec = _pcre2_lib.pcre2_get_ovector_pointer_8(mdata)
   local m = {
     _subj = subj,
     _code = code,
     _ovec = ovec,
     _count = count,
+    _named_groups = named_groups,
   }
   function m:group(idx)
     idx = idx or 0
@@ -3555,7 +3592,11 @@ local function _make_pcre2_match(subj, code, mdata, count)
     return res
   end
   function m:groupdict()
-    return {}
+    local d = {}
+    for _, gname in ipairs(self._named_groups or {}) do
+      d[gname] = self:group(gname)
+    end
+    return setmetatable(d, _dict_mt or {})
   end
   function m:start(idx)
     idx = idx or 0
@@ -3579,7 +3620,7 @@ function _Pattern:search(s, pos)
   local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
   local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
   if rc > 0 then
-    local m = _make_pcre2_match(s, self._code, mdata, rc)
+    local m = _make_pcre2_match(s, self._code, mdata, rc, self._named_groups)
     _pcre2_lib.pcre2_match_data_free_8(mdata)
     return m
   end
@@ -3594,7 +3635,7 @@ function _Pattern:match(s, pos)
   local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
   local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0x80000000, mdata, nil)
   if rc > 0 then
-    local m = _make_pcre2_match(s, self._code, mdata, rc)
+    local m = _make_pcre2_match(s, self._code, mdata, rc, self._named_groups)
     _pcre2_lib.pcre2_match_data_free_8(mdata)
     return m
   end
@@ -3660,8 +3701,35 @@ function _Pattern:sub(repl, s, count)
   return table.concat(res)
 end
 
-function _Pattern:split(s)
-  return string.split(tostring(s or ""), tostring(self.pattern))
+function _Pattern:split(s, maxsplit)
+  s = tostring(s or "")
+  maxsplit = maxsplit or 0
+  if self._code and _pcre2_lib then
+    local res = {}
+    local pos = 0
+    local splits = 0
+    local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+    while pos <= #s do
+      local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+      if rc <= 0 or (maxsplit > 0 and splits >= maxsplit) then
+        table.insert(res, s:sub(pos + 1))
+        break
+      end
+      local ovec = _pcre2_lib.pcre2_get_ovector_pointer_8(mdata)
+      local m_start = tonumber(ovec[0])
+      local m_end = tonumber(ovec[1])
+      table.insert(res, s:sub(pos + 1, m_start))
+      splits = splits + 1
+      if m_end == pos then pos = pos + 1 else pos = m_end end
+      if pos > #s then
+        table.insert(res, "")
+        break
+      end
+    end
+    _pcre2_lib.pcre2_match_data_free_8(mdata)
+    return setmetatable(res, _list_mt)
+  end
+  return string.split(s, tostring(self.pattern))
 end
 
 re.compile = function(pattern, flags)
@@ -3680,10 +3748,15 @@ re.compile = function(pattern, flags)
     local pat_str = tostring(pattern)
     local code = _pcre2_lib.pcre2_compile_8(pat_str, #pat_str, opts, errcode, erroff, nil)
     if code ~= nil then
+      local named_groups = {}
+      for gname in pat_str:gmatch("%(%?P<([%a_][%w_]*)>") do
+        table.insert(named_groups, gname)
+      end
       return setmetatable({
         _code = ffi.gc(code, _pcre2_lib.pcre2_code_free_8),
         pattern = pattern,
-        flags = flags
+        flags = flags,
+        _named_groups = named_groups
       }, _Pattern)
     end
   end
@@ -3749,8 +3822,9 @@ re.sub = function(pat, repl, s, count, flags)
   return re.compile(pat, flags):sub(repl, s, count)
 end
 
-re.split = function(pat, s)
-  return string.split(tostring(s or ""), tostring((type(pat) == "table" and pat.pattern) or pat))
+re.split = function(pat, s, maxsplit, flags)
+  if type(pat) == "table" and pat.split then return pat:split(s, maxsplit) end
+  return re.compile(pat, flags):split(s, maxsplit)
 end
 
 re.escape = function(s)
@@ -5579,7 +5653,7 @@ function JSONDecoder:decode(s) return json.decode(s) end
 function JSONDecoder:raw_decode(s, idx)
   idx = idx or 0
   local val, next_pos = json._raw_decode(tostring(s or ""), idx + 1)
-  return val, (next_pos - 1)
+  return setmetatable({val, (next_pos - 1)}, _tuple_mt or {})
 end
 json.JSONDecoder = JSONDecoder
 
@@ -5951,7 +6025,15 @@ tempfile.NamedTemporaryFile = function(suffix, prefix, dir, delete, mode, _kw)
     if self._delete and self._name then os.remove(self._name); self._name = nil end
   end
   function self:flush() return self._file and self._file:flush() end
-  function self:seek(...) return self._file and self._file:seek(...) end
+  function self:seek(offset, whence)
+    if type(offset) == "number" and (whence == nil or type(whence) == "number") then
+      local w_str = "set"
+      if whence == 1 then w_str = "cur"
+      elseif whence == 2 then w_str = "end" end
+      return self._file and self._file:seek(w_str, offset)
+    end
+    return self._file and self._file:seek(offset, whence)
+  end
   function self:fileno() return -1 end
   function self:__enter__() return self end
   function self:__exit__() self:close() end
