@@ -702,6 +702,10 @@ EXPORT PyObject* PyObject_CallFunction(PyObject *callable, const char *format, .
 EXPORT PyObject* PyObject_CallMethod(PyObject *o, const char *name, const char *format, ...);
 EXPORT int PyArg_ParseTuple(PyObject *args, const char *fmt, ...);
 EXPORT int PyArg_ParseTupleAndKeywords(PyObject *args, PyObject *kwargs, const char *fmt, char **kwlist, ...);
+EXPORT int luthon_capi_can_load_extension(const char *so_path, const char *init_symbol);
+EXPORT PyObject* luthon_capi_init_module(void *init_fn_ptr, const char *name);
+EXPORT PyObject* luthon_capi_call_cfunction(void *meth_ptr, int ml_flags, PyObject *self, PyObject *args, PyObject *kwargs);
+EXPORT PyMethodDef* luthon_capi_get_module_methods(PyObject *mod);
 
 /* Error Handling API */
 EXPORT void PyErr_SetString(PyObject *type, const char *message);

@@ -116,6 +116,15 @@ def run_file(
             else:
                 extra_paths = f"{pkg_root}/?.lua;{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua;{pkg_src}/luthon/lua/native/?.lua;{pkg_src}/luthon/lua/native/?/init.lua"
             env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
+            try:
+                from .native.build_capi import get_capi_library_path, compile_capi_proxy
+                capi_lib = get_capi_library_path()
+                if not capi_lib.exists():
+                    capi_lib = compile_capi_proxy()
+                if capi_lib.exists():
+                    env["LUTHON_CAPI_LIB"] = str(capi_lib.resolve())
+            except Exception:
+                pass
             proc = subprocess.run(cmd, env=env)
             return proc.returncode
 
@@ -177,6 +186,16 @@ def run_file(
             libpy_path = Path(libdir) / ldlib
             if libpy_path.exists():
                 env["LUTHON_LIBPYTHON"] = str(libpy_path)
+
+        try:
+            from .native.build_capi import get_capi_library_path, compile_capi_proxy
+            capi_lib = get_capi_library_path()
+            if not capi_lib.exists():
+                capi_lib = compile_capi_proxy()
+            if capi_lib.exists():
+                env["LUTHON_CAPI_LIB"] = str(capi_lib.resolve())
+        except Exception:
+            pass
 
         proc = subprocess.run(cmd, env=env)
         return proc.returncode

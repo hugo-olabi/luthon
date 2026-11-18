@@ -67,6 +67,8 @@ if venv then
 end
 for _, py_ver in ipairs({"3.16", "3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
   table.insert(search_paths, "./.venv/lib/python" .. py_ver .. "/site-packages")
+  table.insert(search_paths, "/usr/lib64/python" .. py_ver .. "/lib-dynload")
+  table.insert(search_paths, "/usr/lib/python" .. py_ver .. "/lib-dynload")
 end
 
 -- Add PYTHONPATH if set
@@ -256,9 +258,12 @@ function M.find_binary_module(name)
   local rel_dir = #parts > 1 and table.concat(parts, "/", 1, #parts - 1) or ""
 
   local suffixes = {
+    ".abi3.so",
     ".so",
-    ".cpython-313-x86_64-linux-gnu.so",
+    ".cpython-315-x86_64-linux-gnu.so",
+    ".cpython-316-x86_64-linux-gnu.so",
     ".cpython-314-x86_64-linux-gnu.so",
+    ".cpython-313-x86_64-linux-gnu.so",
     ".cpython-312-x86_64-linux-gnu.so",
     ".cpython-311-x86_64-linux-gnu.so",
     ".pyd",
@@ -279,18 +284,19 @@ function M.find_binary_module(name)
   return nil
 end
 
-local _capi_loaded = false
 function M.load_binary_extension(name, path)
   local ok_ffi, ffi = pcall(require, "ffi")
   if not ok_ffi or not ffi then return nil end
 
   local capi_path = "src/luthon/native/libluthon_capi.so"
-  local home = os.getenv("HOME") or ""
   local cand_paths = {
+    os.getenv("LUTHON_CAPI_LIB") or "",
+    _G.__LUTHON_CAPI_LIB__ or "",
     "src/luthon/native/libluthon_capi.so",
     "../luthon/src/luthon/native/libluthon_capi.so",
-    os.getenv("LUTHON_CAPI_LIB") or "",
-    home .. "/Projects/luthon/src/luthon/native/libluthon_capi.so"
+    (os.getenv("HOME") or "") .. "/Projects/luthon/src/luthon/native/libluthon_capi.so",
+    "./libluthon_capi.so",
+    "libluthon_capi.so",
   }
   for _, cp in ipairs(cand_paths) do
     if cp ~= "" then
@@ -299,88 +305,86 @@ function M.load_binary_extension(name, path)
     end
   end
 
-  -- Ensure C-API proxy symbols are globally exposed
-  if not _capi_loaded then
-    pcall(function()
-      ffi.cdef[[
-        void* dlopen(const char* filename, int flags);
-        typedef struct _object PyObject;
-        typedef long Py_ssize_t;
-        PyObject* PyLong_FromLongLong(long long v);
-        long long PyLong_AsLongLong(PyObject *obj);
-        PyObject* PyFloat_FromDouble(double v);
-        double PyFloat_AsDouble(PyObject *obj);
-        PyObject* PyUnicode_FromStringAndSize(const char *u, Py_ssize_t size);
-        const char* PyUnicode_AsUTF8AndSize(PyObject *unicode, Py_ssize_t *size);
-        PyObject* PyTuple_New(Py_ssize_t len);
-        int PyTuple_SetItem(PyObject *p, Py_ssize_t pos, PyObject *o);
-        PyObject* PyTuple_GetItem(PyObject *p, Py_ssize_t pos);
-        Py_ssize_t PyTuple_Size(PyObject *p);
-        void Py_IncRef(PyObject *o);
-        void Py_DecRef(PyObject *o);
-        PyObject* PyErr_Occurred(void);
-        void PyErr_Clear(void);
-
-        typedef struct PyMethodDef {
-            const char  *ml_name;
-            void        *ml_meth;
-            int          ml_flags;
-            const char  *ml_doc;
-        } PyMethodDef;
-
-        typedef struct PyModuleDef {
-            int          m_base;
-            const char  *m_name;
-            const char  *m_doc;
-            long         m_size;
-            PyMethodDef *m_methods;
-        } PyModuleDef;
-
-        typedef struct _py_mod_obj {
-            long ob_refcnt;
-            void *ob_type;
-            int tag;
-            int _pad;
-            PyModuleDef *module_def;
-        } _PyModObj;
-      ]]
-      pcall(ffi.load, capi_path, true)
-    end)
-    _capi_loaded = true
+  local pb = _G._luthon_pybridge
+  local has_cpython = pb and pb.get_lib and (pb.get_lib() ~= nil)
+  local ok_capi, capi = nil, nil
+  if not has_cpython then
+    ok_capi, capi = pcall(ffi.load, capi_path, true)
   end
-
-  local ok_capi, capi = pcall(ffi.load, capi_path, true)
   if not ok_capi or not capi then
     ok_capi, capi = pcall(ffi.load, capi_path)
     if not ok_capi or not capi then return nil end
   end
 
-  local ok_ext, ext = pcall(ffi.load, path)
-  if not ok_ext or not ext then return nil end
+  pcall(function()
+    ffi.cdef[[
+      typedef struct _object PyObject;
+      typedef long Py_ssize_t;
 
-  -- Determine entry point: PyInit_<name>
+      int luthon_capi_can_load_extension(const char *so_path, const char *init_symbol);
+      PyObject* luthon_capi_init_module(void *init_fn_ptr, const char *name);
+      PyObject* luthon_capi_call_cfunction(void *meth_ptr, int ml_flags, PyObject *self, PyObject *args, PyObject *kwargs);
+
+      typedef struct PyMethodDef {
+          const char  *ml_name;
+          void        *ml_meth;
+          int          ml_flags;
+          const char  *ml_doc;
+      } PyMethodDef;
+
+      PyMethodDef* luthon_capi_get_module_methods(PyObject *mod);
+      PyObject* PyModule_GetDict(PyObject *mod);
+      Py_ssize_t PyDict_Size(PyObject *mp);
+      int PyDict_Next(PyObject *mp, Py_ssize_t *pos, PyObject **key, PyObject **value);
+      const char* PyUnicode_AsUTF8(PyObject *unicode);
+      const char* PyUnicode_AsUTF8AndSize(PyObject *unicode, Py_ssize_t *size);
+      PyObject* PyUnicode_FromStringAndSize(const char *u, Py_ssize_t size);
+      PyObject* PyLong_FromLongLong(long long v);
+      long long PyLong_AsLongLong(PyObject *obj);
+      PyObject* PyFloat_FromDouble(double v);
+      double PyFloat_AsDouble(PyObject *obj);
+      PyObject* PyTuple_New(Py_ssize_t len);
+      int PyTuple_SetItem(PyObject *p, Py_ssize_t pos, PyObject *o);
+      void Py_IncRef(PyObject *o);
+      void Py_DecRef(PyObject *o);
+      PyObject* PyErr_Occurred(void);
+      void PyErr_Clear(void);
+    ]]
+  end)
+
   local parts = {}
   for p in name:gmatch("([^%.]+)") do table.insert(parts, p) end
   local short_name = parts[#parts]
-
   local init_fn_name = "PyInit_" .. short_name
+
+  -- Preflight validation: inspect ELF undefined symbols
+  local can_load = 0
   pcall(function()
-    ffi.cdef(string.format("PyObject* %s(void);", init_fn_name))
+    can_load = capi.luthon_capi_can_load_extension(path, init_fn_name)
+  end)
+  if can_load ~= 1 then
+    return nil
+  end
+
+  local ok_ext, ext = pcall(ffi.load, path)
+  if not ok_ext or not ext then return nil end
+
+  pcall(function()
+    ffi.cdef(string.format("void* %s(void);", init_fn_name))
   end)
 
   local has_init, init_fn = pcall(function() return ext[init_fn_name] end)
   if not has_init or not init_fn then return nil end
 
-  local ok_run, mod_ptr = pcall(init_fn)
-  if not ok_run or mod_ptr == nil then return nil end
-
-  local typed_mod = ffi.cast("_PyModObj*", mod_ptr)
-  local mod_def = typed_mod.module_def
-  if mod_def == nil or mod_def.m_methods == nil then return nil end
+  local ok_init, mod_ptr = pcall(function()
+    return capi.luthon_capi_init_module(ffi.cast("void*", init_fn), name)
+  end)
+  if not ok_init or mod_ptr == nil then return nil end
 
   local mod_table = {
     __name__ = name,
     __file__ = path,
+    _capi_mod = mod_ptr,
   }
 
   local function _py_to_lua(py_obj)
@@ -410,33 +414,55 @@ function M.load_binary_extension(name, path)
     return nil
   end
 
-  local idx = 0
-  while mod_def.m_methods[idx].ml_name ~= nil do
-    local m = mod_def.m_methods[idx]
-    local fn_name = ffi.string(m.ml_name)
-    local fn_ptr = ffi.cast("PyObject* (*)(PyObject*, PyObject*)", m.ml_meth)
+  -- Export methods via luthon_capi_call_cfunction
+  local methods = capi.luthon_capi_get_module_methods(mod_ptr)
+  if methods ~= nil then
+    local idx = 0
+    while methods[idx].ml_name ~= nil do
+      local m = methods[idx]
+      local fn_name = ffi.string(m.ml_name)
+      local meth_ptr = m.ml_meth
+      local ml_flags = m.ml_flags
 
-    mod_table[fn_name] = function(...)
-      local total = select("#", ...)
-      local args_tuple = capi.PyTuple_New(total)
-      for i = 1, total do
-        local py_val = _lua_to_py(select(i, ...))
-        capi.PyTuple_SetItem(args_tuple, i - 1, py_val)
+      mod_table[fn_name] = function(...)
+        local total = select("#", ...)
+        local args_tuple = capi.PyTuple_New(total)
+        for i = 1, total do
+          local py_val = _lua_to_py(select(i, ...))
+          capi.PyTuple_SetItem(args_tuple, i - 1, py_val)
+        end
+        local res = capi.luthon_capi_call_cfunction(meth_ptr, ml_flags, nil, args_tuple, nil)
+        capi.Py_DecRef(args_tuple)
+        if res == nil then
+          if capi.PyErr_Occurred() ~= nil then
+            capi.PyErr_Clear()
+            error(name .. "." .. fn_name .. "() execution failed in C extension", 2)
+          end
+        end
+        local ret = _py_to_lua(res)
+        capi.Py_DecRef(res)
+        return ret
       end
-      local res = fn_ptr(nil, args_tuple)
-      capi.Py_DecRef(args_tuple)
-      if res == nil then
-        if capi.PyErr_Occurred() ~= nil then
-          capi.PyErr_Clear()
-          error(name .. "." .. fn_name .. "() execution failed in C extension", 2)
+
+      idx = idx + 1
+    end
+  end
+
+  -- Export dictionary constants and values
+  local mod_dict = capi.PyModule_GetDict(mod_ptr)
+  if mod_dict ~= nil then
+    local pos = ffi.new("Py_ssize_t[1]", 0)
+    local pkey = ffi.new("PyObject*[1]")
+    local pval = ffi.new("PyObject*[1]")
+    while capi.PyDict_Next(mod_dict, pos, pkey, pval) == 1 do
+      local k_str = ffi.string(capi.PyUnicode_AsUTF8(pkey[0]))
+      if not mod_table[k_str] then
+        local lua_val = _py_to_lua(pval[0])
+        if lua_val ~= nil then
+          mod_table[k_str] = lua_val
         end
       end
-      local ret = _py_to_lua(res)
-      capi.Py_DecRef(res)
-      return ret
     end
-
-    idx = idx + 1
   end
 
   return mod_table

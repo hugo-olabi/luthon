@@ -132,15 +132,19 @@ end)
 local _luthon_native_lib = nil
 pcall(function()
   local candidates = {
+    os.getenv("LUTHON_CAPI_LIB"),
+    _G.__LUTHON_CAPI_LIB__,
     "src/luthon/native/libluthon_capi.so",
     "./libluthon_capi.so",
     "libluthon_capi.so"
   }
   for _, cand in ipairs(candidates) do
-    local ok, lib = pcall(ffi.load, cand)
-    if ok and lib then
-      _luthon_native_lib = lib
-      break
+    if cand and cand ~= "" then
+      local ok, lib = pcall(ffi.load, cand)
+      if ok and lib then
+        _luthon_native_lib = lib
+        break
+      end
     end
   end
 end)
@@ -4416,9 +4420,9 @@ base64.b64encode = function(data)
   data = tostring(data or "")
   local len = #data
   if len == 0 then return "" end
+  local max_out = math.floor((len + 2) / 3) * 4 + 4
 
   if _luthon_native_lib ~= nil then
-    local max_out = math.floor((len + 2) / 3) * 4 + 4
     local buf = ffi.new("char[?]", max_out)
     local n = _luthon_native_lib.luthon_b64_encode(ffi.cast("const uint8_t*", data), len, buf)
     return ffi.string(buf, n)
@@ -4484,9 +4488,9 @@ base64.b64decode = function(data)
   data = tostring(data or "")
   local len = #data
   if len == 0 then return "" end
+  local max_out = math.floor(len * 3 / 4) + 4
 
   if _luthon_native_lib ~= nil then
-    local max_out = math.floor(len * 3 / 4) + 4
     local buf = ffi.new("uint8_t[?]", max_out)
     local n = _luthon_native_lib.luthon_b64_decode(data, len, buf)
     return ffi.string(buf, n)

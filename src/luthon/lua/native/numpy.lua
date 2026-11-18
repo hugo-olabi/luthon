@@ -25,9 +25,11 @@ ffi.cdef[[
 
 local luthon_native = _G._luthon_native_lib
 if not luthon_native then
-  for _, cand in ipairs({"src/luthon/native/libluthon_capi.so", "./libluthon_capi.so", "libluthon_capi.so"}) do
-    local ok, lib = pcall(ffi.load, cand)
-    if ok and lib then luthon_native = lib; break end
+  for _, cand in ipairs({os.getenv("LUTHON_CAPI_LIB"), _G.__LUTHON_CAPI_LIB__, "src/luthon/native/libluthon_capi.so", "./libluthon_capi.so", "libluthon_capi.so"}) do
+    if cand and cand ~= "" then
+      local ok, lib = pcall(ffi.load, cand)
+      if ok and lib then luthon_native = lib; break end
+    end
   end
 end
 

@@ -2,6 +2,9 @@
  * Luthon C-API Proxy: Module Loader & Reflection Dispatch (modules/loader.c)
  */
 
+#define _GNU_SOURCE
+#include <elf.h>
+#include <dlfcn.h>
 #include "luthon_capi.h"
 
 static void _get_module_def_fields(void *raw_def, const char **p_name, const char **p_doc, PyMethodDef **p_methods) {
@@ -70,11 +73,8 @@ EXPORT PyObject* PyModule_Create2(PyModuleDef *def, int apiver) {
     return mod;
 }
 
-EXPORT int PyArg_ParseTuple(PyObject *args, const char *fmt, ...) {
+static int _vparse_tuple(PyObject *args, const char *fmt, va_list vl) {
     if (!args || args->tag != PY_TAG_TUPLE) return 0;
-    va_list vl;
-    va_start(vl, fmt);
-
     Py_ssize_t arg_idx = 0;
     Py_ssize_t total = args->as.seq_val.size;
 
@@ -83,7 +83,6 @@ EXPORT int PyArg_ParseTuple(PyObject *args, const char *fmt, ...) {
         if (*p == ':') break;
 
         if (arg_idx >= total) {
-            va_end(vl);
             return 0;
         }
         PyObject *item = args->as.seq_val.items[arg_idx++];
@@ -128,16 +127,22 @@ EXPORT int PyArg_ParseTuple(PyObject *args, const char *fmt, ...) {
                 break;
         }
     }
-    va_end(vl);
     return 1;
+}
+
+EXPORT int PyArg_ParseTuple(PyObject *args, const char *fmt, ...) {
+    va_list vl;
+    va_start(vl, fmt);
+    int res = _vparse_tuple(args, fmt, vl);
+    va_end(vl);
+    return res;
 }
 
 EXPORT int PyArg_ParseTupleAndKeywords(PyObject *args, PyObject *kwargs, const char *fmt, char **kwlist, ...) {
     (void)kwargs; (void)kwlist;
-    /* Basic fallback to PyArg_ParseTuple */
     va_list vl;
     va_start(vl, kwlist);
-    int res = PyArg_ParseTuple(args, fmt, vl);
+    int res = _vparse_tuple(args, fmt, vl);
     va_end(vl);
     return res;
 }
@@ -328,4 +333,191 @@ EXPORT PyObject* PyImport_ImportModule(const char *name) {
 EXPORT PyObject* PyImport_Import(PyObject *name) {
     (void)name;
     return PyDict_New();
+}
+
+/* Extension Preflight Validation */
+EXPORT int luthon_capi_can_load_extension(const char *so_path, const char *init_symbol) {
+    if (!so_path) return 0;
+    FILE *fp = fopen(so_path, "rb");
+    if (!fp) return 0;
+
+    Elf64_Ehdr ehdr;
+    if (fread(&ehdr, sizeof(ehdr), 1, fp) != 1) {
+        fclose(fp);
+        return 0;
+    }
+
+    if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 || ehdr.e_ident[EI_CLASS] != ELFCLASS64) {
+        fclose(fp);
+        return 0;
+    }
+
+    if (ehdr.e_shoff == 0 || ehdr.e_shnum == 0) {
+        fclose(fp);
+        return 0;
+    }
+
+    Elf64_Shdr *shdrs = malloc(sizeof(Elf64_Shdr) * ehdr.e_shnum);
+    if (!shdrs) {
+        fclose(fp);
+        return 0;
+    }
+
+    if (fseek(fp, ehdr.e_shoff, SEEK_SET) != 0 ||
+        fread(shdrs, sizeof(Elf64_Shdr), ehdr.e_shnum, fp) != ehdr.e_shnum) {
+        free(shdrs);
+        fclose(fp);
+        return 0;
+    }
+
+    Elf64_Shdr *dynsym_sh = NULL;
+    Elf64_Shdr *dynstr_sh = NULL;
+
+    for (int i = 0; i < ehdr.e_shnum; i++) {
+        if (shdrs[i].sh_type == SHT_DYNSYM) {
+            dynsym_sh = &shdrs[i];
+            if (dynsym_sh->sh_link < ehdr.e_shnum) {
+                dynstr_sh = &shdrs[dynsym_sh->sh_link];
+            }
+            break;
+        }
+    }
+
+    if (!dynsym_sh || !dynstr_sh || dynsym_sh->sh_entsize == 0) {
+        free(shdrs);
+        fclose(fp);
+        return 0;
+    }
+
+    size_t num_syms = dynsym_sh->sh_size / dynsym_sh->sh_entsize;
+    Elf64_Sym *syms = malloc(dynsym_sh->sh_size);
+    char *strings = malloc(dynstr_sh->sh_size);
+    if (!syms || !strings) {
+        free(syms);
+        free(strings);
+        free(shdrs);
+        fclose(fp);
+        return 0;
+    }
+
+    if (fseek(fp, dynsym_sh->sh_offset, SEEK_SET) != 0 ||
+        fread(syms, dynsym_sh->sh_size, 1, fp) != 1 ||
+        fseek(fp, dynstr_sh->sh_offset, SEEK_SET) != 0 ||
+        fread(strings, dynstr_sh->sh_size, 1, fp) != 1) {
+        free(syms);
+        free(strings);
+        free(shdrs);
+        fclose(fp);
+        return 0;
+    }
+
+    fclose(fp);
+    free(shdrs);
+
+    Dl_info info;
+    void *capi_handle = NULL;
+    if (dladdr((void *)luthon_capi_can_load_extension, &info) && info.dli_fname) {
+        capi_handle = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    }
+    if (!capi_handle) {
+        capi_handle = dlopen(NULL, RTLD_NOW);
+    }
+
+    int found_init = (init_symbol == NULL) ? 1 : 0;
+    int can_load = 1;
+
+    for (size_t i = 0; i < num_syms; i++) {
+        if (syms[i].st_name >= dynstr_sh->sh_size) continue;
+        const char *name = strings + syms[i].st_name;
+        if (!name || !*name) continue;
+
+        if (init_symbol && strcmp(name, init_symbol) == 0) {
+            if (syms[i].st_shndx != SHN_UNDEF) {
+                found_init = 1;
+            }
+        }
+
+        if (syms[i].st_shndx == SHN_UNDEF) {
+            if (strncmp(name, "Py", 2) == 0 || strncmp(name, "_Py", 3) == 0) {
+                void *sym_ptr = capi_handle ? dlsym(capi_handle, name) : dlsym(RTLD_DEFAULT, name);
+                if (!sym_ptr) {
+                    can_load = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (capi_handle) {
+        dlclose(capi_handle);
+    }
+    free(syms);
+    free(strings);
+
+    return can_load && found_init;
+}
+
+/* Single-Phase and PEP 489 Multi-Phase Module Initialization */
+EXPORT PyObject* luthon_capi_init_module(void *init_fn_ptr, const char *name) {
+    if (!init_fn_ptr) return NULL;
+    typedef PyObject *(*init_func)(void);
+    init_func fn = (init_func)init_fn_ptr;
+    PyObject *res = fn();
+    if (!res) return NULL;
+
+    if (res->tag == PY_TAG_MODULE) {
+        if (name && res->as.mod_val.dict) {
+            PyDict_SetItemString(res->as.mod_val.dict, "__name__", PyUnicode_FromString(name));
+        }
+        return res;
+    }
+
+    PyModuleDef *def = (PyModuleDef *)res;
+    PyObject *mod = PyModule_FromDefAndSpec2(def, NULL, 3);
+    if (!mod) return NULL;
+    if (PyModule_ExecDef(mod, def) != 0) {
+        Py_DecRef(mod);
+        return NULL;
+    }
+    if (name && mod->as.mod_val.dict) {
+        PyDict_SetItemString(mod->as.mod_val.dict, "__name__", PyUnicode_FromString(name));
+    }
+    return mod;
+}
+
+EXPORT PyMethodDef* luthon_capi_get_module_methods(PyObject *mod) {
+    if (!mod || mod->tag != PY_TAG_MODULE) return NULL;
+    void *raw_def = mod->as.mod_val.module_def;
+    if (!raw_def) return NULL;
+    const char *name = NULL, *doc = NULL;
+    PyMethodDef *methods = NULL;
+    _get_module_def_fields(raw_def, &name, &doc, &methods);
+    return methods;
+}
+
+/* C-Function Invocation Dispatch */
+EXPORT PyObject* luthon_capi_call_cfunction(void *meth_ptr, int ml_flags, PyObject *self, PyObject *args, PyObject *kwargs) {
+    if (!meth_ptr) return NULL;
+
+    if (ml_flags & METH_KEYWORDS) {
+        typedef PyObject *(*cfunc_kw)(PyObject *, PyObject *, PyObject *);
+        cfunc_kw fn = (cfunc_kw)meth_ptr;
+        return fn(self, args ? args : PyTuple_New(0), kwargs);
+    } else if (ml_flags & METH_NOARGS) {
+        typedef PyObject *(*cfunc_noargs)(PyObject *, PyObject *);
+        cfunc_noargs fn = (cfunc_noargs)meth_ptr;
+        return fn(self, NULL);
+    } else if (ml_flags & METH_O) {
+        typedef PyObject *(*cfunc_o)(PyObject *, PyObject *);
+        cfunc_o fn = (cfunc_o)meth_ptr;
+        PyObject *arg = Py_None;
+        if (args && args->tag == PY_TAG_TUPLE && args->as.seq_val.size > 0) {
+            arg = args->as.seq_val.items[0];
+        }
+        return fn(self, arg);
+    } else {
+        typedef PyObject *(*cfunc_varargs)(PyObject *, PyObject *);
+        cfunc_varargs fn = (cfunc_varargs)meth_ptr;
+        return fn(self, args ? args : PyTuple_New(0));
+    }
 }

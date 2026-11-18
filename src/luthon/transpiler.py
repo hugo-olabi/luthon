@@ -666,6 +666,10 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
         import luthon
         luthon_root = str(Path(luthon.__file__).parent.parent)
         file_prefix += f'package.path = package.path .. ";{luthon_root}/?.lua;{luthon_root}/luthon/lua/?.lua;{luthon_root}/?/init.lua"\n'
+        from .native.build_capi import get_capi_library_path
+        capi_path = get_capi_library_path()
+        if capi_path.exists():
+            file_prefix += f'_G.__LUTHON_CAPI_LIB__ = os.getenv("LUTHON_CAPI_LIB") or "{capi_path.resolve()}"\n'
     except Exception:
         pass
     if filename:
