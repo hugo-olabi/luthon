@@ -166,16 +166,35 @@ end
 -- Waterfall Resolution: Tier 3 - Pure Python Source (.py)
 ------------------------------------------------------------------------------
 
+local _CPYTHON_FRAMEWORKS = {
+  ["gi"] = true,
+  ["twisted"] = true,
+  ["zope"] = true,
+  ["pkg_resources"] = true,
+  ["setuptools"] = true,
+  ["_distutils_hack"] = true,
+  ["pytest"] = true,
+  ["_pytest"] = true,
+  ["dbus"] = true,
+  ["cairo"] = true,
+  ["cryptography"] = true,
+}
+
 function M.find_py_module(name)
   local parts = {}
   for part in name:gmatch("([^%.]+)") do
     table.insert(parts, part)
   end
 
+  local top_mod = parts[1]
+  if _CPYTHON_FRAMEWORKS[top_mod] then
+    return nil
+  end
+
   local function try_find(part_list)
     for _, base in ipairs(M.get_search_paths()) do
-      -- Skip site-packages and dist-packages: installed packages are resolved via binary C-API or pybridge
-      if not base:find("/site%-packages") and not base:find("/dist%-packages") and not base:match("/usr/lib/python%d") then
+      -- Allow site-packages for pure-Python packages, but skip CPython stdlib roots
+      if not base:match("^/usr/lib/python%d") and not base:match("^/usr/lib64/python%d") then
         -- Package directory with __init__.py
         local pkg_dir = base .. "/" .. table.concat(part_list, "/")
         local init_path = pkg_dir .. "/__init__.py"
@@ -647,10 +666,24 @@ function M.load(name)
             return ns
           else
             sys_modules[name] = nil
+            if py_path:find("/site%-packages") or py_path:find("/dist%-packages") then
+              local py_mod = M.load_via_cpython(name)
+              if py_mod then
+                sys_modules[name] = py_mod
+                return py_mod
+              end
+            end
             error("Error executing transpiled module '" .. name .. "' (" .. tostring(py_path) .. "): " .. tostring(res), 2)
           end
         else
           sys_modules[name] = nil
+          if py_path:find("/site%-packages") or py_path:find("/dist%-packages") then
+            local py_mod = M.load_via_cpython(name)
+            if py_mod then
+              sys_modules[name] = py_mod
+              return py_mod
+            end
+          end
           error("Syntax error in transpiled module '" .. name .. "': " .. tostring(chunk_err), 2)
         end
       end

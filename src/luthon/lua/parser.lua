@@ -129,6 +129,14 @@ function Lexer:skip_whitespace()
       self:advance()
     elseif c == "\r" then
       if self:peek(1) == "\n" then self:advance(2) else self:advance() end
+    elseif c == "\\" then
+      if self:peek(1) == "\r" and self:peek(2) == "\n" then
+        self:advance(3)
+      elseif self:peek(1) == "\n" then
+        self:advance(2)
+      else
+        break
+      end
     else
       break
     end
@@ -1388,7 +1396,7 @@ function Parser:power()
         end
         if self:match(TT.OP, ":") then
           local upper = nil
-          if not self:check(TT.OP, "]") then
+          if not self:check(TT.OP, "]") and not self:check(TT.OP, ":") then
             upper = self:expr()
           end
           local step = nil
