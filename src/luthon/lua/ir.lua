@@ -1160,6 +1160,43 @@ function IRLowerer:_lower_stmt_impl(node)
 end
 
 ------------------------------------------------------------------------------
+-- Comprehension lowering helper
+------------------------------------------------------------------------------
+
+function IRLowerer:_lower_comprehension_generators(generators, emit_element_fn, end_label)
+  local function lower_at(idx, outer_loop_lbl)
+    local gen = generators[idx]
+    local is_last = (idx == #generators)
+    local loop_lbl = self:_new_label("comp_loop")
+    local iter_tmp = self:_new_tmp()
+    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
+    self:_emit("JUMP", {loop_lbl})
+    self._cur_block = self:_new_block(loop_lbl)
+    local nxt = self:_new_tmp()
+    self:_emit("NEXT", {iter_tmp}, nxt)
+    local exit_target = (idx == 1) and end_label or outer_loop_lbl
+    self:_emit("BRANCH_NONE", {nxt, exit_target})
+    self:_lower_target(gen.target, nxt)
+    if gen.ifs then
+      for _, if_expr in ipairs(gen.ifs) do
+        local chk_lbl = self:_new_label("comp_if")
+        local cond = self:lower_expr(if_expr)
+        self:_emit("BRANCH", {cond, chk_lbl, loop_lbl})
+        self._cur_block = self:_new_block(chk_lbl)
+      end
+    end
+    if is_last then
+      emit_element_fn()
+      self:_emit("JUMP", {loop_lbl})
+    else
+      lower_at(idx + 1, loop_lbl)
+    end
+  end
+
+  lower_at(1, end_label)
+end
+
+------------------------------------------------------------------------------
 -- Expression lowering
 ------------------------------------------------------------------------------
 
@@ -1472,111 +1509,53 @@ function IRLowerer:_lower_expr_impl(node)
     local res = self:_new_tmp()
     self:_emit("CALL", {"tuple", list_tmp}, res)
     return res
+  elseif t == "Set" then
+    local res = self:_new_tmp()
+    self:_emit("MAKE_SET", {}, res)
+    for _, e in ipairs(node.elts or {}) do
+      local val = self:lower_expr(e)
+      self:_emit("SET_ADD", {res, val})
+    end
+    return res
   elseif t == "ListComp" then
-    -- basic: build list from first generator
     local res = self:_new_tmp()
     self:_emit("MAKE_LIST", {}, res)
-    local gen = node.generators[1]
-    local iter_tmp = self:_new_tmp()
-    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
-    local loop_lbl = self:_new_label("lcomp")
-    local body_lbl = self:_new_label("lbody")
     local end_lbl = self:_new_label("lend")
-    self:_emit("JUMP", {loop_lbl})
-    self._cur_block = self:_new_block(loop_lbl)
-    local nxt = self:_new_tmp()
-    self:_emit("NEXT", {iter_tmp}, nxt)
-    self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    -- bind target
-    self:_lower_target(gen.target, nxt)
-    -- condition
-    if gen.ifs and #gen.ifs > 0 then
-      local cond = self:lower_expr(gen.ifs[1])
-      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
-      self._cur_block = self:_new_block(body_lbl)
-    end
-    local val = self:lower_expr(node.elt)
-    self:_emit("LIST_APPEND", {res, val})
-    self:_emit("JUMP", {loop_lbl})
+    self:_lower_comprehension_generators(node.generators, function()
+      local val = self:lower_expr(node.elt)
+      self:_emit("LIST_APPEND", {res, val})
+    end, end_lbl)
     self._cur_block = self:_new_block(end_lbl)
     return res
   elseif t == "SetComp" then
-    -- {elt for target in iter [if cond]} -> set built via SET_ADD
     local res = self:_new_tmp()
     self:_emit("MAKE_SET", {}, res)
-    local gen = node.generators[1]
-    local iter_tmp = self:_new_tmp()
-    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
-    local loop_lbl = self:_new_label("scomp")
-    local body_lbl = self:_new_label("sbody")
     local end_lbl = self:_new_label("send")
-    self:_emit("JUMP", {loop_lbl})
-    self._cur_block = self:_new_block(loop_lbl)
-    local nxt = self:_new_tmp()
-    self:_emit("NEXT", {iter_tmp}, nxt)
-    self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    self:_lower_target(gen.target, nxt)
-    if gen.ifs and #gen.ifs > 0 then
-      local cond = self:lower_expr(gen.ifs[1])
-      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
-      self._cur_block = self:_new_block(body_lbl)
-    end
-    local val = self:lower_expr(node.elt)
-    self:_emit("SET_ADD", {res, val})
-    self:_emit("JUMP", {loop_lbl})
+    self:_lower_comprehension_generators(node.generators, function()
+      local val = self:lower_expr(node.elt)
+      self:_emit("SET_ADD", {res, val})
+    end, end_lbl)
     self._cur_block = self:_new_block(end_lbl)
     return res
   elseif t == "DictComp" then
-    -- {key: value for target in iter [if cond]} -> dict built via DICT_SET
     local res = self:_new_tmp()
     self:_emit("MAKE_DICT", {}, res)
-    local gen = node.generators[1]
-    local iter_tmp = self:_new_tmp()
-    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
-    local loop_lbl = self:_new_label("dcomp")
-    local body_lbl = self:_new_label("dbody")
     local end_lbl = self:_new_label("dend")
-    self:_emit("JUMP", {loop_lbl})
-    self._cur_block = self:_new_block(loop_lbl)
-    local nxt = self:_new_tmp()
-    self:_emit("NEXT", {iter_tmp}, nxt)
-    self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    self:_lower_target(gen.target, nxt)
-    if gen.ifs and #gen.ifs > 0 then
-      local cond = self:lower_expr(gen.ifs[1])
-      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
-      self._cur_block = self:_new_block(body_lbl)
-    end
-    local key = self:lower_expr(node.key)
-    local value = self:lower_expr(node.value)
-    self:_emit("DICT_SET", {res, key, value})
-    self:_emit("JUMP", {loop_lbl})
+    self:_lower_comprehension_generators(node.generators, function()
+      local key = self:lower_expr(node.key)
+      local val = self:lower_expr(node.value)
+      self:_emit("DICT_SET", {res, key, val})
+    end, end_lbl)
     self._cur_block = self:_new_block(end_lbl)
     return res
   elseif t == "GeneratorExp" then
-    -- (elt for target in iter [if cond]) -> eager list, like ListComp
     local res = self:_new_tmp()
     self:_emit("MAKE_LIST", {}, res)
-    local gen = node.generators[1]
-    local iter_tmp = self:_new_tmp()
-    self:_emit("CALL", {"iter", self:lower_expr(gen.iter)}, iter_tmp)
-    local loop_lbl = self:_new_label("gen")
-    local body_lbl = self:_new_label("genbody")
-    local end_lbl = self:_new_label("genend")
-    self:_emit("JUMP", {loop_lbl})
-    self._cur_block = self:_new_block(loop_lbl)
-    local nxt = self:_new_tmp()
-    self:_emit("NEXT", {iter_tmp}, nxt)
-    self:_emit("BRANCH_NONE", {nxt, end_lbl})
-    self:_lower_target(gen.target, nxt)
-    if gen.ifs and #gen.ifs > 0 then
-      local cond = self:lower_expr(gen.ifs[1])
-      self:_emit("BRANCH", {cond, body_lbl, loop_lbl})
-      self._cur_block = self:_new_block(body_lbl)
-    end
-    local val = self:lower_expr(node.elt)
-    self:_emit("LIST_APPEND", {res, val})
-    self:_emit("JUMP", {loop_lbl})
+    local end_lbl = self:_new_label("gend")
+    self:_lower_comprehension_generators(node.generators, function()
+      local val = self:lower_expr(node.elt)
+      self:_emit("LIST_APPEND", {res, val})
+    end, end_lbl)
     self._cur_block = self:_new_block(end_lbl)
     return res
   elseif t == "Dict" then

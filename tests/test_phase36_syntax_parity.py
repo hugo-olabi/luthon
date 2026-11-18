@@ -341,6 +341,30 @@ print("TYPES_PROXIES_AND_NAMESPACES_PASSED")
 """
         self._run_both(py_code, "TYPES_PROXIES_AND_NAMESPACES_PASSED")
 
+    def test_nested_comprehensions(self):
+        """Test nested list, set, dict, and generator comprehensions in both pipelines."""
+        py_code = """
+levels = ['none', 'critical', 'error']
+choices = [level for k in levels for level in (k, k.upper())]
+assert choices == ['none', 'NONE', 'critical', 'CRITICAL', 'error', 'ERROR']
+
+filtered = [f"{x}:{y}" for x in (1, 2, 3) for y in (10, 20) if x % 2 == 1 if y == 20]
+assert filtered == ["1:20", "3:20"]
+
+set_comp = {y for x in (1, 2) for y in (x, x * 10)}
+assert set_comp == {1, 10, 2, 20}
+
+dict_comp = {f"{x}_{y}": x + y for x in (1, 2) for y in (10, 20) if y == 20}
+assert dict_comp == {"1_20": 21, "2_20": 22}
+
+gen_comp = list(y * 2 for x in (3, 4) for y in (x, x + 1))
+assert gen_comp == [6, 8, 8, 10]
+
+print("NESTED_COMPREHENSIONS_PASSED")
+"""
+        self._run_both(py_code, "NESTED_COMPREHENSIONS_PASSED")
+
+
 
 if __name__ == "__main__":
     unittest.main()

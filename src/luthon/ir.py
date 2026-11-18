@@ -1046,6 +1046,34 @@ class IRLowerer:
             self._emit("CALL", [fn] + list(args), result=t)
         return t
 
+    def _lower_comprehension_generators(self, generators, emit_element_fn, end_label):
+        """Recursively lowers comprehension generators (for target in iter if cond)."""
+        def lower_at(idx, outer_loop_lbl):
+            gen = generators[idx]
+            is_last = (idx == len(generators) - 1)
+            loop_lbl = self._new_label("comp_loop")
+            iter_tmp = self._new_tmp()
+            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
+            self._emit("JUMP", [loop_lbl])
+            self._cur_block = self._new_block(loop_lbl)
+            nxt = self._new_tmp()
+            self._emit("NEXT", [iter_tmp], result=nxt)
+            exit_target = end_label if idx == 0 else outer_loop_lbl
+            self._emit("BRANCH_NONE", [nxt, exit_target])
+            self._lower_target(gen.target, nxt)
+            for if_expr in (gen.ifs or []):
+                chk_lbl = self._new_label("comp_if")
+                cond = self.lower_expr(if_expr)
+                self._emit("BRANCH", [cond, chk_lbl, loop_lbl])
+                self._cur_block = self._new_block(chk_lbl)
+            if is_last:
+                emit_element_fn()
+                self._emit("JUMP", [loop_lbl])
+            else:
+                lower_at(idx + 1, loop_lbl)
+
+        lower_at(0, end_label)
+
     def lower_expr(self, node):
         if node is None:
             return None
@@ -1304,103 +1332,50 @@ class IRLowerer:
         if isinstance(node, ast.SetComp):
             res = self._new_tmp()
             self._emit("MAKE_SET", [], result=res)
-            gen = node.generators[0]
-            iter_tmp = self._new_tmp()
-            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
-            loop_lbl = self._new_label("scomp")
-            body_lbl = self._new_label("sbody")
             end_lbl = self._new_label("send")
-            self._emit("JUMP", [loop_lbl])
-            self._cur_block = self._new_block(loop_lbl)
-            nxt = self._new_tmp()
-            self._emit("NEXT", [iter_tmp], result=nxt)
-            self._emit("BRANCH_NONE", [nxt, end_lbl])
-            self._lower_target(gen.target, nxt)
-            if gen.ifs:
-                cond = self.lower_expr(gen.ifs[0])
-                self._emit("BRANCH", [cond, body_lbl, loop_lbl])
-                self._cur_block = self._new_block(body_lbl)
-            val = self.lower_expr(node.elt)
-            self._emit("SET_ADD", [res, val])
-            self._emit("JUMP", [loop_lbl])
+
+            def emit_set_elt():
+                val = self.lower_expr(node.elt)
+                self._emit("SET_ADD", [res, val])
+
+            self._lower_comprehension_generators(node.generators, emit_set_elt, end_lbl)
             self._cur_block = self._new_block(end_lbl)
             return res
         if isinstance(node, ast.DictComp):
-            # {key: value for target in iter [if cond]} -> dict built via DICT_SET
             res = self._new_tmp()
             self._emit("MAKE_DICT", [], result=res)
-            gen = node.generators[0]
-            iter_tmp = self._new_tmp()
-            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
-            loop_lbl = self._new_label("dcomp")
-            body_lbl = self._new_label("dbody")
             end_lbl = self._new_label("dend")
-            self._emit("JUMP", [loop_lbl])
-            self._cur_block = self._new_block(loop_lbl)
-            nxt = self._new_tmp()
-            self._emit("NEXT", [iter_tmp], result=nxt)
-            self._emit("BRANCH_NONE", [nxt, end_lbl])
-            self._lower_target(gen.target, nxt)
-            if gen.ifs:
-                cond = self.lower_expr(gen.ifs[0])
-                self._emit("BRANCH", [cond, body_lbl, loop_lbl])
-                self._cur_block = self._new_block(body_lbl)
-            key = self.lower_expr(node.key)
-            val = self.lower_expr(node.value)
-            self._emit("DICT_SET", [res, key, val])
-            self._emit("JUMP", [loop_lbl])
+
+            def emit_dict_elt():
+                key = self.lower_expr(node.key)
+                val = self.lower_expr(node.value)
+                self._emit("DICT_SET", [res, key, val])
+
+            self._lower_comprehension_generators(node.generators, emit_dict_elt, end_lbl)
             self._cur_block = self._new_block(end_lbl)
             return res
         if isinstance(node, ast.ListComp):
-            # basic: build list from first generator
             res = self._new_tmp()
             self._emit("MAKE_LIST", [], result=res)
-            gen = node.generators[0]
-            iter_tmp = self._new_tmp()
-            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
-            loop_lbl = self._new_label("lcomp")
-            body_lbl = self._new_label("lbody")
             end_lbl = self._new_label("lend")
-            self._emit("JUMP", [loop_lbl])
-            self._cur_block = self._new_block(loop_lbl)
-            nxt = self._new_tmp()
-            self._emit("NEXT", [iter_tmp], result=nxt)
-            self._emit("BRANCH_NONE", [nxt, end_lbl])
-            self._lower_target(gen.target, nxt)
-            # condition
-            if gen.ifs:
-                cond = self.lower_expr(gen.ifs[0])
-                self._emit("BRANCH", [cond, body_lbl, loop_lbl])
-                self._cur_block = self._new_block(body_lbl)
-            val = self.lower_expr(node.elt)
-            self._emit("LIST_APPEND", [res, val])
-            self._emit("JUMP", [loop_lbl])
+
+            def emit_list_elt():
+                val = self.lower_expr(node.elt)
+                self._emit("LIST_APPEND", [res, val])
+
+            self._lower_comprehension_generators(node.generators, emit_list_elt, end_lbl)
             self._cur_block = self._new_block(end_lbl)
             return res
         if isinstance(node, ast.GeneratorExp):
-            # (elt for target in iter [if cond]) -> eager list, like ListComp
             res = self._new_tmp()
             self._emit("MAKE_LIST", [], result=res)
-            gen = node.generators[0]
-            iter_tmp = self._new_tmp()
-            self._emit("CALL", ["iter", self.lower_expr(gen.iter)], result=iter_tmp)
-            loop_lbl = self._new_label("gcomp")
-            body_lbl = self._new_label("gbody")
             end_lbl = self._new_label("gend")
-            self._emit("JUMP", [loop_lbl])
-            self._cur_block = self._new_block(loop_lbl)
-            nxt = self._new_tmp()
-            self._emit("NEXT", [iter_tmp], result=nxt)
-            self._emit("BRANCH_NONE", [nxt, end_lbl])
-            self._lower_target(gen.target, nxt)
-            # condition
-            if gen.ifs:
-                cond = self.lower_expr(gen.ifs[0])
-                self._emit("BRANCH", [cond, body_lbl, loop_lbl])
-                self._cur_block = self._new_block(body_lbl)
-            val = self.lower_expr(node.elt)
-            self._emit("LIST_APPEND", [res, val])
-            self._emit("JUMP", [loop_lbl])
+
+            def emit_gen_elt():
+                val = self.lower_expr(node.elt)
+                self._emit("LIST_APPEND", [res, val])
+
+            self._lower_comprehension_generators(node.generators, emit_gen_elt, end_lbl)
             self._cur_block = self._new_block(end_lbl)
             return res
         if isinstance(node, ast.Dict):
