@@ -270,12 +270,19 @@ if venv:
             if hasattr(sys, "_base_executable"):
                 sys._base_executable = py_bin
             break
-    for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
+    for ver in ["3.16", "3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
         sp = os.path.join(venv, "lib", f"python{ver}", "site-packages")
         _add_site_dir(sp)
-for ver in ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
+for ver in ["3.16", "3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]:
     local_sp = os.path.abspath(os.path.join(".", ".venv", "lib", f"python{ver}", "site-packages"))
     _add_site_dir(local_sp)
+if home_env:
+    _add_site_dir(os.path.join(home_env, ".luthon", "site-packages"))
+    for ver in ["3.16", "3.15", "3.14", "3.13", "3.12"]:
+        _add_site_dir(os.path.join(home_env, ".local", "lib", f"python{ver}", "site-packages"))
+env_luthon_sp = os.environ.get("LUTHON_SITE_PACKAGES")
+if env_luthon_sp:
+    _add_site_dir(env_luthon_sp)
 pp = os.environ.get("PYTHONPATH")
 if pp:
     for p in pp.split(os.pathsep):

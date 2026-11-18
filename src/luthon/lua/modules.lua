@@ -34,9 +34,13 @@ local search_paths = {
   "./vendor",
   "./src/luthon/lua/native",
   "./.luthon_env/lib/luthon/site-packages",
+  "/usr/lib64/python3.15/site-packages",
+  "/usr/lib/python3.15/site-packages",
   "/usr/lib64/python3.14/site-packages",
   "/usr/lib/python3.14/site-packages",
   "/usr/lib64/python3.14",
+  "/usr/local/lib64/python3.15/site-packages",
+  "/usr/local/lib/python3.15/site-packages",
   "/usr/local/lib64/python3.14/site-packages",
   "/usr/local/lib/python3.14/site-packages",
   "/usr/local/lib/python3.13/dist-packages",
@@ -44,9 +48,10 @@ local search_paths = {
   "/usr/lib/python3.13",
 }
 
--- Add user site-packages (~/.local/lib/python3.14/site-packages and ~/.luthon/site-packages)
+-- Add user site-packages (~/.local/lib/python3.15/site-packages and ~/.luthon/site-packages)
 local home = os.getenv("HOME")
 if home then
+  table.insert(search_paths, home .. "/.local/lib/python3.15/site-packages")
   table.insert(search_paths, home .. "/.local/lib/python3.14/site-packages")
   table.insert(search_paths, home .. "/.local/lib/python3.13/site-packages")
   table.insert(search_paths, home .. "/.luthon/site-packages")
@@ -56,11 +61,11 @@ end
 local venv = os.getenv("VIRTUAL_ENV") or os.getenv("LUTHON_ENV")
 if venv then
   table.insert(search_paths, 1, venv .. "/lib/luthon/site-packages")
-  for _, py_ver in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
+  for _, py_ver in ipairs({"3.16", "3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
     table.insert(search_paths, 1, venv .. "/lib/python" .. py_ver .. "/site-packages")
   end
 end
-for _, py_ver in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
+for _, py_ver in ipairs({"3.16", "3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
   table.insert(search_paths, "./.venv/lib/python" .. py_ver .. "/site-packages")
 end
 
@@ -520,6 +525,13 @@ function M.load_module_file(name, path)
 
   if not ok then
     loading[name] = nil
+    if path and (path:find("/site%-packages") or path:find("/dist%-packages")) and not M.is_pure_mode() then
+      local cpy = M.load_via_cpython(name)
+      if cpy then
+        sys_modules[name] = cpy
+        return cpy
+      end
+    end
     error("module load error: " .. tostring(err), 2)
   end
 
