@@ -998,6 +998,13 @@ function _luthon_add(a, b)
   return a + b
 end
 
+function _luthon_truthy(x)
+  if x == nil or x == false or x == _G.None or x == _G._luthon_none then return false end
+  if type(x) == "table" and (rawget(x, "__is_none__") or rawget(x, "_is_py_none")) then return false end
+  return true
+end
+_G._luthon_truthy = _luthon_truthy
+
 function _luthon_cmp(op, a, b)
   if op == "is" then
     local a_is_none = (a == nil) or (a == _G._luthon_none) or (type(a) == "table" and rawget(a, "__is_none__") == true)
@@ -3130,8 +3137,14 @@ os.path.join = function(...)
     end
     return cur
   end
-  local a = {...}
-  return table.concat(a, "/")
+  local parts = {}
+  for i = 1, n do
+    local arg = select(i, ...)
+    if arg ~= nil and arg ~= _G.None and (type(arg) ~= "table" or not rawget(arg, "__is_none__")) then
+      table.insert(parts, tostring(arg))
+    end
+  end
+  return table.concat(parts, "/")
 end
 
 os.path.dirname = function(p)
@@ -5656,6 +5669,11 @@ function JSONDecoder:raw_decode(s, idx)
   return setmetatable({val, (next_pos - 1)}, _tuple_mt or {})
 end
 json.JSONDecoder = JSONDecoder
+json.decoder = {JSONDecoder = JSONDecoder, JSONDecodeError = JSONDecodeError}
+json.dump = function(obj, fp, ...)
+  local s = json.dumps(obj)
+  if fp and fp.write then return fp:write(s) end
+end
 
 local _py_json_mod = nil
 setmetatable(json, {
@@ -5715,7 +5733,17 @@ os.path.sep = "/"
 os.path.curdir = "."
 os.path.pardir = ".."
 os.path.devnull = "/dev/null"
-os.path.join = function(...) local a={...}; return table.concat(a, "/") end
+os.path.join = os.path.join or function(...)
+  local n = select("#", ...)
+  local parts = {}
+  for i = 1, n do
+    local arg = select(i, ...)
+    if arg ~= nil and arg ~= _G.None and (type(arg) ~= "table" or not rawget(arg, "__is_none__")) then
+      table.insert(parts, tostring(arg))
+    end
+  end
+  return table.concat(parts, "/")
+end
 os.path.dirname = function(p)
   p = tostring(p or "")
   local dir = p:match("^(.*)/[^/]*$")
@@ -7270,6 +7298,30 @@ function urllib_parse.urlunsplit(parts)
 end
 urllib_parse.urlunparse = urllib_parse.urlunsplit
 
+function urllib_parse.urljoin(base, url, allow_fragments)
+  base = tostring(base or "")
+  url = tostring(url or "")
+  if url:find("^%a[%w%+%-%.]*://") then return url end
+  if url:sub(1, 2) == "//" then
+    local b_scheme = base:match("^(%a[%w%+%-%.]*):")
+    if b_scheme then return b_scheme .. ":" .. url else return url end
+  end
+  if base:find(":") and not base:find("://") then
+    return base .. url
+  end
+  local b_parts = urllib_parse.urlsplit(base)
+  if url:sub(1, 1) == "/" then
+    local res = {b_parts.scheme, b_parts.netloc, url, "", ""}
+    return urllib_parse.urlunsplit(res)
+  end
+  if url == "" then return base end
+  local b_path = b_parts.path or ""
+  local last_slash = b_path:match("^(.*)/")
+  local new_path = last_slash and (last_slash .. "/" .. url) or ("/" .. url)
+  local res = {b_parts.scheme, b_parts.netloc, new_path, "", ""}
+  return urllib_parse.urlunsplit(res)
+end
+
 function urllib_parse.parse_qs(qs)
   local res = {}
   qs = tostring(qs or "")
@@ -7522,6 +7574,33 @@ end
 function codecs.open(filename, mode, encoding, errors)
   return io.open(filename, mode or "r")
 end
+function codecs.getwriter(encoding)
+  return function(stream, errors)
+    local writer = {stream = stream}
+    function writer:write(data)
+      return self.stream:write(tostring(data))
+    end
+    function writer:flush()
+      return self.stream and self.stream.flush and self.stream:flush()
+    end
+    function writer:close()
+      return self.stream and self.stream.close and self.stream:close()
+    end
+    return writer
+  end
+end
+function codecs.getreader(encoding)
+  return function(stream, errors)
+    local reader = {stream = stream}
+    function reader:read(...)
+      return self.stream:read(...)
+    end
+    function reader:close()
+      return self.stream and self.stream.close and self.stream:close()
+    end
+    return reader
+  end
+end
 
 -- numbers
 numbers = {}
@@ -7565,6 +7644,7 @@ _MODULES["io"] = io
 _MODULES["tempfile"] = tempfile
 _MODULES["shutil"] = shutil
 _MODULES["json"] = json
+_MODULES["json.decoder"] = json.decoder
 _MODULES["base64"] = base64
 _MODULES["binascii"] = binascii
 _MODULES["re"] = re
@@ -7584,6 +7664,7 @@ _MODULES["numbers"] = numbers
 _G["tempfile"] = tempfile
 _G["shutil"] = shutil
 _G["json"] = json
+_G["json.decoder"] = json.decoder
 _G["base64"] = base64
 _G["binascii"] = binascii
 _G["re"] = re

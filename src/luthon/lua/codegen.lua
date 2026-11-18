@@ -154,13 +154,13 @@ local function _emit(ins)
   elseif o == "JUMP" then
     return "goto " .. args[1]
   elseif o == "BRANCH" then
-    return "if " .. args[1] .. " then goto " .. args[2] .. " else goto " .. args[3] .. " end"
+    return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " else goto " .. args[3] .. " end"
   elseif o == "BRANCH_NONE" then
-    return "if " .. args[1] .. " == nil then goto " .. args[2] .. " end"
+    return "if " .. args[1] .. " == nil or " .. args[1] .. " == _G.None then goto " .. args[2] .. " end"
   elseif o == "BRANCH_TRUE" then
-    return "if " .. args[1] .. " then goto " .. args[2] .. " end"
+    return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "BRANCH_FALSE" then
-    return "if not " .. args[1] .. " then goto " .. args[2] .. " end"
+    return "if not _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "CMP" then
     local c = _CMP_MAP[args[1]] or args[1]
     if c == "_luthon_in" or c == "_luthon_not_in" then

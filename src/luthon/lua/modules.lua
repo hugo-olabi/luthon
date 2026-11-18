@@ -194,7 +194,8 @@ function M.find_py_module(name)
   local function try_find(part_list)
     for _, base in ipairs(M.get_search_paths()) do
       -- Allow site-packages for pure-Python packages, but skip CPython stdlib roots
-      if not base:match("^/usr/lib/python%d") and not base:match("^/usr/lib64/python%d") then
+      local is_stdlib_root = (base:match("^/usr/lib/python%d") or base:match("^/usr/lib64/python%d")) and not base:find("/site%-packages") and not base:find("/dist%-packages")
+      if not is_stdlib_root then
         -- Package directory with __init__.py
         local pkg_dir = base .. "/" .. table.concat(part_list, "/")
         local init_path = pkg_dir .. "/__init__.py"
