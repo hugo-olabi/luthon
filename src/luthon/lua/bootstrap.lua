@@ -3454,6 +3454,49 @@ random.randint = function(a,b) return math.random(a,b) end
 random.choice = function(t) return t[math.random(1,#t)] end
 random.seed = function(x) math.randomseed(x) end
 
+local _pcre2_lib = nil
+pcall(function()
+  _pcre2_lib = ffi.load("libpcre2-8.so.0")
+end)
+if not _pcre2_lib then
+  pcall(function() _pcre2_lib = ffi.load("pcre2-8") end)
+end
+
+if _pcre2_lib then
+  pcall(function()
+    ffi.cdef[[
+      typedef struct pcre2_real_code_8 pcre2_code_8;
+      typedef struct pcre2_real_match_data_8 pcre2_match_data_8;
+
+      pcre2_code_8 *pcre2_compile_8(
+        const uint8_t *pattern,
+        size_t length,
+        uint32_t options,
+        int *errorcode,
+        size_t *erroroffset,
+        void *ccontext
+      );
+      void pcre2_code_free_8(pcre2_code_8 *code);
+      pcre2_match_data_8 *pcre2_match_data_create_from_pattern_8(
+        const pcre2_code_8 *code,
+        void *gcontext
+      );
+      void pcre2_match_data_free_8(pcre2_match_data_8 *match_data);
+      int pcre2_match_8(
+        const pcre2_code_8 *code,
+        const uint8_t *subject,
+        size_t length,
+        size_t startoffset,
+        uint32_t options,
+        pcre2_match_data_8 *match_data,
+        void *mcontext
+      );
+      size_t *pcre2_get_ovector_pointer_8(pcre2_match_data_8 *match_data);
+      int pcre2_substring_number_from_name_8(const pcre2_code_8 *code, const uint8_t *name);
+    ]]
+  end)
+end
+
 local _py_re = nil
 local function _get_py_re()
   if _py_re == nil then
@@ -3479,7 +3522,172 @@ re.VERBOSE = 64
 re.X = 64
 re.ASCII = 256
 re.A = 256
+
+local _Pattern = {}
+_Pattern.__index = _Pattern
+
+local function _make_pcre2_match(subj, code, mdata, count)
+  local ovec = _pcre2_lib.pcre2_get_ovector_pointer_8(mdata)
+  local m = {
+    _subj = subj,
+    _code = code,
+    _ovec = ovec,
+    _count = count,
+  }
+  function m:group(idx)
+    idx = idx or 0
+    local g_num = idx
+    if type(idx) == "string" then
+      g_num = _pcre2_lib.pcre2_substring_number_from_name_8(self._code, idx)
+      if g_num < 0 then error("no such group: " .. idx) end
+    end
+    if g_num < 0 or g_num >= self._count then return nil end
+    local s = tonumber(self._ovec[g_num * 2])
+    local e = tonumber(self._ovec[g_num * 2 + 1])
+    if s < 0 or e < 0 then return nil end
+    return self._subj:sub(s + 1, e)
+  end
+  function m:groups()
+    local res = {}
+    for i = 1, self._count - 1 do
+      table.insert(res, self:group(i))
+    end
+    return res
+  end
+  function m:groupdict()
+    return {}
+  end
+  function m:start(idx)
+    idx = idx or 0
+    return tonumber(self._ovec[idx * 2])
+  end
+  function m:end_pos(idx)
+    idx = idx or 0
+    return tonumber(self._ovec[idx * 2 + 1])
+  end
+  m["end"] = m.end_pos
+  function m:span(idx)
+    return {self:start(idx), self:end_pos(idx)}
+  end
+  return m
+end
+
+function _Pattern:search(s, pos)
+  if s == nil then return nil end
+  s = tostring(s)
+  pos = pos or 0
+  local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+  local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+  if rc > 0 then
+    local m = _make_pcre2_match(s, self._code, mdata, rc)
+    _pcre2_lib.pcre2_match_data_free_8(mdata)
+    return m
+  end
+  _pcre2_lib.pcre2_match_data_free_8(mdata)
+  return nil
+end
+
+function _Pattern:match(s, pos)
+  if s == nil then return nil end
+  s = tostring(s)
+  pos = pos or 0
+  local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+  local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0x80000000, mdata, nil)
+  if rc > 0 then
+    local m = _make_pcre2_match(s, self._code, mdata, rc)
+    _pcre2_lib.pcre2_match_data_free_8(mdata)
+    return m
+  end
+  _pcre2_lib.pcre2_match_data_free_8(mdata)
+  return nil
+end
+
+function _Pattern:fullmatch(s)
+  if s == nil then return nil end
+  s = tostring(s)
+  local m = self:match(s, 0)
+  if m and m:end_pos(0) == #s then
+    return m
+  end
+  return nil
+end
+
+function _Pattern:findall(s)
+  if s == nil then return {} end
+  s = tostring(s)
+  local res = {}
+  local pos = 0
+  while pos <= #s do
+    local m = self:search(s, pos)
+    if not m then break end
+    local g = m:group(1) or m:group(0)
+    table.insert(res, g)
+    local next_pos = m:end_pos(0)
+    if next_pos == pos then next_pos = pos + 1 end
+    pos = next_pos
+  end
+  return res
+end
+
+function _Pattern:sub(repl, s, count)
+  s = tostring(s or "")
+  count = count or 0
+  local res = {}
+  local pos = 0
+  local replaced = 0
+  while pos <= #s do
+    local m = self:search(s, pos)
+    if not m or (count > 0 and replaced >= count) then
+      table.insert(res, s:sub(pos + 1))
+      break
+    end
+    local m_start = m:start(0)
+    local m_end = m:end_pos(0)
+    table.insert(res, s:sub(pos + 1, m_start))
+    if type(repl) == "function" then
+      table.insert(res, tostring(repl(m)))
+    else
+      table.insert(res, tostring(repl))
+    end
+    replaced = replaced + 1
+    if m_end == pos then
+      table.insert(res, s:sub(pos + 1, pos + 1))
+      pos = pos + 1
+    else
+      pos = m_end
+    end
+  end
+  return table.concat(res)
+end
+
+function _Pattern:split(s)
+  return string.split(tostring(s or ""), tostring(self.pattern))
+end
+
 re.compile = function(pattern, flags)
+  if type(pattern) == "table" and (rawget(pattern, "_code") or rawget(pattern, "_py")) then
+    return pattern
+  end
+  flags = flags or 0
+  if _pcre2_lib then
+    local opts = 0
+    if bit.band(flags, 2) ~= 0 then opts = bit.bor(opts, 0x00000008) end
+    if bit.band(flags, 8) ~= 0 then opts = bit.bor(opts, 0x00000400) end
+    if bit.band(flags, 16) ~= 0 then opts = bit.bor(opts, 0x00000020) end
+
+    local errcode = ffi.new("int[1]")
+    local erroff = ffi.new("size_t[1]")
+    local pat_str = tostring(pattern)
+    local code = _pcre2_lib.pcre2_compile_8(pat_str, #pat_str, opts, errcode, erroff, nil)
+    if code ~= nil then
+      return setmetatable({
+        _code = ffi.gc(code, _pcre2_lib.pcre2_code_free_8),
+        pattern = pattern,
+        flags = flags
+      }, _Pattern)
+    end
+  end
+
   local pyr = _get_py_re()
   if pyr then
     local ok, res
@@ -3490,137 +3698,63 @@ re.compile = function(pattern, flags)
     end
     if ok and res then return res end
   end
+
   local obj = {
     pattern = pattern,
     flags = flags or 0,
     search = function(self, s) return re.search(pattern, s) end,
     match = function(self, s) return re.match(pattern, s) end,
-    fullmatch = function(self, s)
-      -- Match entire string
-      local clean_pat = pattern:gsub("%(\\?[sS]%)%*?", ""):gsub("%^", ""):gsub("%$", "")
-      -- Basic fallback match object for Version parsing
-      local m = {
-        _groups = {},
-        group = function(self, g)
-          if type(g) == "number" then return s end
-          return self._groups[g]
-        end
-      }
-      -- Parse PEP 440 version patterns (e.g. 2.0.0a1, 1.2.0, 1.10.0)
-      local epoch, rem = s:match("^(%d+)!+(.*)$")
-      if not rem then rem = s end
-      local rel, pre_l, pre_n = rem:match("^(%d+%.[%d%.]+)(%a+)(%d*)")
-      if not rel then
-        rel = rem:match("^(%d+%.[%d%.]+)")
-      end
-      if rel then
-        m._groups["epoch"] = epoch
-        m._groups["release"] = rel
-        if pre_l then
-          m._groups["pre"] = pre_l .. (pre_n or "")
-          m._groups["pre_l"] = pre_l
-          m._groups["pre_n"] = pre_n
-        end
-        return m
-      end
-      return nil
-    end,
+    fullmatch = function(self, s) return nil end,
     sub = function(self, repl, s) return re.sub(pattern, repl, s) end,
     findall = function(self, s) return re.findall(pattern, s) end,
     split = function(self, s) return string.split(s, pattern) end,
   }
   return obj
 end
+
 re.match = function(pat, s, flags)
   if s == nil then
     if TypeError then error(TypeError("expected string or bytes-like object, got 'NoneType'"), 0)
     else error("TypeError: expected string or bytes-like object, got 'NoneType'", 0) end
   end
-  -- If pat is a compiled regex (PyProxy), use its .match method
-  if type(pat) == "table" and rawget(pat, "_py") and pat.match then
-    local bound = pat.match
-    return bound(s)
-  end
-  local pyr = _get_py_re()
-  if pyr then
-    if flags ~= nil then
-      return pyr.match(pat, s, flags)
-    else
-      return pyr.match(pat, s)
-    end
-  end
-  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
-  return string.match(s, p)
+  if type(pat) == "table" and pat.match then return pat:match(s) end
+  return re.compile(pat, flags):match(s)
 end
+
 re.search = function(pat, s, flags)
   if s == nil then
     if TypeError then error(TypeError("expected string or bytes-like object, got 'NoneType'"), 0)
     else error("TypeError: expected string or bytes-like object, got 'NoneType'", 0) end
   end
-  -- If pat is a compiled regex (PyProxy), use its .search method
-  if type(pat) == "table" and rawget(pat, "_py") and pat.search then
-    local bound = pat.search
-    return bound(s)
-  end
-  local pyr = _get_py_re()
-  if pyr then
-    if flags ~= nil then
-      return pyr.search(pat, s, flags)
-    else
-      return pyr.search(pat, s)
-    end
-  end
-  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
-  return string.match(s, p)
+  if type(pat) == "table" and pat.search then return pat:search(s) end
+  return re.compile(pat, flags):search(s)
 end
-re.sub = function(pat, repl, s, count, flags)
-  -- If pat is a compiled regex (PyProxy), use its .sub method
-  if type(pat) == "table" and rawget(pat, "_py") and pat.sub then
-    local bound = pat.sub
-    local ok, res
-    if count ~= nil then
-      ok, res = pcall(bound, repl, s, count)
-    else
-      ok, res = pcall(bound, repl, s)
-    end
-    if ok then return res end
+
+re.fullmatch = function(pat, s, flags)
+  if s == nil then
+    if TypeError then error(TypeError("expected string or bytes-like object, got 'NoneType'"), 0)
+    else error("TypeError: expected string or bytes-like object, got 'NoneType'", 0) end
   end
-  local pyr = _get_py_re()
-  if pyr then
-    local ok, res
-    if count ~= nil and flags ~= nil then
-      ok, res = pcall(pyr.sub, pat, repl, s, count, flags)
-    elseif count ~= nil then
-      ok, res = pcall(pyr.sub, pat, repl, s, count)
-    else
-      ok, res = pcall(pyr.sub, pat, repl, s)
-    end
-    if ok then return res end
-  end
-  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
-  return (string.gsub(s, p, repl))
+  if type(pat) == "table" and pat.fullmatch then return pat:fullmatch(s) end
+  return re.compile(pat, flags):fullmatch(s)
 end
+
 re.findall = function(pat, s, flags)
-  -- If pat is a compiled regex (PyProxy), use its .findall method
-  if type(pat) == "table" and rawget(pat, "_py") and pat.findall then
-    local bound = pat.findall
-    local ok, res = pcall(bound, s)
-    if ok then return res end
-  end
-  local pyr = _get_py_re()
-  if pyr then
-    local ok, res
-    if flags ~= nil then
-      ok, res = pcall(pyr.findall, pat, s, flags)
-    else
-      ok, res = pcall(pyr.findall, pat, s)
-    end
-    if ok then return res end
-  end
-  local p = (type(pat) == "table" and (pat.pattern or pat)) or pat
-  local r = {}
-  for m in string.gmatch(s, p) do r[#r+1] = m end
-  return r
+  if type(pat) == "table" and pat.findall then return pat:findall(s) end
+  return re.compile(pat, flags):findall(s)
+end
+
+re.sub = function(pat, repl, s, count, flags)
+  if type(pat) == "table" and pat.sub then return pat:sub(repl, s, count) end
+  return re.compile(pat, flags):sub(repl, s, count)
+end
+
+re.split = function(pat, s)
+  return string.split(tostring(s or ""), tostring((type(pat) == "table" and pat.pattern) or pat))
+end
+
+re.escape = function(s)
+  return tostring(s or ""):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "\\%1")
 end
 
 setmetatable(re, {
@@ -4596,6 +4730,60 @@ setmetatable(base64, {
   end
 })
 
+-- binascii
+binascii = {}
+binascii.Error = function(msg) return {__name__ = "Error", message = msg} end
+binascii.Incomplete = function(msg) return {__name__ = "Incomplete", message = msg} end
+
+function binascii.hexlify(data)
+  data = tostring(data or "")
+  local hex = {}
+  for i = 1, #data do
+    hex[i] = string.format("%02x", data:byte(i))
+  end
+  return table.concat(hex)
+end
+binascii.b2a_hex = binascii.hexlify
+
+function binascii.unhexlify(hexstr)
+  hexstr = tostring(hexstr or ""):gsub("%s+", "")
+  if #hexstr % 2 ~= 0 then error("binascii.Error: Odd-length string") end
+  local res = {}
+  for i = 1, #hexstr, 2 do
+    local b = tonumber(hexstr:sub(i, i + 1), 16)
+    if not b then error("binascii.Error: Non-hexadecimal digit found") end
+    table.insert(res, string.char(b))
+  end
+  return table.concat(res)
+end
+binascii.a2b_hex = binascii.unhexlify
+
+function binascii.b2a_base64(data, newline)
+  local res = base64.b64encode(data)
+  if newline ~= false then
+    return res .. "\n"
+  end
+  return res
+end
+
+function binascii.a2b_base64(data)
+  return base64.b64decode(data)
+end
+
+local _binascii_zlib = nil
+pcall(function()
+  ffi.cdef[[ unsigned long crc32(unsigned long crc, const unsigned char *buf, unsigned int len); ]]
+  _binascii_zlib = ffi.load("z")
+end)
+function binascii.crc32(data, value)
+  data = tostring(data or "")
+  value = value or 0
+  if _binascii_zlib then
+    return tonumber(_binascii_zlib.crc32(value, data, #data))
+  end
+  return 0
+end
+
 -- io StringIO
 io.StringIO = function(initial)
   local s = {_buf = initial or "", _pos = 1}
@@ -5256,20 +5444,8 @@ local function _cjson_node_to_lua(node, ffi_str_fn)
   return nil
 end
 
-json.decode = function(s)
-  s = tostring(s or "")
-  local cj = _get_cjson()
-  if cj ~= nil then
-    local root = cj.lib.cJSON_Parse(s)
-    if root ~= nil then
-      local ffi_str_fn = cj.ffi.string
-      local res = _cjson_node_to_lua(root, ffi_str_fn)
-      cj.lib.cJSON_Delete(root)
-      return res
-    end
-  end
-
-  local pos = 1
+function json._raw_decode(s, idx)
+  local pos = idx or 1
   local len = #s
   local parse_value, parse_object, parse_array, parse_string, parse_bool, parse_null, parse_number
   local function skip_ws()
@@ -5364,13 +5540,48 @@ json.decode = function(s)
     while pos <= len and s:sub(pos,pos):match("[%-%.%deE]") do pos = pos + 1 end
     return tonumber(s:sub(start, pos-1))
   end
-  return parse_value()
+  local val = parse_value()
+  return val, pos
+end
+
+json.decode = function(s)
+  s = tostring(s or "")
+  local cj = _get_cjson()
+  if cj ~= nil then
+    local root = cj.lib.cJSON_Parse(s)
+    if root ~= nil then
+      local ffi_str_fn = cj.ffi.string
+      local res = _cjson_node_to_lua(root, ffi_str_fn)
+      cj.lib.cJSON_Delete(root)
+      return res
+    end
+  end
+
+  local val, _ = json._raw_decode(s, 1)
+  return val
 end
 json.loads = json.decode
 json.load = function(fp)
   local c = fp:read("*a")
   return json.decode(c)
 end
+
+local JSONDecodeError = function(msg, doc, pos)
+  return {__name__ = "JSONDecodeError", msg = msg, doc = doc, pos = pos}
+end
+json.JSONDecodeError = JSONDecodeError
+
+local JSONDecoder = {}
+JSONDecoder.__index = JSONDecoder
+function JSONDecoder.new(...) return setmetatable({}, JSONDecoder) end
+setmetatable(JSONDecoder, { __call = function(cls, ...) return cls.new(...) end })
+function JSONDecoder:decode(s) return json.decode(s) end
+function JSONDecoder:raw_decode(s, idx)
+  idx = idx or 0
+  local val, next_pos = json._raw_decode(tostring(s or ""), idx + 1)
+  return val, (next_pos - 1)
+end
+json.JSONDecoder = JSONDecoder
 
 local _py_json_mod = nil
 setmetatable(json, {
@@ -5721,36 +5932,12 @@ tempfile.NamedTemporaryFile = function(suffix, prefix, dir, delete, mode, _kw)
     mode = nil
   end
 
-  local pb = _G._luthon_pybridge
-  if not pb then
-    local ok, pbmod = pcall(require, "luthon.lua.pybridge")
-    if not ok or not pbmod or not pbmod.get_lib then ok, pbmod = pcall(require, "src/luthon/lua/pybridge") end
-    if not ok or not pbmod or not pbmod.get_lib then ok, pbmod = pcall(require, "pybridge") end
-    if ok and pbmod and pbmod.get_lib then pb = pbmod end
-  end
-  if pb and pb.get_lib then
-    local py_tempfile = pb.import("tempfile")
-    if py_tempfile and py_tempfile.NamedTemporaryFile then
-      local kw_table = {}
-      if _kw then
-        for k, v in pairs(_kw) do kw_table[k] = v end
-      end
-      if suffix ~= nil then kw_table.suffix = suffix end
-      if prefix ~= nil then kw_table.prefix = prefix end
-      if dir ~= nil then kw_table.dir = dir end
-      if delete ~= nil then kw_table.delete = delete end
-      if mode ~= nil then kw_table.mode = mode end
-      kw_table.__luthon_kw = true
-      return py_tempfile.NamedTemporaryFile(kw_table)
-    end
-  end
-
   suffix = _kw and _kw.suffix or suffix or ""
   prefix = _kw and _kw.prefix or prefix or "tmp"
   dir = _kw and _kw.dir or dir or tempfile.gettempdir()
   if _kw and _kw.delete ~= nil then delete = _kw.delete end
   if delete == nil then delete = true end
-  mode = _kw and _kw.mode or mode or "w+"
+  mode = _kw and _kw.mode or mode or "w+b"
   tempfile._counter = tempfile._counter + 1
   local base = dir or tempfile.gettempdir()
   local name = base .. "/" .. prefix .. tostring(os.time()) .. "_" .. tempfile._counter .. suffix
@@ -5759,9 +5946,12 @@ tempfile.NamedTemporaryFile = function(suffix, prefix, dir, delete, mode, _kw)
   local self = {_file = f, name = name, _name = name, _delete = delete}
   function self:write(...) return self._file:write(...) end
   function self:read(...) return self._file:read(...) end
-  function self:close() self._file:close(); if self._delete then os.remove(self._name) end end
-  function self:flush() return self._file:flush() end
-  function self:seek(...) return self._file:seek(...) end
+  function self:close()
+    if self._file then self._file:close(); self._file = nil end
+    if self._delete and self._name then os.remove(self._name); self._name = nil end
+  end
+  function self:flush() return self._file and self._file:flush() end
+  function self:seek(...) return self._file and self._file:seek(...) end
   function self:fileno() return -1 end
   function self:__enter__() return self end
   function self:__exit__() self:close() end
@@ -6863,6 +7053,413 @@ _threading.current_thread = function()
   return { name = "MainThread", ident = 1 }
 end
 
+-- contextlib
+contextlib = {}
+function contextlib.closing(thing)
+  return {
+    __enter__ = function(self) return thing end,
+    __exit__ = function(self) if thing and thing.close then thing:close() end end,
+  }
+end
+function contextlib.suppress(...)
+  local exceptions = {...}
+  return {
+    __enter__ = function(self) end,
+    __exit__ = function(self, exc_type)
+      if exc_type then
+        for _, e in ipairs(exceptions) do
+          if exc_type == e or (type(exc_type) == "table" and exc_type.__name__ == e) then
+            return true
+          end
+        end
+      end
+      return false
+    end
+  }
+end
+function contextlib.nullcontext(enter_result)
+  return {
+    __enter__ = function(self) return enter_result end,
+    __exit__ = function(self) end
+  }
+end
+function contextlib.contextmanager(fn)
+  return function(...)
+    local args = {...}
+    local self = {
+      _gen = nil,
+      __enter__ = function(s)
+        s._gen = fn(unpack(args))
+        if type(s._gen) == "table" and s._gen.__enter__ then
+          return s._gen:__enter__()
+        end
+        return s._gen
+      end,
+      __exit__ = function(s, ...)
+        if type(s._gen) == "table" and s._gen.__exit__ then
+          return s._gen:__exit__(...)
+        end
+      end
+    }
+    return self
+  end
+end
+
+-- urllib
+urllib = {}
+local urllib_parse = {}
+function urllib_parse.quote(s, safe)
+  safe = safe or "/"
+  s = tostring(s or "")
+  local safe_map = {}
+  for i = 1, #safe do safe_map[safe:byte(i)] = true end
+  local out = {}
+  for i = 1, #s do
+    local b = s:byte(i)
+    if (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95 or b == 126 or safe_map[b] then
+      table.insert(out, string.char(b))
+    else
+      table.insert(out, string.format("%%%02X", b))
+    end
+  end
+  return table.concat(out)
+end
+
+function urllib_parse.unquote(s)
+  s = tostring(s or "")
+  return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+function urllib_parse.quote_plus(s, safe)
+  safe = (safe or "") .. "+"
+  s = tostring(s or ""):gsub(" ", "+")
+  return urllib_parse.quote(s, safe)
+end
+
+function urllib_parse.unquote_plus(s)
+  s = tostring(s or ""):gsub("%+", " ")
+  return urllib_parse.unquote(s)
+end
+
+function urllib_parse.urlsplit(url)
+  url = tostring(url or "")
+  local scheme, rest = url:match("^(%a[%w%+%-%.]*)://(.*)$")
+  if not scheme then scheme = ""; rest = url end
+  local netloc = ""
+  if url:find("://") then
+    local slash = rest:find("/")
+    local qmark = rest:find("?")
+    local hash = rest:find("#")
+    local cut = slash or qmark or hash or (#rest + 1)
+    netloc = rest:sub(1, cut - 1)
+    rest = rest:sub(cut)
+  end
+  local fragment = ""
+  local hash_pos = rest:find("#")
+  if hash_pos then
+    fragment = rest:sub(hash_pos + 1)
+    rest = rest:sub(1, hash_pos - 1)
+  end
+  local query = ""
+  local q_pos = rest:find("?")
+  if q_pos then
+    query = rest:sub(q_pos + 1)
+    rest = rest:sub(1, q_pos - 1)
+  end
+  local path = rest
+  local res = {scheme, netloc, path, query, fragment}
+  res.scheme = scheme
+  res.netloc = netloc
+  res.path = path
+  res.query = query
+  res.fragment = fragment
+  return res
+end
+urllib_parse.urlparse = urllib_parse.urlsplit
+
+function urllib_parse.urlunsplit(parts)
+  local s = ""
+  if parts[1] and parts[1] ~= "" then s = s .. parts[1] .. "://" end
+  if parts[2] and parts[2] ~= "" then s = s .. parts[2] end
+  if parts[3] and parts[3] ~= "" then s = s .. parts[3] end
+  if parts[4] and parts[4] ~= "" then s = s .. "?" .. parts[4] end
+  if parts[5] and parts[5] ~= "" then s = s .. "#" .. parts[5] end
+  return s
+end
+urllib_parse.urlunparse = urllib_parse.urlunsplit
+
+function urllib_parse.parse_qs(qs)
+  local res = {}
+  qs = tostring(qs or "")
+  for pair in qs:gmatch("([^&;]+)") do
+    local k, v = pair:match("^(.-)=(.*)$")
+    if not k then k = pair; v = "" end
+    k = urllib_parse.unquote_plus(k)
+    v = urllib_parse.unquote_plus(v)
+    res[k] = res[k] or {}
+    table.insert(res[k], v)
+  end
+  return res
+end
+
+function urllib_parse.urlencode(query)
+  local parts = {}
+  if type(query) == "table" then
+    for k, v in pairs(query) do
+      if type(v) == "table" then
+        for _, item in ipairs(v) do
+          table.insert(parts, urllib_parse.quote_plus(k) .. "=" .. urllib_parse.quote_plus(item))
+        end
+      else
+        table.insert(parts, urllib_parse.quote_plus(k) .. "=" .. urllib_parse.quote_plus(v))
+      end
+    end
+  end
+  return table.concat(parts, "&")
+end
+
+local urllib_request = {}
+function urllib_request.pathname2url(p)
+  p = tostring(p or ""):gsub("\\", "/")
+  return urllib_parse.quote(p, "/:")
+end
+function urllib_request.url2pathname(u)
+  return urllib_parse.unquote(u)
+end
+
+urllib.parse = urllib_parse
+urllib.request = urllib_request
+
+-- platform
+platform = {}
+function platform.system() return "Linux" end
+function platform.machine() return "x86_64" end
+function platform.node() return os.getenv("HOSTNAME") or "localhost" end
+function platform.release() return "6.1.0" end
+function platform.version() return "Linux" end
+function platform.python_version() return "3.14.0" end
+function platform.python_version_tuple() return {"3", "14", "0"} end
+function platform.architecture() return {"64bit", "ELF"} end
+function platform.uname()
+  local u = {"Linux", platform.node(), platform.release(), platform.version(), platform.machine(), "x86_64"}
+  u.system = "Linux"
+  u.node = u[2]
+  u.release = u[3]
+  u.version = u[4]
+  u.machine = u[5]
+  u.processor = u[6]
+  return u
+end
+
+-- glob
+glob = {}
+function glob.escape(pathname)
+  return pathname:gsub("([%*%?%[])", "[%1]")
+end
+function glob.glob(pathname)
+  local results = {}
+  if not pathname:find("[*?]") then
+    local f = io.open(pathname, "r")
+    if f then f:close(); table.insert(results, pathname) end
+    return results
+  end
+  local cmd = "ls -d " .. pathname .. " 2>/dev/null"
+  local handle = io.popen(cmd)
+  if handle then
+    for line in handle:lines() do
+      table.insert(results, line)
+    end
+    handle:close()
+  end
+  return results
+end
+glob.iglob = glob.glob
+
+-- warnings
+warnings = {}
+function warnings.warn(message, category, stacklevel)
+  io.stderr:write("UserWarning: " .. tostring(message) .. "\n")
+end
+function warnings.simplefilter(...) end
+function warnings.filterwarnings(...) end
+function warnings.catch_warnings(...)
+  return {
+    __enter__ = function(self) return {} end,
+    __exit__ = function(self) end,
+  }
+end
+
+-- textwrap
+textwrap = {}
+function textwrap.dedent(text)
+  text = tostring(text or "")
+  local lines = {}
+  local eols = {}
+  local min_indent = nil
+  local pos = 1
+  local len = #text
+  while pos <= len do
+    local s, e = text:find("\r?\n", pos)
+    local line, eol
+    if s then
+      line = text:sub(pos, s - 1)
+      eol = text:sub(s, e)
+      pos = e + 1
+    else
+      line = text:sub(pos)
+      eol = ""
+      pos = len + 1
+    end
+    if line:match("%S") then
+      local indent = #(line:match("^%s*") or "")
+      if min_indent == nil or indent < min_indent then
+        min_indent = indent
+      end
+    end
+    table.insert(lines, line)
+    table.insert(eols, eol)
+  end
+  min_indent = min_indent or 0
+  local out = {}
+  for i, line in ipairs(lines) do
+    if #line >= min_indent and line:match("%S") then
+      table.insert(out, line:sub(min_indent + 1) .. eols[i])
+    else
+      table.insert(out, line .. eols[i])
+    end
+  end
+  return table.concat(out)
+end
+
+function textwrap.indent(text, prefix, predicate)
+  text = tostring(text or "")
+  prefix = prefix or "    "
+  if predicate == nil then
+    predicate = function(line) return line:match("%S") ~= nil end
+  end
+  local out = {}
+  local pos = 1
+  local len = #text
+  while pos <= len do
+    local s, e = text:find("\r?\n", pos)
+    local line, eol
+    if s then
+      line = text:sub(pos, s - 1)
+      eol = text:sub(s, e)
+      pos = e + 1
+    else
+      line = text:sub(pos)
+      eol = ""
+      pos = len + 1
+    end
+    if predicate(line) then
+      table.insert(out, prefix .. line .. eol)
+    else
+      table.insert(out, line .. eol)
+    end
+  end
+  return table.concat(out)
+end
+
+function textwrap.fill(text, width)
+  width = width or 70
+  text = tostring(text or ""):gsub("%s+", " ")
+  local words = {}
+  for w in text:gmatch("%S+") do table.insert(words, w) end
+  local lines = {}
+  local cur = {}
+  local cur_len = 0
+  for _, w in ipairs(words) do
+    if cur_len + #w + (#cur > 0 and 1 or 0) <= width then
+      table.insert(cur, w)
+      cur_len = cur_len + #w + (#cur > 1 and 1 or 0)
+    else
+      table.insert(lines, table.concat(cur, " "))
+      cur = {w}
+      cur_len = #w
+    end
+  end
+  if #cur > 0 then table.insert(lines, table.concat(cur, " ")) end
+  return table.concat(lines, "\n")
+end
+function textwrap.wrap(text, width)
+  local f = textwrap.fill(text, width)
+  local res = {}
+  for l in f:gmatch("([^\n]+)") do table.insert(res, l) end
+  return res
+end
+function textwrap.shorten(text, width, placeholder)
+  width = width or 70
+  placeholder = placeholder or " [...]"
+  text = tostring(text or ""):gsub("%s+", " ")
+  if #text <= width then return text end
+  return text:sub(1, width - #placeholder) .. placeholder
+end
+
+-- gettext
+gettext = {}
+function gettext.bindtextdomain(domain, dir) return dir or "" end
+function gettext.textdomain(domain) return domain or "" end
+function gettext.gettext(msg) return msg end
+function gettext.dgettext(domain, msg) return msg end
+function gettext.ngettext(s, p, n) return (n == 1) and s or p end
+local NullTranslations = {}
+NullTranslations.__index = NullTranslations
+function NullTranslations:gettext(msg) return msg end
+function NullTranslations:ngettext(s, p, n) return (n == 1) and s or p end
+function NullTranslations:install(...) _G._ = gettext.gettext end
+gettext.NullTranslations = NullTranslations
+function gettext.translation(...) return setmetatable({}, NullTranslations) end
+function gettext.install(...) _G._ = gettext.gettext end
+
+-- locale
+locale = {}
+locale.LC_ALL = 6
+locale.LC_COLLATE = 3
+locale.LC_CTYPE = 0
+locale.LC_MESSAGES = 5
+locale.LC_MONETARY = 4
+locale.LC_NUMERIC = 1
+locale.LC_TIME = 2
+function locale.setlocale(cat, loc) return loc or "C" end
+function locale.getlocale(cat) return {"en_US", "UTF-8"} end
+function locale.getpreferredencoding(do_setlocale) return "UTF-8" end
+
+-- codecs
+codecs = {}
+codecs.BOM_UTF8 = "\239\187\191"
+function codecs.encode(obj, encoding, errors) return tostring(obj) end
+function codecs.decode(obj, encoding, errors) return tostring(obj) end
+function codecs.lookup(encoding)
+  return {
+    name = encoding or "utf-8",
+    encode = function(s) return s, #s end,
+    decode = function(b) return b, #b end,
+  }
+end
+function codecs.open(filename, mode, encoding, errors)
+  return io.open(filename, mode or "r")
+end
+
+-- numbers
+numbers = {}
+local Number = {}
+Number.__name__ = "Number"
+Number.__index = Number
+local Complex = setmetatable({__name__ = "Complex"}, {__index = Number})
+Complex.__index = Complex
+local Real = setmetatable({__name__ = "Real"}, {__index = Complex})
+Real.__index = Real
+local Rational = setmetatable({__name__ = "Rational"}, {__index = Real})
+Rational.__index = Rational
+local Integral = setmetatable({__name__ = "Integral"}, {__index = Rational})
+Integral.__index = Integral
+numbers.Number = Number
+numbers.Complex = Complex
+numbers.Real = Real
+numbers.Rational = Rational
+numbers.Integral = Integral
+
 _G.concurrent = _concurrent
 _G["concurrent.futures"] = _futures
 _G.threading = _threading
@@ -6880,6 +7477,46 @@ _MODULES["string"] = string
 _MODULES["types"] = types
 _MODULES["socket"] = _socket_mod
 _MODULES["hashlib"] = hashlib
+_MODULES["random"] = random
+_MODULES["dataclasses"] = dataclasses
+_MODULES["io"] = io
+_MODULES["tempfile"] = tempfile
+_MODULES["shutil"] = shutil
+_MODULES["json"] = json
+_MODULES["base64"] = base64
+_MODULES["binascii"] = binascii
+_MODULES["re"] = re
+_MODULES["contextlib"] = contextlib
+_MODULES["urllib"] = urllib
+_MODULES["urllib.parse"] = urllib.parse
+_MODULES["urllib.request"] = urllib.request
+_MODULES["platform"] = platform
+_MODULES["glob"] = glob
+_MODULES["warnings"] = warnings
+_MODULES["textwrap"] = textwrap
+_MODULES["gettext"] = gettext
+_MODULES["locale"] = locale
+_MODULES["codecs"] = codecs
+_MODULES["numbers"] = numbers
+
+_G["tempfile"] = tempfile
+_G["shutil"] = shutil
+_G["json"] = json
+_G["base64"] = base64
+_G["binascii"] = binascii
+_G["re"] = re
+_G["contextlib"] = contextlib
+_G["urllib"] = urllib
+_G["urllib.parse"] = urllib.parse
+_G["urllib.request"] = urllib.request
+_G["platform"] = platform
+_G["glob"] = glob
+_G["warnings"] = warnings
+_G["textwrap"] = textwrap
+_G["gettext"] = gettext
+_G["locale"] = locale
+_G["codecs"] = codecs
+_G["numbers"] = numbers
 
 -- Phase 39: math.simd runtime module
 local _simd_mod = {}
