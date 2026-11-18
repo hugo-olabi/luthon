@@ -40,14 +40,18 @@ local function _record_nyi_feature(category, name)
 end
 
 function pybridge.flush_nyi_report()
-  local target_file = _G.__file__ or os.getenv("LUTHON_EXECUTED_FILE")
-  if not target_file or target_file == "" then return end
+  if os.getenv("LUTHON_NYI_DISABLED") == "1" then return end
   local count = 0
   for _ in pairs(_nyi_features) do count = count + 1 end
   if count == 0 then return end
 
-  -- Path beside the executed file: "<filename>.luthon-nyi"
-  local nyi_path = target_file .. ".luthon-nyi"
+  local nyi_path = os.getenv("LUTHON_NYI_FILE")
+  if not nyi_path or nyi_path == "" then
+    local target_file = _G.__file__ or os.getenv("LUTHON_EXECUTED_FILE")
+    if not target_file or target_file == "" then return end
+    nyi_path = target_file .. ".luthon-nyi"
+  end
+
   local f = io.open(nyi_path, "w")
   if not f then return end
 
@@ -1662,25 +1666,36 @@ end
 
 local function sync_sys_argv(custom_args)
   pcall(function()
-    local py_sys = pybridge.import("sys")
-    if py_sys then
-      local argv_list = _G._list_mt and setmetatable({}, _G._list_mt) or {}
+    local libpy = pybridge.get_lib()
+    if not libpy then return end
+    local sys_mod = libpy.PyImport_ImportModule("sys")
+    if sys_mod ~= nil and sys_mod ~= none_ptr then
+      local args_to_use = {}
       if custom_args and type(custom_args) == "table" then
         for i = 1, #custom_args do
-          table.insert(argv_list, tostring(custom_args[i]))
+          table.insert(args_to_use, tostring(custom_args[i]))
         end
       elseif _G.sys and type(_G.sys.argv) == "table" and #_G.sys.argv > 0 then
         for i = 1, #_G.sys.argv do
-          table.insert(argv_list, tostring(_G.sys.argv[i]))
+          table.insert(args_to_use, tostring(_G.sys.argv[i]))
         end
       elseif _G.arg and type(_G.arg) == "table" then
-        table.insert(argv_list, _G.arg[0] or "luthon")
+        table.insert(args_to_use, _G.arg[0] or "luthon")
         for i = 1, #_G.arg do
-          table.insert(argv_list, tostring(_G.arg[i]))
+          table.insert(args_to_use, tostring(_G.arg[i]))
         end
       end
-      if #argv_list == 0 then table.insert(argv_list, "luthon") end
-      py_sys.argv = argv_list
+      if #args_to_use == 0 then table.insert(args_to_use, "luthon") end
+
+      local py_argv = libpy.PyList_New(#args_to_use)
+      for i = 1, #args_to_use do
+        local s = tostring(args_to_use[i])
+        local pystr = libpy.PyUnicode_FromStringAndSize(s, #s)
+        libpy.PyList_SetItem(py_argv, i - 1, pystr)
+      end
+      libpy.PyObject_SetAttrString(sys_mod, "argv", py_argv)
+      decref(py_argv)
+      decref(sys_mod)
     end
   end)
 end

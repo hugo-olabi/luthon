@@ -3634,7 +3634,13 @@ setmetatable(re, {
 
 -- os extended
 os.environ = os.environ or {}
-os.exit = os.exit or os.exit
+local _native_os_exit = os.exit or function(...) end
+os.exit = function(code, ...)
+  if _G._luthon_pybridge and _G._luthon_pybridge.flush_nyi_report then
+    pcall(_G._luthon_pybridge.flush_nyi_report)
+  end
+  return _native_os_exit(code, ...)
+end
 os.rename = os.rename or function(old, new) return true end
 os.tmpname = os.tmpname or function() return "/tmp/luthon_tmp" end
 os.clock = os.clock or os.clock

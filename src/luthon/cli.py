@@ -222,6 +222,8 @@ def run_code(
         tmp_py.write(code)
         tmp_py_path = Path(tmp_py.name)
     try:
+        if "LUTHON_NYI_FILE" not in os.environ:
+            os.environ["LUTHON_NYI_FILE"] = str((Path.cwd() / "luthon_inline.luthon-nyi").resolve())
         return run_file(
             input_path=tmp_py_path,
             script_args=script_args,
@@ -249,7 +251,10 @@ def main(argv: list[str] | None = None) -> int:
         code = raw_argv[1] if len(raw_argv) > 1 else ""
         script_args = raw_argv[2:] if len(raw_argv) > 2 else []
         is_pure = "--pure" in script_args
-        filtered_args = [a for a in script_args if a != "--pure"]
+        no_nyi = "--no-nyi" in script_args
+        if no_nyi:
+            os.environ["LUTHON_NYI_DISABLED"] = "1"
+        filtered_args = [a for a in script_args if a not in ("--pure", "--no-nyi")]
         return run_code(code=code, script_args=filtered_args, pure=is_pure)
 
     # Direct execution check: if first argument is a .py file or an existing file (not a known command or option flag)
@@ -312,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     r.add_argument("--cache-dir", default=None, help="Cache directory")
     r.add_argument("--pure", action="store_true", default=False, help="Disable native Lua shims; use only Luthon stdlib native and C-API proxy / binary reflection")
+    r.add_argument("--no-nyi", action="store_true", default=False, help="Disable generation of .luthon-nyi fallback report")
 
     t = sub.add_parser("transpile", help="Transpile a Python file to Lua")
     t.add_argument("input", help="Input .py file")
@@ -353,6 +359,8 @@ def main(argv: list[str] | None = None) -> int:
     args, extra = parser.parse_known_args(raw_argv)
 
     if args.command == "run":
+        if getattr(args, "no_nyi", False):
+            os.environ["LUTHON_NYI_DISABLED"] = "1"
         if args.code is not None:
             script_args = ([args.input] if args.input else []) + (args.args or []) + extra
             return run_code(
