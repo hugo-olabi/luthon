@@ -16,7 +16,94 @@ import sys
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+try:
+    from packaging.requirements import Requirement
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import parse as parse_version
+except ImportError:
+    Requirement = None
+    SpecifierSet = None
+    parse_version = None
+
+
+def _parse_simple_version(v_str: str) -> tuple:
+    parts = []
+    for token in re.findall(r"\d+|[a-zA-Z]+", v_str):
+        if token.isdigit():
+            parts.append(int(token))
+        else:
+            parts.append(token)
+    return tuple(parts)
+
+
+def parse_package_spec(req_str: str) -> Tuple[str, Optional[Any]]:
+    """Parses a requirement string like 'setuptools<=81.0.0' or 'requests>=2.0' into (name, specifier)."""
+    req_str = req_str.strip()
+    if Requirement is not None:
+        try:
+            req = Requirement(req_str)
+            return req.name, req.specifier if str(req.specifier) else None
+        except Exception:
+            pass
+    m = re.match(r"^([A-Za-z0-9_.\-]+)\s*(.*)$", req_str)
+    if m:
+        name = m.group(1)
+        spec = m.group(2).strip()
+        if SpecifierSet is not None and spec:
+            try:
+                return name, SpecifierSet(spec)
+            except Exception:
+                pass
+        return name, spec or None
+    return req_str, None
+
+
+def _version_matches(v_str: str, spec: Any) -> Tuple[bool, Any]:
+    """Helper to check if v_str matches spec, returning (matches, sort_key)."""
+    if parse_version is not None:
+        try:
+            pv = parse_version(v_str)
+            if pv.is_prerelease:
+                return False, None
+            if isinstance(spec, SpecifierSet):
+                return (pv in spec), pv
+            spec_str = str(spec).strip()
+            if spec_str.startswith("=="):
+                return (pv == parse_version(spec_str[2:].strip())), pv
+            elif spec_str.startswith("<="):
+                return (pv <= parse_version(spec_str[2:].strip())), pv
+            elif spec_str.startswith(">="):
+                return (pv >= parse_version(spec_str[2:].strip())), pv
+            elif spec_str.startswith("<"):
+                return (pv < parse_version(spec_str[1:].strip())), pv
+            elif spec_str.startswith(">"):
+                return (pv > parse_version(spec_str[1:].strip())), pv
+            elif spec_str.startswith("!="):
+                return (pv != parse_version(spec_str[2:].strip())), pv
+            return True, pv
+        except Exception:
+            return False, None
+    else:
+        try:
+            sv = _parse_simple_version(v_str)
+            spec_str = str(spec).strip()
+            if spec_str.startswith("=="):
+                return (sv == _parse_simple_version(spec_str[2:].strip())), sv
+            elif spec_str.startswith("<="):
+                return (sv <= _parse_simple_version(spec_str[2:].strip())), sv
+            elif spec_str.startswith(">="):
+                return (sv >= _parse_simple_version(spec_str[2:].strip())), sv
+            elif spec_str.startswith("<"):
+                return (sv < _parse_simple_version(spec_str[1:].strip())), sv
+            elif spec_str.startswith(">"):
+                return (sv > _parse_simple_version(spec_str[1:].strip())), sv
+            elif spec_str.startswith("!="):
+                return (sv != _parse_simple_version(spec_str[2:].strip())), sv
+            return True, sv
+        except Exception:
+            return False, None
 
 
 def get_default_site_packages() -> Path:
@@ -47,9 +134,33 @@ class PipInstaller:
         except Exception as e:
             raise RuntimeError(f"Failed to fetch metadata for '{package_name}' from PyPI: {e}")
 
-    def find_best_wheel(self, info: dict) -> Tuple[str, str]:
+    def find_best_wheel(self, info: dict, spec: Optional[Any] = None) -> Tuple[str, str]:
         """Selects the best wheel (preferring pure-Python universal or HPy universal wheels)."""
         urls = info.get("urls", [])
+        if spec:
+            releases = info.get("releases", {})
+            candidates = []
+            for v_str, v_urls in releases.items():
+                if not v_urls:
+                    continue
+                matches, sort_key = _version_matches(v_str, spec)
+                if matches:
+                    candidates.append((sort_key, v_str, v_urls))
+
+            if not candidates:
+                raise RuntimeError(f"No release matching '{spec}' found for {info.get('info', {}).get('name')}")
+            candidates.sort(key=lambda c: c[0])
+            selected_urls = []
+            for _, v_str, v_urls in reversed(candidates):
+                has_wheel = any(item.get("filename", "").endswith(".whl") for item in v_urls)
+                if has_wheel:
+                    info["_selected_version"] = v_str
+                    selected_urls = v_urls
+                    break
+            if not selected_urls:
+                raise RuntimeError(f"No wheel found matching '{spec}' for {info.get('info', {}).get('name')}")
+            urls = selected_urls
+
         # 1. HPy Universal ABI wheel: *-hpy_*.whl or *-hpy.whl
         for item in urls:
             fn = item.get("filename", "")
@@ -101,14 +212,15 @@ class PipInstaller:
         if visited is None:
             visited = set()
 
-        pkg_canonical = re.sub(r"[-_.]+", "-", package_name).lower()
+        name, spec = parse_package_spec(package_name)
+        pkg_canonical = re.sub(r"[-_.]+", "-", name).lower()
         if pkg_canonical in visited:
             return True
         visited.add(pkg_canonical)
 
         print(f"[*] Fetching metadata for {package_name}...")
-        meta = self.fetch_metadata(package_name)
-        wheel_url, wheel_filename = self.find_best_wheel(meta)
+        meta = self.fetch_metadata(name)
+        wheel_url, wheel_filename = self.find_best_wheel(meta, spec=spec)
 
         print(f"[*] Downloading {wheel_filename}...")
         req = urllib.request.Request(wheel_url, headers={"User-Agent": "luthon-pip/0.1.0"})
@@ -120,8 +232,8 @@ class PipInstaller:
             zf.extractall(self.target_dir)
 
         # Find .dist-info directory
-        version = meta.get("info", {}).get("version", "unknown")
-        dist_info_name = f"{package_name.replace('-', '_')}-{version}.dist-info"
+        version = meta.get("_selected_version") or meta.get("info", {}).get("version", "unknown")
+        dist_info_name = f"{name.replace('-', '_')}-{version}.dist-info"
         dist_info_dir = self.target_dir / dist_info_name
         if not dist_info_dir.exists():
             for d in self.target_dir.glob("*.dist-info"):
@@ -142,15 +254,18 @@ class PipInstaller:
                 except Exception as e:
                     print(f"[-] Warning: Failed to install dependency '{dep}': {e}")
 
-        print(f"[+] Successfully installed {package_name}=={version}!")
+        print(f"[+] Successfully installed {name}=={version}!")
         return True
 
     def aot_compile_directory(self, directory: Path) -> int:
         """Pre-compiles .py files into .lua modules via Luthon IR pipeline."""
         from .transpiler import transpile_ir
 
+        skip_packages = {"setuptools", "pkg_resources", "distutils", "pip", "wheel", "_distutils_hack"}
         compiled_count = 0
         for py_path in directory.rglob("*.py"):
+            if any(part in skip_packages for part in py_path.parts):
+                continue
             lua_path = py_path.with_suffix(".lua")
             if lua_path.exists() and lua_path.stat().st_mtime >= py_path.stat().st_mtime:
                 continue
@@ -190,7 +305,8 @@ class PipInstaller:
 
     def uninstall(self, package_name: str) -> bool:
         """Uninstalls a package by reading RECORD inside .dist-info."""
-        pkg_canonical = re.sub(r"[-_.]+", "-", package_name).lower()
+        name, _ = parse_package_spec(package_name)
+        pkg_canonical = re.sub(r"[-_.]+", "-", name).lower()
         target_dist = None
         for d in self.target_dir.glob("*.dist-info"):
             if re.sub(r"[-_.]+", "-", d.name.split("-")[0]).lower() == pkg_canonical:

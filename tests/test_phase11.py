@@ -105,3 +105,53 @@ print("SIX_TEST_OK")
     )
     assert res.returncode == 0
     assert "SIX_TEST_OK" in res.stdout
+
+
+def test_pip_version_specifiers_and_wheel_selection():
+    from luthon.pip import parse_package_spec, _version_matches
+
+    name, spec = parse_package_spec("setuptools<=81.0.0")
+    assert name == "setuptools"
+    assert spec is not None
+
+    matches, key = _version_matches("81.0.0", spec)
+    assert matches is True
+
+    matches_higher, _ = _version_matches("82.0.0", spec)
+    assert matches_higher is False
+
+    mock_info = {
+        "info": {"name": "sample-pkg"},
+        "releases": {
+            "1.0.0": [{"filename": "sample_pkg-1.0.0-py3-none-any.whl", "url": "https://example.com/1.0.whl"}],
+            "1.5.0": [{"filename": "sample_pkg-1.5.0-py3-none-any.whl", "url": "https://example.com/1.5.whl"}],
+            "2.0.0": [{"filename": "sample_pkg-2.0.0-py3-none-any.whl", "url": "https://example.com/2.0.whl"}],
+        }
+    }
+    installer = PipInstaller()
+    url, fn = installer.find_best_wheel(mock_info, spec=spec if False else "<=1.5.0")
+    assert fn == "sample_pkg-1.5.0-py3-none-any.whl"
+    assert url == "https://example.com/1.5.whl"
+    assert mock_info["_selected_version"] == "1.5.0"
+
+
+def test_dict_and_sys_modules_pop_default(tmp_path):
+    test_script = tmp_path / "test_pop.py"
+    test_script.write_text("""
+import sys
+
+d = {"a": 1}
+val1 = d.pop("b", None)
+val2 = d.pop("a")
+val3 = sys.modules.pop("nonexistent_module_foo_bar", None)
+
+print("POP_VALS:", val1 is None, val2 == 1, val3 is None)
+""")
+    res = subprocess.run(
+        [sys.executable, "-m", "luthon.main", str(test_script)],
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": "src"}
+    )
+    assert res.returncode == 0
+    assert "POP_VALS:\ttrue\ttrue\ttrue" in res.stdout
