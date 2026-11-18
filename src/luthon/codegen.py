@@ -505,7 +505,7 @@ def generate(module, sourcemap=None):
             "local cv = " + c + "[k]; "
             "if type(cv) == 'table' and type(cv.__get__) == 'function' then return cv:__get__(inst, " + c + ") end; "
             "if type(cv) == 'function' then "
-            "return function(...) if select(1, ...) == inst then return cv(...) else return cv(inst, ...) end end end; "
+            "return (_G._luthon_bind_method and _G._luthon_bind_method(cv, inst)) or function(...) if select(1, ...) == inst then return cv(...) else return cv(inst, ...) end end end; "
             "if cv ~= nil then return cv end; "
             "local py = rawget(inst, '_py'); if py ~= nil then local ok, res = pcall(function() return py[k] end); if ok and res ~= nil then return res end end; "
             "local g = rawget(inst, '__getattr__') or (rawget(inst, '__class__') and inst.__class__.__getattr__); "

@@ -583,7 +583,8 @@ function _seq_extend(target, src)
   return target
 end
 
-_G.__LUTHON_FN_PARAMS = _G.__LUTHON_FN_PARAMS or {}
+_G.__LUTHON_FN_PARAMS = _G.__LUTHON_FN_PARAMS or setmetatable({}, { __mode = "k" })
+_G.__LUTHON_BOUND_SELF = _G.__LUTHON_BOUND_SELF or setmetatable({}, { __mode = "k" })
 _G._kw_mt = _G._kw_mt or { __luthon_kw = true }
 
 function _luthon_reg_fn(fn, params)
@@ -591,6 +592,22 @@ function _luthon_reg_fn(fn, params)
     _G.__LUTHON_FN_PARAMS[fn] = params
   end
   return fn
+end
+
+function _luthon_bind_method(cv, inst)
+  local bm = function(...)
+    if select(1, ...) == inst then
+      return cv(...)
+    else
+      return cv(inst, ...)
+    end
+  end
+  local p = _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[cv]
+  if p then
+    _G.__LUTHON_FN_PARAMS[bm] = p
+    _G.__LUTHON_BOUND_SELF[bm] = inst
+  end
+  return bm
 end
 
 function _luthon_call_kw(fn, kw_table, ...)
@@ -647,13 +664,21 @@ function _luthon_call_kw(fn, kw_table, ...)
   local param_names = _G.__LUTHON_FN_PARAMS and _G.__LUTHON_FN_PARAMS[fn]
   if param_names then
     local pos_args = { ... }
+    local num_pos = select("#", ...)
+    local bound_self = _G.__LUTHON_BOUND_SELF and _G.__LUTHON_BOUND_SELF[fn]
+    if bound_self ~= nil and (num_pos == 0 or pos_args[1] ~= bound_self) then
+      for i = num_pos, 1, -1 do
+        pos_args[i + 1] = pos_args[i]
+      end
+      pos_args[1] = bound_self
+      num_pos = num_pos + 1
+    end
     local call_args = {}
     local num_params = #param_names
-    local num_pos = #pos_args
     local max_idx = num_params > num_pos and num_params or num_pos
     for i = 1, num_params do
       local name = param_names[i]
-      if pos_args[i] ~= nil then
+      if i <= num_pos and pos_args[i] ~= nil then
         call_args[i] = pos_args[i]
       elseif kw_table and kw_table[name] ~= nil then
         call_args[i] = kw_table[name]
@@ -1246,8 +1271,19 @@ local function _luthon_lt(a, b)
   return tostring(a) < tostring(b)
 end
 
+local function _sync_if_sys_argv(lst)
+  if _G.sys and rawequal(lst, _G.sys.argv) then
+    pcall(function()
+      local pb = _G._luthon_pybridge or _G.pybridge or package.loaded["pybridge"] or package.loaded["luthon.lua.pybridge"] or package.loaded["src/luthon/lua/pybridge"]
+      if pb and pb.sync_sys_argv then
+        pb.sync_sys_argv(lst)
+      end
+    end)
+  end
+end
+
 local _list_methods = {
-  append = function(self, x) table.insert(self, x) end,
+  append = function(self, x) table.insert(self, x); _sync_if_sys_argv(self) end,
   extend = function(self, other)
     local it = iter(other)
     while true do
@@ -1255,21 +1291,24 @@ local _list_methods = {
       if v == nil then break end
       table.insert(self, v)
     end
+    _sync_if_sys_argv(self)
   end,
   pop = function(self, idx)
     idx = idx or (#self - 1)
     if idx < 0 then idx = #self + idx end
-    return table.remove(self, idx + 1)
+    local v = table.remove(self, idx + 1)
+    _sync_if_sys_argv(self)
+    return v
   end,
-  insert = function(self, idx, x) table.insert(self, idx + 1, x) end,
+  insert = function(self, idx, x) table.insert(self, idx + 1, x); _sync_if_sys_argv(self) end,
   remove = function(self, x)
     local n = #self
     for i=1,n do
-      if self[i] == x then table.remove(self, i) return end
+      if self[i] == x then table.remove(self, i); _sync_if_sys_argv(self); return end
     end
     error("ValueError: list.remove(x): x not in list")
   end,
-  clear = function(self) for i=#self,1,-1 do self[i] = nil end end,
+  clear = function(self) for i=#self,1,-1 do self[i] = nil end; _sync_if_sys_argv(self) end,
   sort = function(self, key_fn, reverse)
     if type(key_fn) == "table" and key_fn.key ~= nil then
       if key_fn.reverse ~= nil then reverse = key_fn.reverse end
@@ -5397,6 +5436,50 @@ os.path.splitext = function(p)
   local base, ext = p:match("^(.*)(%.[^./\\]*)$")
   if base then return setmetatable({base, ext}, _list_mt) end
   return setmetatable({p, ""}, _list_mt)
+end
+os.path.normcase = function(p)
+  return tostring(p or "")
+end
+os.path.isabs = function(p)
+  p = tostring(p or "")
+  return p:sub(1, 1) == "/"
+end
+os.path.split = function(p)
+  p = tostring(p or "")
+  local head, tail = p:match("^(.*)/([^/]*)$")
+  if head == nil then
+    return setmetatable({"", p}, _tuple_mt)
+  end
+  if head ~= "/" then
+    head = head:gsub("/+$", "")
+    if head == "" then head = "/" end
+  end
+  return setmetatable({head, tail}, _tuple_mt)
+end
+os.path.normpath = function(p)
+  p = tostring(p or "")
+  if p == "" then return "." end
+  local is_abs = p:sub(1, 1) == "/"
+  local double_slash = p:sub(1, 2) == "//" and p:sub(3, 3) ~= "/"
+  local comps = {}
+  for part in p:gmatch("[^/]+") do
+    if part ~= "." and part ~= "" then
+      if part == ".." then
+        if #comps > 0 and comps[#comps] ~= ".." then
+          table.remove(comps)
+        elseif not is_abs then
+          table.insert(comps, "..")
+        end
+      else
+        table.insert(comps, part)
+      end
+    end
+  end
+  local res = table.concat(comps, "/")
+  if is_abs then
+    res = (double_slash and "//" or "/") .. res
+  end
+  return res ~= "" and res or "."
 end
 os.path.abspath = function(p)
   p = tostring(p or "")

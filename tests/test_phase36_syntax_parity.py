@@ -368,6 +368,49 @@ print("NESTED_COMPREHENSIONS_PASSED")
 """
         self._run_both(py_code, "NESTED_COMPREHENSIONS_PASSED")
 
+    def test_bound_method_keyword_arguments(self):
+        """Test bound instance method calls with keyword arguments and None positional args in both pipelines."""
+        py_code = """
+class Manager:
+    def __init__(self):
+        self.calls = []
+
+    def get_item(self, name, defaults=None, version=1):
+        self.calls.append((name, defaults, version))
+        return (name, defaults, version)
+
+mgr = Manager()
+res1 = mgr.get_item("alpha", defaults={"k": 1}, version=2)
+assert res1 == ("alpha", {"k": 1}, 2), f"Unexpected res1: {res1}"
+assert "version" not in res1[1] and "__luthon_kw" not in res1[1]
+
+res2 = mgr.get_item("beta", None, version=3)
+assert res2 == ("beta", None, 3), f"Unexpected res2: {res2}"
+
+fn = mgr.get_item
+res3 = fn("gamma", version=4)
+assert res3 == ("gamma", None, 4), f"Unexpected res3: {res3}"
+
+print("BOUND_METHOD_KWARGS_PASSED")
+"""
+        self._run_both(py_code, "BOUND_METHOD_KWARGS_PASSED")
+
+    def test_os_path_normcase_normpath_split_isabs(self):
+        """Test os.path.normcase, normpath, isabs, and split helpers in both pipelines."""
+        py_code = """
+import os
+
+assert os.path.normcase("/Foo/Bar.py") == "/Foo/Bar.py"
+assert os.path.isabs("/a/b") is True
+assert os.path.isabs("a/b") is False
+assert os.path.split("/a/b/c.txt") == ("/a/b", "c.txt")
+assert os.path.split("plain.txt") == ("", "plain.txt")
+assert os.path.normpath("/a/b/../c/./d") == "/a/c/d"
+assert os.path.normpath("") == "."
+
+print("OS_PATH_HELPERS_PASSED")
+"""
+        self._run_both(py_code, "OS_PATH_HELPERS_PASSED")
 
 
 if __name__ == "__main__":
