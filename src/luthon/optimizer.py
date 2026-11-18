@@ -203,12 +203,14 @@ def eliminate_dead_code_function(fn: Function) -> bool:
                 break
         block.instrs = trimmed
 
-    # 2. Find reachable blocks starting from the entry block
+    # 2. Find reachable blocks starting from the entry block and structural syntax blocks
     if fn.blocks:
         block_map = {b.label: b for b in fn.blocks}
         entry_label = fn.blocks[0].label
-        reachable: Set[str] = {entry_label}
-        queue = [entry_label]
+        # Structural blocks (try/catch/with/finally) define balanced Lua syntax scopes and must never be eliminated
+        structural_labels = {b.label for b in fn.blocks if any(ins.op in TRY_STRUCTURAL_OPS for ins in b.instrs)}
+        reachable: Set[str] = {entry_label} | structural_labels
+        queue = list(reachable)
         while queue:
             curr = queue.pop(0)
             blk = block_map.get(curr)
