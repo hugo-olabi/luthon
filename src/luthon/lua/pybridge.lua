@@ -222,6 +222,7 @@ function pybridge.get_lib()
     end
   end
 
+  local loaded_soname = nil
   for _, l in ipairs(candidate_libs) do table.insert(libs, l) end
   for _, soname in ipairs(libs) do
     -- Ensure libpython symbols are exported globally for C extensions (RTLD_NOW | RTLD_GLOBAL = 258)
@@ -229,6 +230,7 @@ function pybridge.get_lib()
     local ok, lib = pcall(function() return ffi.load(soname) end)
     if ok and lib then
       libpy = lib
+      loaded_soname = soname
       break
     end
   end
@@ -236,10 +238,11 @@ function pybridge.get_lib()
     error("pybridge: could not locate or load libpython3 shared library", 2)
   end
   if libpy.Py_IsInitialized() == 0 then
-    local pyhome = os.getenv("PYTHONHOME")
-    if not pyhome or pyhome == "" then
-      local target_home = base_py or "/usr"
-      pcall(function() ffi.C.setenv("PYTHONHOME", target_home, 0) end)
+    if loaded_soname then
+      local matched_home = loaded_soname:match("^(.-)/lib[0-9]*/libpython")
+      if matched_home and matched_home ~= "" and matched_home ~= "/usr" and matched_home ~= "/usr/local" then
+        pcall(function() ffi.C.setenv("PYTHONHOME", matched_home, 0) end)
+      end
     end
     libpy.Py_Initialize()
     pcall(function()
@@ -316,13 +319,14 @@ try:
 except Exception:
     pass
 try:
-    from twisted.internet import defer, reactor
+    from twisted.internet import defer
     _orig_add_timeout = defer.Deferred.addTimeout
     def _safe_add_timeout(self, timeout=None, clock=None, *args, **kwargs):
         if timeout is None:
             timeout = 5.0
         if clock is None:
-            clock = reactor
+            from twisted.internet import reactor as _reactor
+            clock = _reactor
         return _orig_add_timeout(self, timeout, clock, *args, **kwargs)
     defer.Deferred.addTimeout = _safe_add_timeout
 except Exception:
@@ -1259,6 +1263,26 @@ lua_to_py = function(v, visited)
       return visited[v]
     end
 
+    if v == _G.NoneType or (rawget(v, "__class__") == _G._luthon_type and rawget(v, "__name__") == "NoneType") then
+      local nt = ffi.cast("PyObject*", libpy.PyObject_Type(none_ptr))
+      libpy.Py_IncRef(nt)
+      visited[v] = nt
+      return nt
+    end
+    if _G._luthon_type ~= nil and rawget(v, "__class__") == _G._luthon_type and type(rawget(v, "__name__")) == "string" then
+      local bname = rawget(v, "__name__")
+      local builtins_mod = libpy.PyImport_ImportModule("builtins")
+      if builtins_mod ~= nil then
+        local builtin_cls = libpy.PyObject_GetAttrString(builtins_mod, bname)
+        decref(builtins_mod)
+        if builtin_cls ~= nil then
+          visited[v] = builtin_cls
+          return builtin_cls
+        end
+        libpy.PyErr_Clear()
+      end
+    end
+
     -- Check if this is a Luthon class
     local is_class = (rawget(v, "__class__") == nil and (rawget(v, "__instance_mt") ~= nil or rawget(v, "__index") == v) and type(rawget(v, "__name__") or rawget(v, "__name")) == "string")
     if is_class then
@@ -1336,7 +1360,7 @@ lua_to_py = function(v, visited)
 
     -- Check if this is an instance of a Luthon class
     local inst_class = rawget(v, "__class__")
-    if inst_class and type(inst_class) == "table" and type(rawget(inst_class, "__name__") or rawget(inst_class, "__name")) == "string" then
+    if inst_class and inst_class ~= v and type(inst_class) == "table" and type(rawget(inst_class, "__name__") or rawget(inst_class, "__name")) == "string" then
       local cls_name = rawget(inst_class, "__name__") or rawget(inst_class, "__name")
       if cls_name:match("Error$") or cls_name:match("Exception$") or cls_name:match("Failure$") then
         local py_cls = lua_to_py(inst_class, visited)
@@ -1640,26 +1664,23 @@ local function sync_sys_argv(custom_args)
   pcall(function()
     local py_sys = pybridge.import("sys")
     if py_sys then
-      local argv_list = {}
-      local src_args = custom_args or (_G.sys and _G.sys.argv) or _G.arg
-      if src_args and type(src_args) == "table" then
-        if custom_args then
-          for i = 1, #custom_args do
-            table.insert(argv_list, tostring(custom_args[i]))
-          end
-        elseif _G.sys and _G.sys.argv and #_G.sys.argv > 0 then
-          for i = 1, #_G.sys.argv do
-            table.insert(argv_list, tostring(_G.sys.argv[i]))
-          end
-        elseif _G.arg then
-          table.insert(argv_list, _G.arg[0] or "luthon")
-          for i = 1, #_G.arg do
-            table.insert(argv_list, tostring(_G.arg[i]))
-          end
+      local argv_list = _G._list_mt and setmetatable({}, _G._list_mt) or {}
+      if custom_args and type(custom_args) == "table" then
+        for i = 1, #custom_args do
+          table.insert(argv_list, tostring(custom_args[i]))
+        end
+      elseif _G.sys and type(_G.sys.argv) == "table" and #_G.sys.argv > 0 then
+        for i = 1, #_G.sys.argv do
+          table.insert(argv_list, tostring(_G.sys.argv[i]))
+        end
+      elseif _G.arg and type(_G.arg) == "table" then
+        table.insert(argv_list, _G.arg[0] or "luthon")
+        for i = 1, #_G.arg do
+          table.insert(argv_list, tostring(_G.arg[i]))
         end
       end
       if #argv_list == 0 then table.insert(argv_list, "luthon") end
-      py_sys.argv = lua_to_py(argv_list)
+      py_sys.argv = argv_list
     end
   end)
 end

@@ -472,6 +472,43 @@ print("NUMPY_CAPI_REFLECTION_PASSED")
         self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
         self.assertIn("NATIVE_NUMPY_AND_PILLOW_SHIMS_OK", res.stdout)
 
+    def test_pybridge_builtin_types_lazy_reactor_and_argv_sync(self):
+        """Verify builtin type marshaling, lazy reactor initialization, and sys.argv in-place sync."""
+        script = """
+        package.path = "./src/?.lua;./src/luthon/lua/?.lua;" .. package.path
+        dofile("src/luthon/lua/bootstrap.lua")
+        local pb = require("pybridge")
+        local lib = pb.get_lib()
+        local py_sys = pb.import("sys")
+        local builtins = pb.import("builtins")
+
+        local r_entry = py_sys.modules:get("twisted.internet.reactor")
+        assert(r_entry == nil or r_entry == _G.None, "twisted.internet.reactor must not be eagerly imported")
+
+        local builtin_list = {int, str, float, bool, list, dict, tuple, set, frozenset, bytes, object, _luthon_type, NoneType}
+        for _, bt in ipairs(builtin_list) do
+          local py_obj = pb.lua_to_py(bt)
+          assert(py_obj ~= nil, "lua_to_py failed for builtin type: " .. tostring(rawget(bt, "__name__")))
+          lib.Py_DecRef(py_obj)
+        end
+
+        assert(builtins.isinstance(42, int) == true, "isinstance(42, int) must succeed")
+        assert(builtins.isinstance("abc", str) == true, "isinstance('abc', str) must succeed")
+        assert(tostring(builtins.str(builtins.type(1))) == "<class 'int'>", "builtins.type(1) must be <class 'int'>")
+        assert(tostring(builtins.str(NoneType)) == "<class 'NoneType'>", "NoneType must map cleanly")
+
+        sys.argv = setmetatable({"app", "subcmd", "--flag"}, _list_mt)
+        assert(builtins.len(py_sys.argv) == 3, "sys.argv initial length must sync to 3")
+        sys.argv:remove("subcmd")
+        assert(builtins.len(py_sys.argv) == 2, "sys.argv length after remove must sync to 2")
+        assert(py_sys.argv[0] == "app" and py_sys.argv[1] == "--flag", "sys.argv contents must match after in-place remove")
+
+        print("PYBRIDGE_BUILTIN_LAZY_REACTOR_ARGV_OK")
+        """
+        res = subprocess.run(["luajit", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"LuaJIT failed: {res.stderr}")
+        self.assertIn("PYBRIDGE_BUILTIN_LAZY_REACTOR_ARGV_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
