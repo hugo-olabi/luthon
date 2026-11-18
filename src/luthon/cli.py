@@ -106,6 +106,8 @@ def run_file(
             if existing_py_path:
                 paths_to_add.append(existing_py_path)
             env["PYTHONPATH"] = os.pathsep.join(paths_to_add)
+            if "PYTHONHOME" not in env:
+                env["PYTHONHOME"] = getattr(sys, "base_prefix", sys.prefix)
             if pure:
                 env["LUTHON_PURE"] = "1"
             pkg_src = str(Path(__file__).parent.parent)
@@ -159,6 +161,8 @@ def run_file(
         if existing_py_path:
             paths_to_add.append(existing_py_path)
         env["PYTHONPATH"] = os.pathsep.join(paths_to_add)
+        if "PYTHONHOME" not in env:
+            env["PYTHONHOME"] = getattr(sys, "base_prefix", sys.prefix)
         if pure:
             env["LUTHON_PURE"] = "1"
         pkg_src = str(Path(__file__).parent.parent)

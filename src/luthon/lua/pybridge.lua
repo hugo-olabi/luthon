@@ -71,6 +71,7 @@ ffi.cdef[[
   typedef long Py_ssize_t;
 
   void* dlopen(const char* filename, int flags);
+  int setenv(const char *name, const char *value, int overwrite);
   void Py_Initialize(void);
   int Py_IsInitialized(void);
   void Py_Finalize(void);
@@ -191,6 +192,7 @@ function pybridge.get_lib()
   local libs = {}
   if env_lib and env_lib ~= "" then table.insert(libs, env_lib) end
 
+  local base_py = nil
   local venv = os.getenv("VIRTUAL_ENV") or os.getenv("CONDA_PREFIX")
   if not venv and io.open(".venv/pyvenv.cfg", "r") then
     venv = ".venv"
@@ -206,7 +208,7 @@ function pybridge.get_lib()
       cfg:close()
       local home_dir = content:match("home%s*=%s*([^\r\n]+)")
       if home_dir then
-        local base_py = home_dir:match("^(.-)/bin$") or home_dir
+        base_py = home_dir:match("^(.-)/bin$") or home_dir
         for _, v in ipairs({"3.14", "3.13", "3.12", "3.11", "3.10", "3.9"}) do
           table.insert(libs, base_py .. "/lib/libpython" .. v .. ".so")
           table.insert(libs, base_py .. "/lib/libpython" .. v .. ".so.1.0")
@@ -234,6 +236,11 @@ function pybridge.get_lib()
     error("pybridge: could not locate or load libpython3 shared library", 2)
   end
   if libpy.Py_IsInitialized() == 0 then
+    local pyhome = os.getenv("PYTHONHOME")
+    if not pyhome or pyhome == "" then
+      local target_home = base_py or "/usr"
+      pcall(function() ffi.C.setenv("PYTHONHOME", target_home, 0) end)
+    end
     libpy.Py_Initialize()
     pcall(function()
       libpy.PyRun_SimpleString([[
