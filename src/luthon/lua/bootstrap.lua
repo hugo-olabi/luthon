@@ -424,6 +424,13 @@ local _dict_methods = {
     for k, v in pairs(self) do r[k] = v end
     return r
   end,
+  __iter__ = function(self)
+    local k = nil
+    return function()
+      k = next(self, k)
+      return k
+    end
+  end,
 }
 local _dict_mt = {
   __dict__ = true,
@@ -1622,6 +1629,13 @@ local _dict_methods = {
     for k, v in pairs(self) do r[k] = v end
     return r
   end,
+  __iter__ = function(self)
+    local k = nil
+    return function()
+      k = next(self, k)
+      return k
+    end
+  end,
 }
 local _dict_mt = {__dict__ = true, __index = _dict_methods}
 _G._dict_mt = _dict_mt
@@ -2075,7 +2089,7 @@ function iter(t)
       end
     end
   end
-  if type(t) == "table" and t.__iter__ then
+  if type(t) == "table" and type(t.__iter__) == "function" then
     local it = t:__iter__()
     if type(it) == "table" and it.__next__ then
       return function() return it:__next__() end
@@ -2089,6 +2103,14 @@ function iter(t)
   if type(t) == "table" and t.lines then return t:lines() end
   if type(t) == "function" then return t end
   if type(t) ~= "table" then return function() return nil end end
+  local mt = getmetatable(t)
+  if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
+    local k = nil
+    return function()
+      k = next(t, k)
+      return k
+    end
+  end
   local i = 0
   return function()
     i = i + 1

@@ -360,6 +360,10 @@ assert dict_comp == {"1_20": 21, "2_20": 22}
 gen_comp = list(y * 2 for x in (3, 4) for y in (x, x + 1))
 assert gen_comp == [6, 8, 8, 10]
 
+d = {"x": 100, "y": 200}
+keys = [k for k in d]
+assert "x" in keys and "y" in keys and len(keys) == 2
+
 print("NESTED_COMPREHENSIONS_PASSED")
 """
         self._run_both(py_code, "NESTED_COMPREHENSIONS_PASSED")
