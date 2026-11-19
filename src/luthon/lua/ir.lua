@@ -248,20 +248,16 @@ function IRLowerer:_lower_target(tgt, val_tmp)
     end
     if not star_idx then
       for i, e in ipairs(tgt.elts or {}) do
-        local idx_tmp = self:_new_tmp()
-        self:_emit("CONST", {i - 1}, idx_tmp)
         local elem_tmp = self:_new_tmp()
-        self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+        self:_emit("SUBSCR_DIRECT", {val_tmp, tostring(i - 1)}, elem_tmp)
         self:_lower_target(e, elem_tmp)
       end
     else
       local elts = tgt.elts or {}
       local num_trail = #elts - star_idx
       for i = 1, star_idx - 1 do
-        local idx_tmp = self:_new_tmp()
-        self:_emit("CONST", {i - 1}, idx_tmp)
         local elem_tmp = self:_new_tmp()
-        self:_emit("SUBSCR", {val_tmp, idx_tmp}, elem_tmp)
+        self:_emit("SUBSCR_DIRECT", {val_tmp, tostring(i - 1)}, elem_tmp)
         self:_lower_target(elts[i], elem_tmp)
       end
       for j = 1, num_trail do
@@ -308,8 +304,30 @@ function IRLowerer:_lower_stmt_impl(node)
   if t == "Expr" then
     self:lower_expr(node.value)
   elseif t == "Assign" then
+    local tgts = node.targets or {}
+    if #tgts == 1 and (tgts[1]._type == "Tuple" or tgts[1]._type == "List")
+       and (node.value and (node.value._type == "Tuple" or node.value._type == "List"))
+       and #(tgts[1].elts or {}) == #(node.value.elts or {}) then
+      local tgt_elts = tgts[1].elts or {}
+      local val_elts = node.value.elts or {}
+      local has_star = false
+      for _, e in ipairs(tgt_elts) do if e._type == "Starred" then has_star = true; break end end
+      if not has_star then
+        for _, e in ipairs(val_elts) do if e._type == "Starred" then has_star = true; break end end
+      end
+      if not has_star then
+        local rhs_tmps = {}
+        for _, e in ipairs(val_elts) do
+          table.insert(rhs_tmps, self:lower_expr(e))
+        end
+        for i, tgt_elt in ipairs(tgt_elts) do
+          self:_lower_target(tgt_elt, rhs_tmps[i])
+        end
+        return
+      end
+    end
     local val = self:lower_expr(node.value)
-    for _, tgt in ipairs(node.targets or {}) do
+    for _, tgt in ipairs(tgts) do
       self:_lower_target(tgt, val)
     end
   elseif t == "Delete" then
@@ -377,12 +395,10 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("CALL", {"_luthon_assert_fail", cond, msg_tmp}, self:_new_tmp())
   elseif t == "If" then
     local cond = self:lower_expr(node.test)
-    local chk_cond = self:_new_tmp()
-    self:_emit("CALL", {"bool", cond}, chk_cond)
     local then_lbl = self:_new_label("then")
     local else_lbl = self:_new_label("else")
     local end_lbl = self:_new_label("endif")
-    self:_emit("BRANCH", {chk_cond, then_lbl, else_lbl})
+    self:_emit("BRANCH", {cond, then_lbl, else_lbl})
     -- then
     self._cur_block = self:_new_block(then_lbl)
     self:_emit("DO", {})
@@ -512,15 +528,7 @@ function IRLowerer:_lower_stmt_impl(node)
       for i, default in ipairs(defaults) do
         local param_name = args_list[offset + i].arg
         local def_tmp = self:lower_expr(default)
-        local is_nil_lbl = self:_new_label("def_set")
-        local skip_lbl = self:_new_label("def_skip")
-        local chk_tmp = self:_new_tmp()
-        self:_emit("CMP", {"eq", param_name, "nil"}, chk_tmp)
-        self:_emit("BRANCH", {chk_tmp, is_nil_lbl, skip_lbl})
-        self._cur_block = self:_new_block(is_nil_lbl)
-        self:_emit("STORE", {param_name, def_tmp})
-        self:_emit("JUMP", {skip_lbl})
-        self._cur_block = self:_new_block(skip_lbl)
+        self:_emit("DEFAULT_ARG", {param_name, def_tmp})
       end
     end
     for _, s in ipairs(node.body or {}) do self:lower_stmt(s) end
@@ -865,15 +873,7 @@ function IRLowerer:_lower_stmt_impl(node)
           for i, default in ipairs(defaults) do
             local param_name = args_list[offset + i].arg
             local def_tmp = self:lower_expr(default)
-            local is_nil_lbl = self:_new_label("def_set")
-            local skip_lbl = self:_new_label("def_skip")
-            local chk_tmp = self:_new_tmp()
-            self:_emit("CMP", {"eq", param_name, "nil"}, chk_tmp)
-            self:_emit("BRANCH", {chk_tmp, is_nil_lbl, skip_lbl})
-            self._cur_block = self:_new_block(is_nil_lbl)
-            self:_emit("STORE", {param_name, def_tmp})
-            self:_emit("JUMP", {skip_lbl})
-            self._cur_block = self:_new_block(skip_lbl)
+            self:_emit("DEFAULT_ARG", {param_name, def_tmp})
           end
         end
         for _, s2 in ipairs(stmt.body or {}) do self:lower_stmt(s2) end
@@ -1289,6 +1289,25 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("LIST_REPEAT", {l, r}, res)
     return res
   elseif t == "BinOp" then
+    if node.left and node.left._type == "Constant" and node.right and node.right._type == "Constant" then
+      local lv = node.left.value
+      local rv = node.right.value
+      if type(lv) == "number" and type(rv) == "number" then
+        local op = node.op and (type(node.op) == "string" and node.op or node.op._type) or ""
+        local res = nil
+        if op == "Add" then res = lv + rv
+        elseif op == "Sub" then res = lv - rv
+        elseif op == "Mult" then res = lv * rv
+        elseif op == "Div" and rv ~= 0 then res = lv / rv
+        elseif op == "Pow" then res = lv ^ rv
+        elseif op == "FloorDiv" and rv ~= 0 then res = math.floor(lv / rv)
+        elseif op == "Mod" and rv ~= 0 then res = lv % rv
+        end
+        if res ~= nil then
+          return self:lower_expr({_type = "Constant", value = res})
+        end
+      end
+    end
     local l = self:lower_expr(node.left)
     local r = self:lower_expr(node.right)
     local res = self:_new_tmp()
@@ -1403,7 +1422,12 @@ function IRLowerer:_lower_expr_impl(node)
       else
         local obj = self:lower_expr(node.func.value)
         local meth = self:_new_tmp()
-        self:_emit("SUBSCR", {obj, '"' .. node.func.attr .. '"'}, meth)
+        local attr = node.func.attr
+        if LUA_RESERVED_KEYWORDS[attr] then
+          self:_emit("SUBSCR", {obj, '"' .. attr .. '"'}, meth)
+        else
+          self:_emit("GET_ATTR", {obj, attr}, meth)
+        end
         target_fn = meth
         pos_args = {obj}
       end

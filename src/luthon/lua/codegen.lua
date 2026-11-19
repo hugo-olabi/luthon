@@ -256,12 +256,14 @@ local function _emit(ins)
     return ins.result .. " = {}"
   elseif o == "MAKE_TABLE" then
     return ins.result .. " = {}"
+  elseif o == "DEFAULT_ARG" then
+    return "if " .. args[1] .. " == nil then " .. args[1] .. " = " .. args[2] .. " end"
   elseif o == "SUBSCR" then
     return ins.result .. " = __luthon_get(" .. args[1] .. ", " .. args[2] .. ")"
   elseif o == "SUBSCR_DIRECT" then
     local t = args[1]
     local idx = args[2]
-    return ins.result .. " = ((rawget(" .. t .. ", '_buf') or rawget(" .. t .. ", '_py')) and " .. t .. "[" .. idx .. "] or " .. t .. "[" .. idx .. " + 1])"
+    return ins.result .. " = _luthon_subscr_fast(" .. t .. ", " .. idx .. ")"
   elseif o == "STORE_SUBSCR" then
     return "__luthon_set(" .. args[1] .. ", " .. args[2] .. ", " .. args[3] .. ")"
   elseif o == "STORE_SUBSCR_DIRECT" then

@@ -161,12 +161,14 @@ end"""
         return ins.args[0] + "[" + ins.args[1] + "] = " + ins.args[2]
     if o == "SELECT":
         return ins.result + " = (" + ins.args[0] + " and " + ins.args[1] + " or " + ins.args[2] + ")"
+    if o == "DEFAULT_ARG":
+        return f"if {ins.args[0]} == nil then {ins.args[0]} = {ins.args[1]} end"
     if o == "SUBSCR":
         return ins.result + " = __luthon_get(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "SUBSCR_DIRECT":
         t = ins.args[0]
         idx = ins.args[1]
-        return f"{ins.result} = ((rawget({t}, '_buf') or rawget({t}, '_py')) and {t}[{idx}] or {t}[{idx} + 1])"
+        return f"{ins.result} = _luthon_subscr_fast({t}, {idx})"
     if o == "GET_ATTR":
         return ins.result + " = " + ins.args[0] + "." + ins.args[1]
     if o == "SET_ATTR":

@@ -142,19 +142,15 @@ class IRLowerer:
             has_starred = any(isinstance(e, ast.Starred) for e in tgt.elts)
             if not has_starred:
                 for i, e in enumerate(tgt.elts):
-                    idx_tmp = self._new_tmp()
-                    self._emit("CONST", [i], result=idx_tmp)
                     elem_tmp = self._new_tmp()
-                    self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                    self._emit("SUBSCR_DIRECT", [val_tmp, str(i)], result=elem_tmp)
                     self._lower_target(e, elem_tmp)
             else:
                 star_idx = next(i for i, e in enumerate(tgt.elts) if isinstance(e, ast.Starred))
                 num_trail = len(tgt.elts) - 1 - star_idx
                 for i in range(star_idx):
-                    idx_tmp = self._new_tmp()
-                    self._emit("CONST", [i], result=idx_tmp)
                     elem_tmp = self._new_tmp()
-                    self._emit("SUBSCR", [val_tmp, idx_tmp], result=elem_tmp)
+                    self._emit("SUBSCR_DIRECT", [val_tmp, str(i)], result=elem_tmp)
                     self._lower_target(tgt.elts[i], elem_tmp)
                 for j in range(1, num_trail + 1):
                     idx_tmp = self._new_tmp()
@@ -212,9 +208,22 @@ class IRLowerer:
             else:
                 self.lower_expr(node.value)
         elif isinstance(node, ast.Assign):
-            val = self.lower_expr(node.value)
-            for t in node.targets:
-                self._lower_target(t, val)
+            if (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], (ast.Tuple, ast.List))
+                and isinstance(node.value, (ast.Tuple, ast.List))
+                and len(node.targets[0].elts) == len(node.value.elts)
+                and not any(isinstance(e, ast.Starred) for e in node.targets[0].elts)
+                and not any(isinstance(e, ast.Starred) for e in node.value.elts)
+            ):
+                tgt_elts = node.targets[0].elts
+                rhs_tmps = [self.lower_expr(e) for e in node.value.elts]
+                for tgt_elt, rhs_tmp in zip(tgt_elts, rhs_tmps):
+                    self._lower_target(tgt_elt, rhs_tmp)
+            else:
+                val = self.lower_expr(node.value)
+                for t in node.targets:
+                    self._lower_target(t, val)
         elif isinstance(node, ast.AugAssign):
             lhs = self.lower_expr(node.target)
             rhs = self.lower_expr(node.value)
@@ -237,13 +246,10 @@ class IRLowerer:
                 self._emit("RETURN", [val] if val else [])
         elif isinstance(node, ast.If):
             cond = self.lower_expr(node.test)
-            # Ensure boolean truthiness check if cond is not already boolean
-            chk_cond = self._new_tmp()
-            self._emit("CALL", ["bool", cond], result=chk_cond)
             then_lbl = self._new_label("then")
             else_lbl = self._new_label("else")
             end_lbl = self._new_label("endif")
-            self._emit("BRANCH", [chk_cond, then_lbl, else_lbl])
+            self._emit("BRANCH", [cond, then_lbl, else_lbl])
             # then
             self._cur_block = self._new_block(then_lbl)
             for s in node.body:
@@ -375,15 +381,7 @@ class IRLowerer:
                 for i, default in enumerate(defaults):
                     param_name = _safe_var(args_list[offset + i].arg)
                     def_tmp = self.lower_expr(default)
-                    is_nil_lbl = self._new_label("def_set")
-                    skip_lbl = self._new_label("def_skip")
-                    chk_tmp = self._new_tmp()
-                    self._emit("CMP", ["eq", param_name, "nil"], result=chk_tmp)
-                    self._emit("BRANCH", [chk_tmp, is_nil_lbl, skip_lbl])
-                    self._cur_block = self._new_block(is_nil_lbl)
-                    self._emit("STORE", [param_name, def_tmp])
-                    self._emit("JUMP", [skip_lbl])
-                    self._cur_block = self._new_block(skip_lbl)
+                    self._emit("DEFAULT_ARG", [param_name, def_tmp])
 
             for s in node.body:
                 self.lower_stmt(s)
@@ -1161,6 +1159,33 @@ class IRLowerer:
             self._emit("LIST_REPEAT", [l, r], result=t)
             return t
         if isinstance(node, ast.BinOp):
+            if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
+                l_val = node.left.value
+                r_val = node.right.value
+                if isinstance(l_val, (int, float)) and isinstance(r_val, (int, float)):
+                    folded = None
+                    try:
+                        if isinstance(node.op, ast.Add):
+                            folded = l_val + r_val
+                        elif isinstance(node.op, ast.Sub):
+                            folded = l_val - r_val
+                        elif isinstance(node.op, ast.Mult):
+                            folded = l_val * r_val
+                        elif isinstance(node.op, ast.Div):
+                            if r_val != 0:
+                                folded = l_val / r_val
+                        elif isinstance(node.op, ast.Pow):
+                            folded = l_val ** r_val
+                        elif isinstance(node.op, ast.FloorDiv):
+                            if r_val != 0:
+                                folded = l_val // r_val
+                        elif isinstance(node.op, ast.Mod):
+                            if r_val != 0:
+                                folded = l_val % r_val
+                    except Exception:
+                        folded = None
+                    if folded is not None:
+                        return self.lower_expr(ast.Constant(value=folded))
             l = self.lower_expr(node.left)
             r = self.lower_expr(node.right)
             t = self._new_tmp()
@@ -1216,7 +1241,11 @@ class IRLowerer:
                 else:
                     obj = self.lower_expr(node.func.value)
                     meth = self._new_tmp()
-                    self._emit("SUBSCR", [obj, f'"{node.func.attr}"'], result=meth)
+                    attr = node.func.attr
+                    if attr in LUA_RESERVED_KEYWORDS:
+                        self._emit("SUBSCR", [obj, f'"{attr}"'], result=meth)
+                    else:
+                        self._emit("GET_ATTR", [obj, attr], result=meth)
                     target_fn = meth
                     pos_args = [obj]
             else:
