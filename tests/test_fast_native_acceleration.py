@@ -188,3 +188,122 @@ print("SIMD_BLOCK_PASS")
     res = _run_luthon_code(code)
     assert res.returncode == 0, f"Failed: {res.stderr}"
     assert "SIMD_BLOCK_PASS" in res.stdout
+
+
+def test_regex_unset_groups_and_split_captures():
+    code = """
+import re
+
+# Unset capturing groups
+m = re.match(r'(a)?(b)', 'b')
+assert m is not None
+assert m.group(1) is None
+assert m.start(1) == -1
+assert m.end(1) == -1
+assert m.span(1) == (-1, -1) or m.span(1) == [-1, -1]
+groups = m.groups()
+assert groups[0] is None
+assert groups[1] == 'b'
+
+# re.split with capturing parentheses
+pieces = re.split(r'(\\W+)', 'run, run, run.')
+assert list(pieces) == ['run', ', ', 'run', ', ', 'run', '.', '']
+
+# re.findall with multiple groups
+matches = re.findall(r'(\\d+)\\s+([a-z]+)', '10 apples, 20 oranges')
+assert len(matches) == 2
+assert matches[0] == ('10', 'apples') or matches[0] == ['10', 'apples']
+assert matches[1] == ('20', 'oranges') or matches[1] == ['20', 'oranges']
+
+print("REGEX_ENHANCEMENT_PASS")
+"""
+    res = _run_luthon_code(code)
+    assert res.returncode == 0, f"Failed: {res.stderr}"
+    assert "REGEX_ENHANCEMENT_PASS" in res.stdout
+
+
+def test_json_edge_cases_and_robustness():
+    code = """
+import json
+
+# Surrogate pair emoji parsing
+val = chr(34) + chr(92) + 'uD83D' + chr(92) + 'uDE00' + chr(34)
+s = json.loads(val)
+assert s == '😀'
+
+# Dict with integer keys
+d = {1: 'first', 2: 'second'}
+dumped = json.dumps(d)
+assert '\"1\":' in dumped or '\"1\": ' in dumped
+assert '\"2\":' in dumped or '\"2\": ' in dumped
+assert not dumped.startswith('[')
+
+# None key in dict
+d_none = {None: 'empty'}
+dumped_none = json.dumps(d_none)
+assert '\"null\":' in dumped_none or '\"null\": ' in dumped_none
+
+# Extra trailing data detection
+caught_extra = False
+try:
+    json.loads('{\"key\": 1} trailing garbage')
+except Exception:
+    caught_extra = True
+assert caught_extra, "Expected JSONDecodeError on trailing extra text"
+
+# Leading zeros rejected
+caught_leading_zero = False
+try:
+    json.loads('0123')
+except Exception:
+    caught_leading_zero = True
+assert caught_leading_zero, "Expected error on leading zeros in number"
+
+print("JSON_ROBUSTNESS_PASS")
+"""
+    res = _run_luthon_code(code)
+    assert res.returncode == 0, f"Failed: {res.stderr}"
+    assert "JSON_ROBUSTNESS_PASS" in res.stdout
+
+
+def test_simd_block_float_and_double_execution():
+    code = """
+def saxpy(n, a, x, y):
+    for i in range(n):
+        y[i] = a * x[i] + y[i]
+
+def vec_add(n, a, b, c):
+    for i in range(n):
+        c[i] = a[i] + b[i]
+
+def run():
+    n = 32
+    # Single precision float
+    xf = array('f', [float(i) for i in range(n)])
+    yf = array('f', [2.0] * n)
+    saxpy(n, 1.5, xf, yf)
+    for i in range(n):
+        assert abs(yf[i] - (1.5 * float(i) + 2.0)) < 1e-4
+
+    # Double precision
+    xd = array('d', [float(i) for i in range(n)])
+    yd = array('d', [5.0] * n)
+    saxpy(n, 2.5, xd, yd)
+    for i in range(n):
+        assert abs(yd[i] - (2.5 * float(i) + 5.0)) < 1e-9
+
+    # Vector Add
+    af = array('f', [float(i) for i in range(n)])
+    bf = array('f', [10.0] * n)
+    cf = array('f', [0.0] * n)
+    vec_add(n, af, bf, cf)
+    for i in range(n):
+        assert abs(cf[i] - (float(i) + 10.0)) < 1e-4
+
+run()
+print("SIMD_MULTI_TYPE_PASS")
+"""
+    res = _run_luthon_code(code)
+    assert res.returncode == 0, f"Failed: {res.stderr}"
+    assert "SIMD_MULTI_TYPE_PASS" in res.stdout
+
