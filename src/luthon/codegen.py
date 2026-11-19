@@ -145,11 +145,13 @@ end"""
         pairs = []
         for kv in ins.args:
             if isinstance(kv, (list, tuple)) and len(kv) == 2:
+                k_expr = f"({kv[0]} == nil and _G._luthon_none or {kv[0]})"
                 v_expr = f"({kv[1]} == nil and _G._luthon_none or {kv[1]})"
-                pairs.append("[" + str(kv[0]) + "] = " + v_expr)
+                pairs.append("[" + k_expr + "] = " + v_expr)
             else:
+                k_expr = f"({kv[1]} == nil and _G._luthon_none or {kv[1]})"
                 v_expr = f"({kv[0]} == nil and _G._luthon_none or {kv[0]})"
-                pairs.append("[" + str(kv[1]) + "] = " + v_expr)
+                pairs.append("[" + k_expr + "] = " + v_expr)
         return ins.result + " = setmetatable({" + ", ".join(pairs) + "}, _dict_mt)"
     if o == "MAKE_TUPLE":
         if ins.args:
@@ -160,7 +162,9 @@ end"""
     if o == "SET_ADD":
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
     if o == "DICT_SET":
-        return ins.args[0] + "[" + ins.args[1] + "] = (" + ins.args[2] + " == nil and _G._luthon_none or " + ins.args[2] + ")"
+        k_expr = f"({ins.args[1]} == nil and _G._luthon_none or {ins.args[1]})"
+        v_expr = f"({ins.args[2]} == nil and _G._luthon_none or {ins.args[2]})"
+        return f"{ins.args[0]}[{k_expr}] = {v_expr}"
     if o == "SELECT":
         return ins.result + " = (" + ins.args[0] + " and " + ins.args[1] + " or " + ins.args[2] + ")"
     if o == "DEFAULT_ARG":
@@ -205,27 +209,39 @@ end"""
         op_type = ins.args[0]
         if op_type == "daxpy":
             n, alpha, x, y = ins.args[1], ins.args[2], ins.args[3], ins.args[4]
+            elem_t = ins.args[5] if len(ins.args) > 5 else "double"
             x_buf = f"(rawget({x}, '_buf') and rawget({x}, '_buf') or {x})"
             y_buf = f"(rawget({y}, '_buf') and rawget({y}, '_buf') or {y})"
-            return f"_simd_lib.luthon_simd_daxpy({n}, {alpha}, {x_buf}, {y_buf})"
+            if elem_t == "float":
+                return f"_simd_lib.luthon_simd_saxpy({n}, {alpha}, {x_buf}, {y_buf})"
+            return f"if (rawget({x}, 'typecode') == 'f' or rawget({y}, 'typecode') == 'f') then _simd_lib.luthon_simd_saxpy({n}, {alpha}, {x_buf}, {y_buf}) else _simd_lib.luthon_simd_daxpy({n}, {alpha}, {x_buf}, {y_buf}) end"
         elif op_type == "vec_add":
             n, a, b, c = ins.args[1], ins.args[2], ins.args[3], ins.args[4]
+            elem_t = ins.args[5] if len(ins.args) > 5 else "double"
             a_buf = f"(rawget({a}, '_buf') and rawget({a}, '_buf') or {a})"
             b_buf = f"(rawget({b}, '_buf') and rawget({b}, '_buf') or {b})"
             c_buf = f"(rawget({c}, '_buf') and rawget({c}, '_buf') or {c})"
-            return f"_simd_lib.luthon_simd_add_f64({c_buf}, {a_buf}, {b_buf}, {n})"
+            if elem_t == "float":
+                return f"_simd_lib.luthon_simd_add_f32({c_buf}, {a_buf}, {b_buf}, {n})"
+            return f"if (rawget({a}, 'typecode') == 'f' or rawget({b}, 'typecode') == 'f' or rawget({c}, 'typecode') == 'f') then _simd_lib.luthon_simd_add_f32({c_buf}, {a_buf}, {b_buf}, {n}) else _simd_lib.luthon_simd_add_f64({c_buf}, {a_buf}, {b_buf}, {n}) end"
         elif op_type == "dot":
             n, a, b = ins.args[1], ins.args[2], ins.args[3]
+            elem_t = ins.args[4] if len(ins.args) > 4 else "double"
             a_buf = f"(rawget({a}, '_buf') and rawget({a}, '_buf') or {a})"
             b_buf = f"(rawget({b}, '_buf') and rawget({b}, '_buf') or {b})"
             res = ins.result or "s"
-            return f"{res} = _simd_lib.luthon_simd_dot_f64({n}, {a_buf}, {b_buf})"
+            if elem_t == "float":
+                return f"{res} = _simd_lib.luthon_simd_dot_f32({n}, {a_buf}, {b_buf})"
+            return f"if (rawget({a}, 'typecode') == 'f' or rawget({b}, 'typecode') == 'f') then {res} = _simd_lib.luthon_simd_dot_f32({n}, {a_buf}, {b_buf}) else {res} = _simd_lib.luthon_simd_dot_f64({n}, {a_buf}, {b_buf}) end"
         elif op_type == "euclidean":
             n, a, b = ins.args[1], ins.args[2], ins.args[3]
+            elem_t = ins.args[4] if len(ins.args) > 4 else "double"
             a_buf = f"(rawget({a}, '_buf') and rawget({a}, '_buf') or {a})"
             b_buf = f"(rawget({b}, '_buf') and rawget({b}, '_buf') or {b})"
             res = ins.result or "s"
-            return f"{res} = _simd_lib.luthon_simd_euclidean_f64({n}, {a_buf}, {b_buf})"
+            if elem_t == "float":
+                return f"{res} = _simd_lib.luthon_simd_euclidean_f32({n}, {a_buf}, {b_buf})"
+            return f"if (rawget({a}, 'typecode') == 'f' or rawget({b}, 'typecode') == 'f') then {res} = _simd_lib.luthon_simd_euclidean_f32({n}, {a_buf}, {b_buf}) else {res} = _simd_lib.luthon_simd_euclidean_f64({n}, {a_buf}, {b_buf}) end"
     if o == "VEC_LOAD":
         arr = ins.args[0]
         idx = ins.args[1]
@@ -308,7 +324,21 @@ def generate(module, sourcemap=None):
         "        void   luthon_simd_sqrt_f64(double *out, const double *x, size_t n);",
         "      ]]",
         "    end)",
-        "    local _candidates = { os.getenv(\"LUTHON_CAPI_LIB\"), _G.__LUTHON_CAPI_LIB__, 'src/luthon/native/libluthon_capi.so', './src/luthon/native/libluthon_capi.so', './libluthon_capi.so', 'libluthon_capi.so' }",
+        "    local _candidates = {}",
+        "    local _env_lib = os.getenv(\"LUTHON_CAPI_LIB\")",
+        "    if _env_lib and _env_lib ~= '' then table.insert(_candidates, _env_lib) end",
+        "    if _G.__LUTHON_CAPI_LIB__ and _G.__LUTHON_CAPI_LIB__ ~= '' then table.insert(_candidates, _G.__LUTHON_CAPI_LIB__) end",
+        "    table.insert(_candidates, 'src/luthon/native/libluthon_capi.so')",
+        "    table.insert(_candidates, './src/luthon/native/libluthon_capi.so')",
+        "    table.insert(_candidates, './libluthon_capi.so')",
+        "    table.insert(_candidates, 'libluthon_capi.so')",
+        "    local _info = debug.getinfo(1, 'S')",
+        "    if _info and _info.source and _info.source:sub(1, 1) == '@' then",
+        "      local _src_path = _info.source:sub(2)",
+        "      local _dir = _src_path:match('(.*/)') or ''",
+        "      table.insert(_candidates, _dir .. '../native/libluthon_capi.so')",
+        "      table.insert(_candidates, _dir .. 'libluthon_capi.so')",
+        "    end",
         "    for _, _p in ipairs(_candidates) do",
         "      if _p and _p ~= '' then",
         "        local _ok_l, _lib = pcall(_ffi.load, _p)",
@@ -332,7 +362,9 @@ def generate(module, sourcemap=None):
         "    luthon_simd_add_f64 = function(out, a, b, n) for i=0, n-1 do out[i] = a[i] + b[i] end end,",
         "    luthon_simd_add_f32 = function(out, a, b, n) for i=0, n-1 do out[i] = a[i] + b[i] end end,",
         "    luthon_simd_dot_f64 = function(n, x, y) local s=0 for i=0, n-1 do s = s + x[i]*y[i] end return s end,",
+        "    luthon_simd_dot_f32 = function(n, x, y) local s=0 for i=0, n-1 do s = s + x[i]*y[i] end return s end,",
         "    luthon_simd_euclidean_f64 = function(n, x, y) local s=0 for i=0, n-1 do local d=x[i]-y[i] s = s + d*d end return math.sqrt(s) end,",
+        "    luthon_simd_euclidean_f32 = function(n, x, y) local s=0 for i=0, n-1 do local d=x[i]-y[i] s = s + d*d end return math.sqrt(s) end,",
         "    luthon_simd_poly_eval_f64 = function(n, x, out, coeffs, deg)",
         "      for i=0, n-1 do",
         "        local xi = x[i]",
