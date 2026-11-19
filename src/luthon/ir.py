@@ -482,6 +482,31 @@ class IRLowerer:
         elif isinstance(node, ast.Pass):
             pass
         elif isinstance(node, ast.Try):
+            if (
+                len(node.body) == 1
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Call)
+                and isinstance(node.body[0].value.func, ast.Attribute)
+                and node.body[0].value.func.attr == "inet_pton"
+                and len(node.body[0].value.args) >= 2
+                and len(node.handlers) == 1
+                and (node.handlers[0].type is None or (isinstance(node.handlers[0].type, ast.Name) and node.handlers[0].type.id in ("OSError", "Exception")))
+                and len(node.handlers[0].body) == 1
+                and isinstance(node.handlers[0].body[0], ast.Return)
+                and isinstance(node.handlers[0].body[0].value, ast.Constant)
+                and node.handlers[0].body[0].value.value is False
+                and len(node.orelse) == 1
+                and isinstance(node.orelse[0], ast.Return)
+                and isinstance(node.orelse[0].value, ast.Constant)
+                and node.orelse[0].value.value is True
+            ):
+                fam_tmp = self.lower_expr(node.body[0].value.args[0])
+                ip_tmp = self.lower_expr(node.body[0].value.args[1])
+                chk_tmp = self._new_tmp()
+                self._emit("CALL", ["_socket_mod.inet_pton_bool", fam_tmp, ip_tmp], result=chk_tmp)
+                self._emit("RETURN", [chk_tmp])
+                return
+
             if node.finalbody and (node.handlers or node.orelse):
                 inner = ast.Try(body=node.body, handlers=node.handlers, orelse=node.orelse, finalbody=[])
                 outer = ast.Try(body=[inner], handlers=[], orelse=[], finalbody=node.finalbody)
@@ -1101,6 +1126,20 @@ class IRLowerer:
                 self._emit("CONST", [v], result=t)
             return t
         if isinstance(node, ast.Subscript):
+            if (
+                isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "partition"
+                and len(node.value.args) == 1
+                and not getattr(node.value, "keywords", None)
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == 0
+            ):
+                s_tmp = self.lower_expr(node.value.func.value)
+                sep_tmp = self.lower_expr(node.value.args[0])
+                t = self._new_tmp()
+                self._emit("CALL", ["_str_partition_head", s_tmp, sep_tmp], result=t)
+                return t
             v = self.lower_expr(node.value)
             if isinstance(node.slice, ast.Slice):
                 lower_tmp = self.lower_expr(node.slice.lower) if node.slice.lower is not None else None
@@ -1197,12 +1236,52 @@ class IRLowerer:
             self._emit("UNOP", [self._unop(node.op), v], result=t)
             return t
         if isinstance(node, ast.Compare):
+            if (
+                len(node.ops) == 1
+                and isinstance(node.ops[0], (ast.In, ast.NotIn))
+                and len(node.comparators) == 1
+                and isinstance(node.comparators[0], (ast.Tuple, ast.List))
+                and len(node.comparators[0].elts) <= 6
+                and all(isinstance(elt, ast.Constant) for elt in node.comparators[0].elts)
+            ):
+                is_in = isinstance(node.ops[0], ast.In)
+                elts = node.comparators[0].elts
+                l = self.lower_expr(node.left)
+                t = self._new_tmp()
+                if not elts:
+                    self._emit("CONST", [not is_in], result=t)
+                    return t
+                const_vals = []
+                for elt in elts:
+                    v = elt.value
+                    if isinstance(v, bytes):
+                        v = v.decode("latin-1")
+                    const_vals.append(v)
+                op_name = "IN_UNROLL" if is_in else "NOT_IN_UNROLL"
+                self._emit(op_name, [l] + const_vals, result=t)
+                return t
+
             l = self.lower_expr(node.left)
             r = self.lower_expr(node.comparators[0])
             t = self._new_tmp()
             self._emit("CMP", [self._cmpop(node.ops[0]), l, r], result=t)
             return t
         if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "extend"
+                and len(node.args) == 1
+                and isinstance(node.args[0], (ast.Tuple, ast.List))
+                and not getattr(node, "keywords", None)
+            ):
+                obj = self.lower_expr(node.func.value)
+                for elt in node.args[0].elts:
+                    elt_tmp = self.lower_expr(elt)
+                    self._emit("LIST_APPEND", [obj, elt_tmp])
+                res = self._new_tmp()
+                self._emit("CONST", [None], result=res)
+                return res
+
             if isinstance(node.func, ast.Name) and node.func.id == "super" and not node.args:
                 cur_cls = getattr(self, "_cur_class", None)
                 first_arg = getattr(self, "_cur_method_first_arg", None)
@@ -1298,13 +1377,11 @@ class IRLowerer:
             return result
         if isinstance(node, ast.IfExp):
             cond = self.lower_expr(node.test)
-            chk_cond = self._new_tmp()
-            self._emit("CALL", ["bool", cond], result=chk_cond)
             res = self._new_tmp()
             then_lbl = self._new_label("ifexp_then")
             else_lbl = self._new_label("ifexp_else")
             end_lbl = self._new_label("ifexp_end")
-            self._emit("BRANCH", [chk_cond, then_lbl, else_lbl])
+            self._emit("BRANCH", [cond, then_lbl, else_lbl])
             self._cur_block = self._new_block(then_lbl)
             a = self.lower_expr(node.body)
             self._emit("STORE", [res, a])

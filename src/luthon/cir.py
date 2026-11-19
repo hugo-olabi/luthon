@@ -274,8 +274,8 @@ class TypeInferrer:
                 return {INT_TYPE}
             return {operand_t}
 
-        elif op in ("CMP", "SELECT"):
-            return {BOOL_TYPE} if op == "CMP" else {self._get_type(ins.args[1] if len(ins.args) > 1 else None)}
+        elif op in ("CMP", "SELECT", "IN_UNROLL", "NOT_IN_UNROLL"):
+            return {BOOL_TYPE} if op in ("CMP", "IN_UNROLL", "NOT_IN_UNROLL") else {self._get_type(ins.args[1] if len(ins.args) > 1 else None)}
 
         # Parametric Container Operations (Phase 34)
         elif op == "MAKE_LIST":

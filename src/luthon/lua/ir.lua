@@ -651,6 +651,25 @@ function IRLowerer:_lower_stmt_impl(node)
     local handlers = node.handlers or {}
     local orelse = node.orelse or {}
     local finalbody = node.finalbody or {}
+
+    if node.body and #node.body == 1
+       and node.body[1]._type == "Expr" and node.body[1].value and node.body[1].value._type == "Call"
+       and node.body[1].value.func and node.body[1].value.func._type == "Attribute" and node.body[1].value.func.attr == "inet_pton"
+       and node.body[1].value.args and #node.body[1].value.args >= 2
+       and #handlers == 1
+       and (not handlers[1].type or (handlers[1].type._type == "Name" and (handlers[1].type.id == "OSError" or handlers[1].type.id == "Exception")))
+       and handlers[1].body and #handlers[1].body == 1
+       and handlers[1].body[1]._type == "Return" and handlers[1].body[1].value and handlers[1].body[1].value._type == "Constant" and handlers[1].body[1].value.value == false
+       and #orelse == 1
+       and orelse[1]._type == "Return" and orelse[1].value and orelse[1].value._type == "Constant" and orelse[1].value.value == true then
+      local fam_tmp = self:lower_expr(node.body[1].value.args[1])
+      local ip_tmp = self:lower_expr(node.body[1].value.args[2])
+      local chk_tmp = self:_new_tmp()
+      self:_emit("CALL", {"_socket_mod.inet_pton_bool", fam_tmp, ip_tmp}, chk_tmp)
+      self:_emit("RETURN", {chk_tmp})
+      return
+    end
+
     if #finalbody > 0 and (#handlers > 0 or #orelse > 0) then
       local inner = {
         _type = "Try",
@@ -1232,6 +1251,17 @@ function IRLowerer:_lower_expr_impl(node)
     end
     return res
   elseif t == "Subscript" then
+    if node.value and node.value._type == "Call"
+       and node.value.func and node.value.func._type == "Attribute" and node.value.func.attr == "partition"
+       and node.value.args and #node.value.args == 1
+       and (not node.value.keywords or #node.value.keywords == 0)
+       and node.slice and node.slice._type == "Constant" and node.slice.value == 0 then
+      local s_tmp = self:lower_expr(node.value.func.value)
+      local sep_tmp = self:lower_expr(node.value.args[1])
+      local res = self:_new_tmp()
+      self:_emit("CALL", {"_str_partition_head", s_tmp, sep_tmp}, res)
+      return res
+    end
     local v = self:lower_expr(node.value)
     if node.slice._type == "Slice" then
       local lower_tmp = node.slice.lower and self:lower_expr(node.slice.lower) or "nil"
@@ -1350,6 +1380,37 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("UNOP", {self:_unop(node.op), v}, res)
     return res
   elseif t == "Compare" then
+    local ops = node.ops or {}
+    local comparators = node.comparators or {}
+    if #ops == 1 and #comparators == 1 then
+      local op = ops[1]
+      local op_str = type(op) == "string" and op or (op._type or "")
+      if op_str == "in" or op_str == "In" or op_str == "notin" or op_str == "NotIn" or op_str == "not in" then
+        local comp = comparators[1]
+        if comp and (comp._type == "Tuple" or comp._type == "List") and comp.elts and #comp.elts <= 6 then
+          local all_const = true
+          for _, elt in ipairs(comp.elts) do
+            if elt._type ~= "Constant" then all_const = false; break end
+          end
+          if all_const then
+            local is_in = (op_str == "in" or op_str == "In")
+            local l = self:lower_expr(node.left)
+            local res = self:_new_tmp()
+            if #comp.elts == 0 then
+              self:_emit("CONST", {not is_in}, res)
+              return res
+            end
+            local const_vals = {l}
+            for _, elt in ipairs(comp.elts) do
+              table.insert(const_vals, elt.value)
+            end
+            local op_name = is_in and "IN_UNROLL" or "NOT_IN_UNROLL"
+            self:_emit(op_name, const_vals, res)
+            return res
+          end
+        end
+      end
+    end
     local l = self:lower_expr(node.left)
     local ops = node.ops or {}
     local comparators = node.comparators or {}
@@ -1372,6 +1433,21 @@ function IRLowerer:_lower_expr_impl(node)
     end
     return result
   elseif t == "Call" then
+    if node.func and node.func._type == "Attribute" and node.func.attr == "extend"
+       and node.args and #node.args == 1
+       and (node.args[1]._type == "Tuple" or node.args[1]._type == "List")
+       and (not node.keywords or #node.keywords == 0) then
+      local obj = self:lower_expr(node.func.value)
+      local elts = node.args[1].elts or {}
+      for _, elt in ipairs(elts) do
+        local elt_tmp = self:lower_expr(elt)
+        self:_emit("LIST_APPEND", {obj, elt_tmp})
+      end
+      local res = self:_new_tmp()
+      self:_emit("CONST", {nil}, res)
+      return res
+    end
+
     if node.func._type == "Name" and node.func.id == "super" and (not node.args or #node.args == 0) then
       local cur_cls = self._cur_class
       local first_arg = self._cur_method_first_arg
@@ -1467,9 +1543,19 @@ function IRLowerer:_lower_expr_impl(node)
   elseif t == "IfExp" then
     local cond = self:lower_expr(node.test)
     local res = self:_new_tmp()
+    local then_lbl = self:_new_label("ifexp_then")
+    local else_lbl = self:_new_label("ifexp_else")
+    local end_lbl = self:_new_label("ifexp_end")
+    self:_emit("BRANCH", {cond, then_lbl, else_lbl})
+    self._cur_block = self:_new_block(then_lbl)
     local a = self:lower_expr(node.body)
+    self:_emit("STORE", {res, a})
+    self:_emit("JUMP", {end_lbl})
+    self._cur_block = self:_new_block(else_lbl)
     local b = self:lower_expr(node.orelse)
-    self:_emit("SELECT", {cond, a, b}, res)
+    self:_emit("STORE", {res, b})
+    self:_emit("JUMP", {end_lbl})
+    self._cur_block = self:_new_block(end_lbl)
     return res
   elseif t == "Slice" then
     -- Slice(lower, upper, step) -> _luthon_slice(lower, upper, step)
