@@ -889,14 +889,14 @@ function _luthon_slice_desc(lower, upper, step)
 end
 
 function _luthon_slice(obj, lower, upper, step)
+  step = step or 1
   if type(obj) == "string" then
-    if (step == nil or step == 1) and (lower == nil or (type(lower) == "number" and lower >= 0)) and (upper == nil or (type(upper) == "number" and upper >= 0)) then
+    if step == 1 and (lower == nil or (type(lower) == "number" and lower >= 0)) and (upper == nil or (type(upper) == "number" and upper >= 0)) then
       if lower == nil and upper == nil then return obj end
       local l = (lower and (lower + 1)) or 1
       local u = upper or -1
       return string.sub(obj, l, u)
     end
-    step = step or 1
     local n = #obj
     if step > 0 then
       local l = 1
