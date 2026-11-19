@@ -394,6 +394,46 @@ function array(typecode, initializer)
   return arr
 end
 
+local _list_iter_mt = {
+  __call = function(self)
+    local i = self[2] + 1
+    local t = self[1]
+    if i <= #t then
+      self[2] = i
+      return t[i]
+    end
+    return nil
+  end
+}
+
+local _dict_iter_mt = {
+  __call = function(self)
+    local k = next(self[1], self[2])
+    self[2] = k
+    return k
+  end
+}
+
+local _str_iter_mt = {
+  __call = function(self)
+    local i = self[2] + 1
+    local s = self[1]
+    if i <= #s then
+      self[2] = i
+      return string.sub(s, i, i)
+    end
+    return nil
+  end
+}
+
+local _obj_next_mt = {
+  __call = function(self)
+    return self[1]:__next__()
+  end
+}
+
+local _empty_iter = function() return nil end
+
 local _dict_methods = {
   get = function(self, k, ...)
     local v = rawget(self, k)
@@ -441,7 +481,7 @@ local _dict_methods = {
   end,
   items = function(self)
     local r = setmetatable({}, _list_mt)
-    for k, v in pairs(self) do table.insert(r, {k, v}) end
+    for k, v in pairs(self) do r[#r + 1] = {k, v} end
     return r
   end,
   update = function(self, other)
@@ -456,11 +496,7 @@ local _dict_methods = {
     return r
   end,
   __iter__ = function(self)
-    local k = nil
-    return function()
-      k = next(self, k)
-      return k
-    end
+    return setmetatable({self, nil}, _dict_iter_mt)
   end,
 }
 local _dict_mt = {
@@ -521,13 +557,27 @@ function _luthon_subscr_fast(t, idx)
 end
 
 function __luthon_get(t, i)
-  if t == nil or t == _G._luthon_none or (type(t) == "table" and rawget(t, "__is_none__") == true) then return nil end
-  if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
-    return t[i]
+  if type(t) == "table" then
+    local mt = getmetatable(t)
+    if mt == _list_mt or mt == _tuple_mt or (mt and (mt.__list__ or mt.__tuple__)) or rawget(t, "_list") or rawget(t, "_tuple") then
+      if type(i) == "number" then
+        if i < 0 then i = #t + i + 1 else i = i + 1 end
+        return t[i]
+      end
+    elseif mt == _dict_mt or (mt and mt.__dict__) or rawget(t, "_dict") then
+      if type(i) == "table" then i = _luthon_key_repr(i) end
+      local v = rawget(t, i)
+      if v ~= nil then return v end
+      if _dict_methods and _dict_methods[i] ~= nil then return _dict_methods[i] end
+      local ke = _G.KeyError or KeyError
+      if ke then error(ke(tostring(i)), 0) end
+      error("KeyError: " .. tostring(i), 0)
+    end
+    if rawget(t, "_buf") and rawget(t, "_len") then return t[i] end
+    if rawget(t, "_py") then return t[i] end
+    if rawget(t, "__is_none__") then return nil end
   end
-  if type(t) == "table" and rawget(t, "_py") then
-    return t[i]
-  end
+  if t == nil or t == _G._luthon_none then return nil end
   if type(i) == "table" then
     i = _luthon_key_repr(i)
   end
@@ -546,19 +596,6 @@ function __luthon_get(t, i)
   end
   if type(t) ~= "table" and type(t) ~= "userdata" and type(t) ~= "cdata" then
     return t
-  end
-  local mt = getmetatable(t)
-  if type(t) == "table" and (rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt)))) then
-    local v = rawget(t, i)
-    if v == nil then
-      if _dict_methods and _dict_methods[i] ~= nil then
-        return _dict_methods[i]
-      end
-      local ke = _G.KeyError or KeyError
-      if ke then error(ke(tostring(i)), 0) end
-      error("KeyError: " .. tostring(i), 0)
-    end
-    return v
   end
   if type(i) == "number" then
     if i < 0 then i = #t + i + 1 else i = i + 1 end
@@ -840,6 +877,7 @@ function _luthon_exc_match(exc, cls)
   if type(exc) ~= "table" then
     local str_exc = tostring(exc)
     if str_exc:find(tname, 1, true) then return true end
+    if (tname == "AttributeError" or cls == AttributeError) and (str_exc:find("attempt to index", 1, true) or str_exc:find("attempt to call a nil value", 1, true)) then return true end
     if (tname == "ImportError" or cls == ImportError) and str_exc:find("ModuleNotFoundError", 1, true) then return true end
     if (tname == "OSError" or cls == OSError) and (str_exc:find("IOError", 1, true) or str_exc:find("FileNotFoundError", 1, true) or str_exc:find("No such file", 1, true) or str_exc:find("cannot create temp file", 1, true)) then return true end
     if (tname == "FileNotFoundError" or cls == FileNotFoundError) and str_exc:find("No such file", 1, true) then return true end
@@ -1057,9 +1095,17 @@ end
 _G._luthon_truthy = _luthon_truthy
 
 function _luthon_cmp(op, a, b)
+  if type(a) == "number" and type(b) == "number" then
+    if op == "<" or op == "lt" then return a < b end
+    if op == "<=" or op == "le" then return a <= b end
+    if op == ">" or op == "gt" then return a > b end
+    if op == ">=" or op == "ge" then return a >= b end
+    if op == "==" or op == "eq" or op == "is" then return a == b end
+    return a ~= b
+  end
   local ta = type(a)
   local tb = type(b)
-  if (ta == "string" and tb == "string") or (ta == "number" and tb == "number") or (ta == "boolean" and tb == "boolean") then
+  if (ta == "string" and tb == "string") or (ta == "boolean" and tb == "boolean") then
     if op == "==" or op == "eq" or op == "is" then return a == b end
     if op == "~=" or op == "!=" or op == "ne" or op == "isnot" then return a ~= b end
     if op == "<" or op == "lt" then return a < b end
@@ -1299,8 +1345,19 @@ local _set_mt = {__index = _set_methods}
 function set(t)
   local s = setmetatable({}, _set_mt)
   if t then
-    if type(t) == "table" then
-      for _, v in ipairs(t) do s[v] = true end
+    if type(t) == "function" or (type(t) == "table" and getmetatable(t) and getmetatable(t).__call) then
+      while true do
+        local v = t()
+        if v == nil then break end
+        s[v] = true
+      end
+    elseif type(t) == "table" then
+      local mt = getmetatable(t)
+      if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
+        for k in pairs(t) do s[k] = true end
+      else
+        for _, v in ipairs(t) do s[v] = true end
+      end
     elseif type(t) == "string" then
       for i = 1, #t do s[string.sub(t, i, i)] = true end
     end
@@ -1562,7 +1619,7 @@ table.pack = table.pack or function(...)
 end
 
 function list(t)
-  if type(t) == "function" then
+  if type(t) == "function" or (type(t) == "table" and getmetatable(t) and getmetatable(t).__call) then
     local r = setmetatable({}, _list_mt)
     while true do
       local v = t()
@@ -1595,8 +1652,13 @@ function list(t)
   end
   local r = setmetatable({}, _list_mt)
   if t then
-    local n = #t
-    for i=1,n do r[#r+1] = t[i] end
+    local mt = getmetatable(t)
+    if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
+      for k in pairs(t) do r[#r+1] = k end
+    else
+      local n = #t
+      for i=1,n do r[#r+1] = t[i] end
+    end
   end
   return r
 end
@@ -1745,7 +1807,7 @@ end
 
 function tuple(t)
   local r = setmetatable({}, _tuple_mt)
-  if type(t) == "function" then
+  if type(t) == "function" or (type(t) == "table" and getmetatable(t) and getmetatable(t).__call) then
     while true do
       local v = t()
       if v == nil then break end
@@ -1754,13 +1816,19 @@ function tuple(t)
     return r
   end
   if type(t) == "table" then
-    local n = #t
-    for i = 1, n do r[#r+1] = t[i] end
+    local mt = getmetatable(t)
+    if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
+      for k in pairs(t) do r[#r+1] = k end
+    else
+      local n = #t
+      for i = 1, n do r[#r+1] = t[i] end
+    end
     return r
   end
   r[1] = t
   return r
 end
+
 local _dict_methods = {
   get = function(self, k, ...)
     local v = rawget(self, k)
@@ -1808,7 +1876,7 @@ local _dict_methods = {
   end,
   items = function(self)
     local r = setmetatable({}, _list_mt)
-    for k, v in pairs(self) do table.insert(r, {k, v}) end
+    for k, v in pairs(self) do r[#r + 1] = {k, v} end
     return r
   end,
   update = function(self, other)
@@ -1823,11 +1891,7 @@ local _dict_methods = {
     return r
   end,
   __iter__ = function(self)
-    local k = nil
-    return function()
-      k = next(self, k)
-      return k
-    end
+    return setmetatable({self, nil}, _dict_iter_mt)
   end,
 }
 local _dict_mt = {__dict__ = true, __index = _dict_methods}
@@ -1995,9 +2059,8 @@ _str_methods = {
       return setmetatable({s, "", ""}, _tuple_mt)
     end
     local before = string.sub(s, 1, s_start - 1)
-    local match = string.sub(s, s_start, s_end)
     local after = string.sub(s, s_end + 1)
-    return setmetatable({before, match, after}, _tuple_mt)
+    return setmetatable({before, sep, after}, _tuple_mt)
   end,
   rpartition = function(s, sep)
     if sep == nil or sep == "" then error("ValueError: empty separator") end
@@ -2144,22 +2207,86 @@ local function _expand_dynamic_format(fmt, t)
   return out_fmt, new_t
 end
 
+function _str_partition_head(s, sep)
+  if s == nil or s == "" then return "" end
+  if sep == nil or sep == "" then error("ValueError: empty separator") end
+  local p = _lua_raw_str_find(s, sep, 1, true)
+  if not p then return s end
+  return string.sub(s, 1, p - 1)
+end
+
+local _fmt_star_cache = {}
+local _fmt_std_cache = {}
+local _fmt_f_s_prec = {
+  [0] = "%.0f %s",
+  [1] = "%.1f %s",
+  [2] = "%.2f %s",
+  [3] = "%.3f %s",
+}
+local _fmt_f_pcnt_prec = {
+  [0] = "%.0f%%",
+  [1] = "%.1f%%",
+  [2] = "%.2f%%",
+  [3] = "%.3f%%",
+}
+
 local function _str_mod(fmt, args)
   if type(fmt) ~= "string" then
     error("TypeError: unsupported operand type(s) for %")
   end
   local is_tuple = (type(args) == "table" and (rawget(args, "__is_tuple") or (getmetatable(args) and getmetatable(args).__tuple__)))
   if is_tuple then
-    local spec, rest = fmt:match("^%%%.%*([a-zA-Z])(.*)$")
-    if spec then
+    if fmt == "%.*f %s" and #args == 3 then
+      local p = args[1]
+      local f = _fmt_f_s_prec[p]
+      if not f then
+        f = "%." .. tostring(p) .. "f %s"
+        _fmt_f_s_prec[p] = f
+      end
+      return string.format(f, args[2], args[3])
+    elseif fmt == "%.*f%%" and #args == 2 then
+      local p = args[1]
+      local f = _fmt_f_pcnt_prec[p]
+      if not f then
+        f = "%." .. tostring(p) .. "f%%"
+        _fmt_f_pcnt_prec[p] = f
+      end
+      return string.format(f, args[2])
+    end
+
+    local star_info = _fmt_star_cache[fmt]
+    if star_info == nil then
+      local spec, rest = fmt:match("^%%%.%*([a-zA-Z])(.*)$")
+      if spec then
+        star_info = {spec = spec, rest = rest, prec = {}}
+      else
+        star_info = false
+      end
+      _fmt_star_cache[fmt] = star_info
+    end
+
+    if star_info then
+      local prec = tostring(args[1])
+      local spec_fmt = star_info.prec[prec]
+      if not spec_fmt then
+        spec_fmt = "%." .. prec .. star_info.spec .. star_info.rest
+        star_info.prec[prec] = spec_fmt
+      end
       local n = #args
       if n == 2 then
-        return string.format("%." .. tostring(args[1]) .. spec .. rest, args[2])
+        return string.format(spec_fmt, args[2])
       elseif n == 3 then
-        return string.format("%." .. tostring(args[1]) .. spec .. rest, args[2], args[3])
+        return string.format(spec_fmt, args[2], args[3])
       end
     end
-    if not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*") then
+
+    local is_std = _fmt_std_cache[fmt]
+    if is_std == nil then
+      is_std = not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*")
+      _fmt_std_cache[fmt] = is_std
+    end
+
+    if is_std then
       local n = #args
       if n == 1 then
         return string.format(fmt, args[1])
@@ -2172,7 +2299,12 @@ local function _str_mod(fmt, args)
       end
     end
   elseif type(args) ~= "table" then
-    if not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*") then
+    local is_std = _fmt_std_cache[fmt]
+    if is_std == nil then
+      is_std = not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*")
+      _fmt_std_cache[fmt] = is_std
+    end
+    if is_std then
       return string.format(fmt, args)
     end
   end
@@ -2277,15 +2409,10 @@ end
 
 function iter(t)
   if t == nil or t == _G._luthon_none or (type(t) == "table" and rawget(t, "__is_none__")) then
-    return function() return nil end
+    return _empty_iter
   end
   if type(t) == "string" then
-    local i = 0
-    return function()
-      i = i + 1
-      if i <= #t then return string.sub(t, i, i) end
-      return nil
-    end
+    return setmetatable({t, 0}, _str_iter_mt)
   end
   if type(t) == "table" and t.__anext__ then
     return function() return t:__anext__() end
@@ -2320,31 +2447,22 @@ function iter(t)
   if type(t) == "table" and type(t.__iter__) == "function" then
     local it = t:__iter__()
     if type(it) == "table" and it.__next__ then
-      return function() return it:__next__() end
+      return setmetatable({it}, _obj_next_mt)
     end
     return it
   end
   if type(t) == "table" and t.__next__ then
-    return function() return t:__next__() end
+    return setmetatable({t}, _obj_next_mt)
   end
   if type(t) == "userdata" and io.type(t) == "file" then return t:lines() end
   if type(t) == "table" and t.lines then return t:lines() end
   if type(t) == "function" then return t end
-  if type(t) ~= "table" then return function() return nil end end
+  if type(t) ~= "table" then return _empty_iter end
   local mt = getmetatable(t)
   if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
-    local k = nil
-    return function()
-      k = next(t, k)
-      return k
-    end
+    return setmetatable({t, nil}, _dict_iter_mt)
   end
-  local i = 0
-  return function()
-    i = i + 1
-    if i <= #t then return t[i] end
-    return nil
-  end
+  return setmetatable({t, 0}, _list_iter_mt)
 end
 function unpack_list(t)
   return t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10]
@@ -2471,55 +2589,10 @@ bytes = _create_builtin_type("bytes", _raw_bytes)
 NoneType = _create_builtin_type("NoneType", function() return None end)
 object = _create_builtin_type("object", function() return {} end)
 
-_luthon_type = _create_builtin_type("type", function(...)
-  local n = select("#", ...)
-  if n == 1 then
-    local x = select(1, ...)
-    if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return _builtin_types["NoneType"] end
-    local lt = type(x)
-    if lt == "number" then
-      if math.floor(x) == x and not (x == 1/0 or x == -1/0) then
-        return int
-      else
-        return float
-      end
-    elseif lt == "string" then
-      return str
-    elseif lt == "boolean" then
-      return bool
-    elseif lt == "table" then
-      if rawget(x, "_py") then
-        local c = x.__class__
-        if c then return c end
-      end
-      local c = rawget(x, "__class__") or (getmetatable(x) and getmetatable(x).__class)
-      if c then return c end
-      if rawget(x, "_bytes") or (getmetatable(x) and getmetatable(x) == _bytes_mt) then
-        return bytes
-      end
-      if rawget(x, "_set") or (getmetatable(x) and getmetatable(x) == _set_mt) then
-        return set
-      end
-      if rawget(x, "_frozenset") or (getmetatable(x) and getmetatable(x) == _frozenset_mt) then
-        return frozenset
-      end
-      if rawget(x, "_tuple") or (getmetatable(x) and (getmetatable(x).__tuple or getmetatable(x) == _tuple_mt)) then
-        return tuple
-      end
-      if rawget(x, "_list") or (getmetatable(x) and getmetatable(x) == _list_mt) then
-        return list
-      end
-      if rawget(x, "_dict") or (getmetatable(x) and getmetatable(x) == _dict_mt) then
-        return dict
-      end
-      if #x > 0 or rawget(x, 1) ~= nil then
-        return list
-      end
-      return dict
-    end
-    return _builtin_types["object"]
-  elseif n == 3 then
-    local name, bases, dict_cls = ...
+_luthon_type = _create_builtin_type("type", function(x, ...)
+  if select("#", ...) > 0 then
+    local bases, dict_cls = ...
+    local name = x
     local cls = dict_cls or {}
     cls.__name__ = name
     cls.__name = name
@@ -2541,6 +2614,35 @@ _luthon_type = _create_builtin_type("type", function(...)
       __tostring = function() return "<class '" .. name .. "'>" end
     })
     return cls
+  end
+  if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return _builtin_types["NoneType"] end
+  local lt = type(x)
+  if lt == "number" then
+    if math.floor(x) == x and not (x == 1/0 or x == -1/0) then
+      return int
+    else
+      return float
+    end
+  elseif lt == "string" then
+    return str
+  elseif lt == "boolean" then
+    return bool
+  elseif lt == "table" then
+    local mt = getmetatable(x)
+    if mt == _dict_mt or rawget(x, "_dict") then return dict end
+    if mt == _list_mt or rawget(x, "_list") then return list end
+    local c = rawget(x, "__class__") or (mt and mt.__class)
+    if c then return c end
+    if mt == _tuple_mt or (mt and mt.__tuple) or rawget(x, "_tuple") then return tuple end
+    if mt == _bytes_mt or rawget(x, "_bytes") then return bytes end
+    if mt == _set_mt or rawget(x, "_set") then return set end
+    if mt == _frozenset_mt or rawget(x, "_frozenset") then return frozenset end
+    if rawget(x, "_py") then
+      local c2 = x.__class__
+      if c2 then return c2 end
+    end
+    if #x > 0 or rawget(x, 1) ~= nil then return list end
+    return dict
   end
   return _builtin_types["object"]
 end)
@@ -2678,6 +2780,13 @@ function max(...)
   return best_item
 end
 function sum(t) local s=0; local n=#t; for i=1,n do s=s+t[i] end; return s end
+local _default_sort_cmp = function(a, b)
+  return _luthon_lt(a, b)
+end
+local _default_sort_rev_cmp = function(a, b)
+  return _luthon_lt(b, a)
+end
+
 function sorted(...)
   local argc = select("#", ...)
   local t = select(1, ...)
@@ -2707,15 +2816,21 @@ function sorted(...)
       r[#r+1] = v
     end
   end
-  table.sort(r, function(a, b)
-    local val_a = key_fn and key_fn(a) or a
-    local val_b = key_fn and key_fn(b) or b
-    if reverse then
-      return _luthon_lt(val_b, val_a)
-    else
-      return _luthon_lt(val_a, val_b)
+  local cmp = nil
+  if key_fn then
+    cmp = function(a, b)
+      local val_a = key_fn(a)
+      local val_b = key_fn(b)
+      if reverse then
+        return _luthon_lt(val_b, val_a)
+      else
+        return _luthon_lt(val_a, val_b)
+      end
     end
-  end)
+  else
+    cmp = reverse and _default_sort_rev_cmp or _default_sort_cmp
+  end
+  table.sort(r, cmp)
   return r
 end
 function ord(c)
@@ -4789,6 +4904,8 @@ time.sleep = function(secs)
 end
 time.mktime = function(t)
   if type(t) == "table" then
+    local s = rawget(t, "_secs")
+    if s then return s end
     if t.year and t.month and t.day then
       return os.time({year = t.year, month = t.month, day = t.day, hour = t.hour or t.min or 0, min = t.minute or t.min or 0, sec = t.second or t.sec or 0})
     elseif #t >= 6 then
@@ -4797,17 +4914,42 @@ time.mktime = function(t)
   end
   return os.time()
 end
+local _localtime_cache = {}
+local _localtime_cache_count = 0
 time.localtime = function(secs)
-  local t = os.date("*t", math.floor(secs or os.time()))
-  return _tuple_pack(t.year, t.month, t.day, t.hour, t.min, t.sec, (t.wday + 5) % 7, t.yday, t.isdst and 1 or 0)
+  local s = math.floor(secs or os.time())
+  local cached = _localtime_cache[s]
+  if cached then return cached end
+  local t = os.date("*t", s)
+  local tup = _tuple_pack(t.year, t.month, t.day, t.hour, t.min, t.sec, (t.wday + 5) % 7, t.yday, t.isdst and 1 or 0)
+  rawset(tup, "_secs", s)
+  if _localtime_cache_count < 1000 then
+    _localtime_cache[s] = tup
+    _localtime_cache_count = _localtime_cache_count + 1
+  end
+  return tup
 end
 time.gmtime = function(secs)
-  local t = os.date("!*t", math.floor(secs or os.time()))
-  return _tuple_pack(t.year, t.month, t.day, t.hour, t.min, t.sec, (t.wday + 5) % 7, t.yday, 0)
+  local s = math.floor(secs or os.time())
+  local t = os.date("!*t", s)
+  local tup = _tuple_pack(t.year, t.month, t.day, t.hour, t.min, t.sec, (t.wday + 5) % 7, t.yday, 0)
+  rawset(tup, "_secs", s)
+  return tup
 end
+local _strftime_cache = {}
+local _strftime_cache_count = 0
 time.strftime = function(fmt, t)
   if t == nil then return os.date(fmt) end
-  return os.date(fmt, time.mktime(t))
+  local ts = (type(t) == "table" and rawget(t, "_secs")) or time.mktime(t)
+  local k = fmt .. ":" .. tostring(ts)
+  local res = _strftime_cache[k]
+  if res then return res end
+  res = os.date(fmt, ts)
+  if _strftime_cache_count < 2000 then
+    _strftime_cache[k] = res
+    _strftime_cache_count = _strftime_cache_count + 1
+  end
+  return res
 end
 
 -- string constants and methods
@@ -4865,6 +5007,8 @@ local _b64_bit_ok, _b64_bit = pcall(require, "bit")
 
 local _b64lut = nil
 local _b64chars_ptr = nil
+local _b32chars_ptr = nil
+local b32chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 if _b64_ffi_ok and _b64_bit_ok then
   _b64lut = _b64_ffi.new("int16_t[256]")
   for i = 0, 255 do _b64lut[i] = -1 end
@@ -4875,6 +5019,7 @@ if _b64_ffi_ok and _b64_bit_ok then
   _b64lut[13] = -3 -- CR
   _b64lut[32] = -3 -- space
   _b64chars_ptr = _b64_ffi.cast("const uint8_t*", b64chars)
+  _b32chars_ptr = _b64_ffi.cast("const uint8_t*", b32chars)
 end
 
 base64.b64encode = function(data)
@@ -5021,6 +5166,76 @@ base64.b64decode = function(data)
   return table.concat(result)
 end
 
+base64.b32encode = function(data)
+  data = tostring(data or "")
+  local len = #data
+  if len == 0 then return "" end
+  if _b64_ffi_ok and _b64_bit_ok then
+    local max_out = math.ceil(len / 5) * 8 + 8
+    local buf = _b64_ffi.new("uint8_t[?]", max_out)
+    local ptr = _b64_ffi.cast("const uint8_t*", data)
+    local out_pos = 0
+    local i = 0
+    while i + 4 < len do
+      local b0 = ptr[i]
+      local b1 = ptr[i+1]
+      local b2 = ptr[i+2]
+      local b3 = ptr[i+3]
+      local b4 = ptr[i+4]
+      buf[out_pos]   = _b32chars_ptr[_b64_bit.rshift(b0, 3)]
+      buf[out_pos+1] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b0, 7), 2), _b64_bit.rshift(b1, 6))]
+      buf[out_pos+2] = _b32chars_ptr[_b64_bit.band(_b64_bit.rshift(b1, 1), 0x1F)]
+      buf[out_pos+3] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b1, 1), 4), _b64_bit.rshift(b2, 4))]
+      buf[out_pos+4] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b2, 0xF), 1), _b64_bit.rshift(b3, 7))]
+      buf[out_pos+5] = _b32chars_ptr[_b64_bit.band(_b64_bit.rshift(b3, 2), 0x1F)]
+      buf[out_pos+6] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b3, 3), 3), _b64_bit.rshift(b4, 5))]
+      buf[out_pos+7] = _b32chars_ptr[_b64_bit.band(b4, 0x1F)]
+      out_pos = out_pos + 8
+      i = i + 5
+    end
+    local rem = len - i
+    if rem == 1 then
+      local b0 = ptr[i]
+      buf[out_pos]   = _b32chars_ptr[_b64_bit.rshift(b0, 3)]
+      buf[out_pos+1] = _b32chars_ptr[_b64_bit.lshift(_b64_bit.band(b0, 7), 2)]
+      buf[out_pos+2] = 61; buf[out_pos+3] = 61; buf[out_pos+4] = 61; buf[out_pos+5] = 61; buf[out_pos+6] = 61; buf[out_pos+7] = 61
+      out_pos = out_pos + 8
+    elseif rem == 2 then
+      local b0 = ptr[i]; local b1 = ptr[i+1]
+      buf[out_pos]   = _b32chars_ptr[_b64_bit.rshift(b0, 3)]
+      buf[out_pos+1] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b0, 7), 2), _b64_bit.rshift(b1, 6))]
+      buf[out_pos+2] = _b32chars_ptr[_b64_bit.band(_b64_bit.rshift(b1, 1), 0x1F)]
+      buf[out_pos+3] = _b32chars_ptr[_b64_bit.lshift(_b64_bit.band(b1, 1), 4)]
+      buf[out_pos+4] = 61; buf[out_pos+5] = 61; buf[out_pos+6] = 61; buf[out_pos+7] = 61
+      out_pos = out_pos + 8
+    elseif rem == 3 then
+      local b0 = ptr[i]; local b1 = ptr[i+1]; local b2 = ptr[i+2]
+      buf[out_pos]   = _b32chars_ptr[_b64_bit.rshift(b0, 3)]
+      buf[out_pos+1] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b0, 7), 2), _b64_bit.rshift(b1, 6))]
+      buf[out_pos+2] = _b32chars_ptr[_b64_bit.band(_b64_bit.rshift(b1, 1), 0x1F)]
+      buf[out_pos+3] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b1, 1), 4), _b64_bit.rshift(b2, 4))]
+      buf[out_pos+4] = _b32chars_ptr[_b64_bit.lshift(_b64_bit.band(b2, 0xF), 1)]
+      buf[out_pos+5] = 61; buf[out_pos+6] = 61; buf[out_pos+7] = 61
+      out_pos = out_pos + 8
+    elseif rem == 4 then
+      local b0 = ptr[i]; local b1 = ptr[i+1]; local b2 = ptr[i+2]; local b3 = ptr[i+3]
+      buf[out_pos]   = _b32chars_ptr[_b64_bit.rshift(b0, 3)]
+      buf[out_pos+1] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b0, 7), 2), _b64_bit.rshift(b1, 6))]
+      buf[out_pos+2] = _b32chars_ptr[_b64_bit.band(_b64_bit.rshift(b1, 1), 0x1F)]
+      buf[out_pos+3] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b1, 1), 4), _b64_bit.rshift(b2, 4))]
+      buf[out_pos+4] = _b32chars_ptr[_b64_bit.bor(_b64_bit.lshift(_b64_bit.band(b2, 0xF), 1), _b64_bit.rshift(b3, 7))]
+      buf[out_pos+5] = _b32chars_ptr[_b64_bit.band(_b64_bit.rshift(b3, 2), 0x1F)]
+      buf[out_pos+6] = _b32chars_ptr[_b64_bit.lshift(_b64_bit.band(b3, 3), 3)]
+      buf[out_pos+7] = 61
+      out_pos = out_pos + 8
+    end
+    return _b64_ffi.string(buf, out_pos)
+  end
+  local py_b = _get_py_base64()
+  if py_b and py_b.b32encode then return py_b.b32encode(data) end
+  error("base64.b32encode not available")
+end
+
 local py_base64 = nil
 local function _get_py_base64()
   if not py_base64 then
@@ -5067,11 +5282,35 @@ function binascii.hexlify(data)
 end
 binascii.b2a_hex = binascii.hexlify
 
+local _hexlut = nil
+if _b64_ffi_ok then
+  _hexlut = _b64_ffi.new("int8_t[256]")
+  for i = 0, 255 do _hexlut[i] = -1 end
+  for i = string.byte('0'), string.byte('9') do _hexlut[i] = i - string.byte('0') end
+  for i = string.byte('a'), string.byte('f') do _hexlut[i] = i - string.byte('a') + 10 end
+  for i = string.byte('A'), string.byte('F') do _hexlut[i] = i - string.byte('A') + 10 end
+end
+
 function binascii.unhexlify(hexstr)
   hexstr = tostring(hexstr or ""):gsub("%s+", "")
-  if #hexstr % 2 ~= 0 then error("binascii.Error: Odd-length string") end
+  local len = #hexstr
+  if len % 2 ~= 0 then error("binascii.Error: Odd-length string") end
+  if _hexlut then
+    local out_len = math.floor(len / 2)
+    local buf = _b64_ffi.new("uint8_t[?]", out_len)
+    local ptr = _b64_ffi.cast("const uint8_t*", hexstr)
+    local out_pos = 0
+    for i = 0, len - 1, 2 do
+      local h1 = _hexlut[ptr[i]]
+      local h2 = _hexlut[ptr[i+1]]
+      if h1 < 0 or h2 < 0 then error("binascii.Error: Non-hexadecimal digit found") end
+      buf[out_pos] = _b64_bit.bor(_b64_bit.lshift(h1, 4), h2)
+      out_pos = out_pos + 1
+    end
+    return _b64_ffi.string(buf, out_pos)
+  end
   local res = {}
-  for i = 1, #hexstr, 2 do
+  for i = 1, len, 2 do
     local b = tonumber(hexstr:sub(i, i + 1), 16)
     if not b then error("binascii.Error: Non-hexadecimal digit found") end
     table.insert(res, string.char(b))
@@ -6884,6 +7123,13 @@ _socket_mod.inet_pton = function(family, ip_str)
   return _sock_ffi.string(buf, buf_size)
 end
 
+_socket_mod.inet_pton_bool = function(family, ip_str)
+  local is_v6 = (family == 10)
+  local buf = is_v6 and _sock_ipv6_buf or _sock_ipv4_buf
+  local s = type(ip_str) == "string" and ip_str or tostring(ip_str or "")
+  return _sock_ffi.C.inet_pton(family, s, buf) > 0
+end
+
 _socket_mod.inet_ntop = function(family, packed_ip)
   local max_len = (family == 10) and 46 or 16
   local ptr = _sock_ffi.C.inet_ntop(family, packed_ip, _sock_ntop_buf, max_len)
@@ -6922,6 +7168,7 @@ setmetatable(_socket_mod, {
 })
 
 _G.socket = _socket_mod
+_G._socket_mod = _socket_mod
 
 -- asyncio cooperative event loop runner & task scheduler (Phase 35)
 asyncio = {}
