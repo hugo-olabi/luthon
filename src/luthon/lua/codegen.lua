@@ -161,6 +161,29 @@ local function _emit(ins)
     return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "BRANCH_FALSE" then
     return "if not _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
+  elseif o == "IN_UNROLL" or o == "NOT_IN_UNROLL" then
+    local lhs = args[1]
+    local eqs = {}
+    for i = 2, #args do
+      local v = args[i]
+      local rep
+      if v == true then rep = "true"
+      elseif v == false then rep = "false"
+      elseif v == nil then rep = "nil"
+      elseif type(v) == "string" then rep = string.format("%q", v)
+      else rep = tostring(v) end
+      table.insert(eqs, "(" .. lhs .. " == " .. rep .. ")")
+    end
+    local joined = table.concat(eqs, " or ")
+    if o == "IN_UNROLL" then
+      return ins.result .. " = (" .. joined .. ")"
+    else
+      return ins.result .. " = not (" .. joined .. ")"
+    end
+  elseif o == "CMP_DIRECT" then
+    local cmp_op = args[1] or ""
+    local mapped_op = cmp_op:gsub("eq","=="):gsub("ne","~="):gsub("lt","<"):gsub("le","<="):gsub("gt",">"):gsub("ge",">=")
+    return ins.result .. " = (" .. args[2] .. " " .. mapped_op .. " " .. args[3] .. ")"
   elseif o == "CMP" then
     local c = _CMP_MAP[args[1]] or args[1]
     if c == "_luthon_in" or c == "_luthon_not_in" then
@@ -176,6 +199,10 @@ local function _emit(ins)
       return ins.result .. " = " .. args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
     end
     return args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
+  elseif o == "TRY_BEGIN_HOISTED" then
+    return "do\nlocal ok, err = pcall(" .. args[1] .. ")"
+  elseif o == "END_TRY_HOISTED" then
+    return "if not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
   elseif o == "TRY_BEGIN" or o == "WITH_BEGIN" then
     local scoped = {}
     for _, a in ipairs(args or {}) do table.insert(scoped, tostring(a)) end
@@ -521,6 +548,124 @@ function M.generate(module, skip_prelude, sourcemap)
         end
         table.insert(out, indent .. "  local " .. table.concat(chunk, ", "))
       end
+    end
+
+    -- Loop-level try...except closure hoisting (Phase 31/NYI JIT Unlock)
+    local succs = {}
+    local preds = {}
+    local label_to_idx = {}
+    for idx, b in ipairs(fn.blocks or {}) do
+      succs[b.label] = {}
+      preds[b.label] = {}
+      label_to_idx[b.label] = idx
+    end
+    for idx, b in ipairs(fn.blocks or {}) do
+      local instrs = b.instrs or {}
+      for _, ins in ipairs(instrs) do
+        local targets = {}
+        if ins.op == "JUMP" and ins.args and ins.args[1] then
+          table.insert(targets, ins.args[1])
+        elseif (ins.op == "BRANCH" or ins.op == "BRANCH_NONE" or ins.op == "BRANCH_TRUE" or ins.op == "BRANCH_FALSE") and ins.args then
+          for i = 2, #ins.args do
+            if ins.args[i] then table.insert(targets, ins.args[i]) end
+          end
+        end
+        for _, t in ipairs(targets) do
+          if succs[b.label] then
+            succs[b.label][t] = true
+            if preds[t] then preds[t][b.label] = true end
+          end
+        end
+      end
+      local last = #instrs > 0 and instrs[#instrs]
+      if (not last or (last.op ~= "JUMP" and last.op ~= "RETURN")) and idx < #(fn.blocks or {}) then
+        local next_b = fn.blocks[idx + 1]
+        succs[b.label][next_b.label] = true
+        preds[next_b.label][b.label] = true
+      end
+    end
+
+    local loop_blocks = {}
+    for u, targets in pairs(succs) do
+      for v, _ in pairs(targets) do
+        if label_to_idx[v] and label_to_idx[u] and label_to_idx[v] <= label_to_idx[u] then
+          loop_blocks[v] = true
+          loop_blocks[u] = true
+          local queue = {u}
+          while #queue > 0 do
+            local curr = table.remove(queue, 1)
+            for p, _ in pairs(preds[curr] or {}) do
+              if p ~= v and not loop_blocks[p] then
+                loop_blocks[p] = true
+                table.insert(queue, p)
+              end
+            end
+          end
+        end
+      end
+    end
+
+    local hoisted_closures = {}
+    local closure_counter = 0
+    for _, b in ipairs(fn.blocks or {}) do
+      if loop_blocks[b.label] then
+        local new_instrs = {}
+        local idx = 1
+        local instrs = b.instrs or {}
+        while idx <= #instrs do
+          local ins = instrs[idx]
+          if ins.op == "TRY_BEGIN" then
+            local end_idx = nil
+            local nested_depth = 0
+            for j = idx + 1, #instrs do
+              if instrs[j].op == "TRY_BEGIN" then
+                nested_depth = nested_depth + 1
+              elseif instrs[j].op == "END_TRY" then
+                if nested_depth == 0 then
+                  end_idx = j
+                  break
+                else
+                  nested_depth = nested_depth - 1
+                end
+              end
+            end
+            if end_idx then
+              closure_counter = closure_counter + 1
+              local safe_fn_name = fn.name:gsub("%.", "_"):gsub("<", "_"):gsub(">", "_")
+              local closure_name = "_try_closure_" .. safe_fn_name .. "_" .. closure_counter
+              local body_instrs = {}
+              for k = idx + 1, end_idx - 1 do
+                table.insert(body_instrs, instrs[k])
+              end
+              local scoped_vars = ins.args or {}
+              table.insert(hoisted_closures, {name = closure_name, scoped = scoped_vars, instrs = body_instrs})
+              table.insert(new_instrs, {op = "TRY_BEGIN_HOISTED", args = {closure_name}})
+              table.insert(new_instrs, {op = "END_TRY_HOISTED", args = {}})
+              idx = end_idx + 1
+            else
+              table.insert(new_instrs, ins)
+              idx = idx + 1
+            end
+          else
+            table.insert(new_instrs, ins)
+            idx = idx + 1
+          end
+        end
+        b.instrs = new_instrs
+      end
+    end
+
+    for _, c in ipairs(hoisted_closures) do
+      table.insert(out, indent .. "  local " .. c.name .. " = function()")
+      if #(c.scoped or {}) > 0 then
+        local capped = {}
+        for i = 1, math.min(#c.scoped, 180) do table.insert(capped, tostring(c.scoped[i])) end
+        table.insert(out, indent .. "    local " .. table.concat(capped, ", "))
+      end
+      for _, b_ins in ipairs(c.instrs) do
+        table.insert(out, indent .. "    " .. _emit(b_ins))
+      end
+      table.insert(out, indent .. "  end")
     end
 
     -- Emit blocks

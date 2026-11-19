@@ -77,6 +77,25 @@ def _emit(ins):
             return ins.result + " = _luthon_not_in(" + ins.args[1] + ", " + ins.args[2] + ")"
         mapped_op = cmp_op.replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=")
         return ins.result + " = _luthon_cmp('" + mapped_op + "', " + ins.args[1] + ", " + ins.args[2] + ")"
+    if o in ("IN_UNROLL", "NOT_IN_UNROLL"):
+        lhs = ins.args[0]
+        eqs = []
+        for v in ins.args[1:]:
+            if v is True:
+                eqs.append(f"({lhs} == true)")
+            elif v is False:
+                eqs.append(f"({lhs} == false)")
+            elif v is None:
+                eqs.append(f"({lhs} == nil)")
+            elif isinstance(v, str):
+                eqs.append(f"({lhs} == {repr(v)})")
+            else:
+                eqs.append(f"({lhs} == {v})")
+        joined = " or ".join(eqs)
+        if o == "IN_UNROLL":
+            return ins.result + " = (" + joined + ")"
+        else:
+            return ins.result + " = not (" + joined + ")"
     if o == "CMP_DIRECT":
         cmp_op = (ins.args[0] or "")
         mapped_op = cmp_op.replace("eq","==").replace("ne","~=").replace("lt","<").replace("le","<=").replace("gt",">").replace("ge",">=")
@@ -90,6 +109,11 @@ def _emit(ins):
         return "do"
     if o == "END":
         return "end"
+    if o == "TRY_BEGIN_HOISTED":
+        fn_name = ins.args[0]
+        return f"do\nlocal ok, err = pcall({fn_name})"
+    if o == "END_TRY_HOISTED":
+        return "if not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
     if o in ("TRY_BEGIN", "WITH_BEGIN"):
         scoped_vars = [str(a) for a in ins.args] if ins.args else []
         if scoped_vars:
@@ -513,6 +537,73 @@ def generate(module, sourcemap=None):
             for chunk_start in range(0, len(allvars), 80):
                 chunk = allvars[chunk_start:chunk_start + 80]
                 lines.append(f"{indent}  local " + ", ".join(chunk))
+
+        # Loop-level try...except closure hoisting (Phase 31/NYI JIT Unlock)
+        loop_blocks = set()
+        try:
+            from .optimizer import compute_cfg
+            succs, preds = compute_cfg(fn)
+            label_to_idx = {b.label: i for i, b in enumerate(fn.blocks)}
+            for u, targets in succs.items():
+                for v in targets:
+                    if v in label_to_idx and label_to_idx[v] <= label_to_idx[u]:
+                        loop_blocks.add(v)
+                        loop_blocks.add(u)
+                        queue = [u]
+                        while queue:
+                            curr = queue.pop(0)
+                            for p in preds.get(curr, set()):
+                                if p != v and p not in loop_blocks:
+                                    loop_blocks.add(p)
+                                    queue.append(p)
+        except Exception:
+            pass
+
+        hoisted_closures = []
+        closure_counter = 0
+        from .ir import Instr
+        for b in fn.blocks:
+            if b.label in loop_blocks:
+                new_instrs = []
+                idx = 0
+                while idx < len(b.instrs):
+                    ins = b.instrs[idx]
+                    if ins.op == "TRY_BEGIN":
+                        end_idx = None
+                        nested_depth = 0
+                        for j in range(idx + 1, len(b.instrs)):
+                            if b.instrs[j].op == "TRY_BEGIN":
+                                nested_depth += 1
+                            elif b.instrs[j].op == "END_TRY":
+                                if nested_depth == 0:
+                                    end_idx = j
+                                    break
+                                else:
+                                    nested_depth -= 1
+                        if end_idx is not None:
+                            closure_counter += 1
+                            safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
+                            closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
+                            body_instrs = b.instrs[idx + 1 : end_idx]
+                            scoped_vars = [str(a) for a in ins.args] if ins.args else []
+                            hoisted_closures.append((closure_name, scoped_vars, body_instrs))
+                            new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name]))
+                            new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
+                            idx = end_idx + 1
+                            continue
+                    new_instrs.append(ins)
+                    idx += 1
+                b.instrs = new_instrs
+
+        for c_name, c_scoped, c_instrs in hoisted_closures:
+            lines.append(f"{indent}  local {c_name} = function()")
+            if c_scoped:
+                if len(c_scoped) > 180:
+                    c_scoped = c_scoped[:180]
+                lines.append(f"{indent}    local " + ", ".join(c_scoped))
+            for b_ins in c_instrs:
+                lines.append(f"{indent}    " + _emit(b_ins))
+            lines.append(f"{indent}  end")
 
         for b in fn.blocks:
             lines.append(f"{indent}  ::{b.label}::")
