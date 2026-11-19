@@ -126,23 +126,50 @@ pcall(function()
     bool        luthon_png_write_mem(const uint8_t *buf, int w, int h, int channels, uint8_t **out_data, size_t *out_size);
     void        luthon_png_free(void *ptr);
     void        luthon_img_mer_to_orm_emission(const uint8_t *src_rgba, int w, int h, uint8_t *dst_orm_rgb, uint8_t *dst_em_l, bool *out_has_emission);
+
+    /* Luthon Fast C JSON Engine */
+    typedef struct LuthonJsonVal {
+      struct LuthonJsonVal *next;
+      struct LuthonJsonVal *child;
+      const char *key;
+      size_t key_len;
+      const char *str_val;
+      size_t str_len;
+      double num_val;
+      uint32_t type;
+      bool bool_val;
+    } LuthonJsonVal;
+
+    LuthonJsonVal *luthon_json_parse(const char *dat, size_t len, size_t *out_consumed, void **out_ctx);
+    void          luthon_json_free(void *ctx);
+    const char   *luthon_json_read(const char *dat, size_t len, size_t *out_val_count);
+    char         *luthon_json_write(const void *val, size_t *out_len);
   ]]
 end)
 
 local _luthon_native_lib = nil
 pcall(function()
-  local candidates = {
-    os.getenv("LUTHON_CAPI_LIB"),
-    _G.__LUTHON_CAPI_LIB__,
-    "src/luthon/native/libluthon_capi.so",
-    "./libluthon_capi.so",
-    "libluthon_capi.so"
-  }
+  local candidates = {}
+  local env_lib = os.getenv("LUTHON_CAPI_LIB")
+  if env_lib and env_lib ~= "" then table.insert(candidates, env_lib) end
+  if _G.__LUTHON_CAPI_LIB__ and _G.__LUTHON_CAPI_LIB__ ~= "" then table.insert(candidates, _G.__LUTHON_CAPI_LIB__) end
+  table.insert(candidates, "src/luthon/native/libluthon_capi.so")
+  table.insert(candidates, "./src/luthon/native/libluthon_capi.so")
+  table.insert(candidates, "./libluthon_capi.so")
+  table.insert(candidates, "libluthon_capi.so")
+  local info = debug.getinfo(1, "S")
+  if info and info.source and info.source:sub(1, 1) == "@" then
+    local src_path = info.source:sub(2)
+    local dir = src_path:match("(.*/)") or ""
+    table.insert(candidates, dir .. "../native/libluthon_capi.so")
+    table.insert(candidates, dir .. "libluthon_capi.so")
+  end
   for _, cand in ipairs(candidates) do
     if cand and cand ~= "" then
       local ok, lib = pcall(ffi.load, cand)
       if ok and lib then
         _luthon_native_lib = lib
+        _G._luthon_native_lib = lib
         break
       end
     end
@@ -1141,8 +1168,8 @@ function _luthon_cmp(op, a, b)
         return not _luthon_cmp("==", a, b)
       end
     end
-    local is_a_list = (mta and (mta.__list__ or mta.__tuple__)) or rawget(a, "_list")
-    local is_b_list = (mtb and (mtb.__list__ or mtb.__tuple__)) or rawget(b, "_list")
+    local is_a_list = (mta and (mta.__list__ or mta.__tuple__ or mta == _list_mt or (_G._list_mt and mta == _G._list_mt) or (_list_methods and mta.__index == _list_methods))) or rawget(a, "_list")
+    local is_b_list = (mtb and (mtb.__list__ or mtb.__tuple__ or mtb == _list_mt or (_G._list_mt and mtb == _G._list_mt) or (_list_methods and mtb.__index == _list_methods))) or rawget(b, "_list")
     local na, nb = #a, #b
     if is_a_list or is_b_list or na > 0 or nb > 0 then
       if op == "==" or op == "eq" then
@@ -1302,22 +1329,21 @@ end
 function range(a, b, step)
   if b == nil then a, b = 0, a; step = 1 end
   if step == nil then step = 1 end
-  if _luthon_native_lib ~= nil then
-    local r_struct = _luthon_native_lib.luthon_range_init(a, b, step)
-    local n = tonumber(r_struct.length)
-    local r = {}
-    local val_buf = ffi.new("int64_t[1]")
-    local idx = 1
-    while _luthon_native_lib.luthon_range_next(r_struct, val_buf) do
-      r[idx] = tonumber(val_buf[0])
+  if step == 0 then error("ValueError: range() arg 3 must not be zero") end
+  local r = {}
+  local idx = 1
+  if step > 0 then
+    for i = a, b - 1, step do
+      r[idx] = i
       idx = idx + 1
     end
-    rawset(r, "_len", n)
-    return setmetatable(r, _list_mt)
+  else
+    for i = a, b + 1, step do
+      r[idx] = i
+      idx = idx + 1
+    end
   end
-  local r = {}
-  if step > 0 then for i = a, b - 1, step do r[#r+1] = i end
-  else for i = a, b + 1, step do r[#r+1] = i end end
+  rawset(r, "_len", idx - 1)
   return setmetatable(r, _list_mt)
 end
 function len(t)
@@ -1473,11 +1499,13 @@ local function _list_mul(a, b)
 end
 
 _list_mt = {
+  __list__ = true,
   __index = _list_methods,
   __lt = _luthon_lt,
   __add = _list_add,
   __mul = _list_mul,
 }
+_G._list_mt = _list_mt
 
 local _sys_argv_methods = {
   append = function(self, x) self[#self + 1] = x; _sync_if_sys_argv(self) end,
@@ -3637,6 +3665,7 @@ if _pcre2_lib then
         size_t *erroroffset,
         void *ccontext
       );
+      int pcre2_jit_compile_8(pcre2_code_8 *code, uint32_t options);
       void pcre2_code_free_8(pcre2_code_8 *code);
       pcre2_match_data_8 *pcre2_match_data_create_from_pattern_8(
         const pcre2_code_8 *code,
@@ -3644,6 +3673,15 @@ if _pcre2_lib then
       );
       void pcre2_match_data_free_8(pcre2_match_data_8 *match_data);
       int pcre2_match_8(
+        const pcre2_code_8 *code,
+        const uint8_t *subject,
+        size_t length,
+        size_t startoffset,
+        uint32_t options,
+        pcre2_match_data_8 *match_data,
+        void *mcontext
+      );
+      int pcre2_jit_match_8(
         const pcre2_code_8 *code,
         const uint8_t *subject,
         size_t length,
@@ -3688,7 +3726,11 @@ local _Pattern = {}
 _Pattern.__index = _Pattern
 
 local function _make_pcre2_match(subj, code, mdata, count, named_groups)
-  local ovec = _pcre2_lib.pcre2_get_ovector_pointer_8(mdata)
+  local ovec_ptr = _pcre2_lib.pcre2_get_ovector_pointer_8(mdata)
+  local ovec = {}
+  for i = 0, count * 2 - 1 do
+    ovec[i] = tonumber(ovec_ptr[i])
+  end
   local m = {
     _subj = subj,
     _code = code,
@@ -3742,14 +3784,20 @@ function _Pattern:search(s, pos)
   if s == nil then return nil end
   s = tostring(s)
   pos = pos or 0
-  local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
-  local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
-  if rc > 0 then
-    local m = _make_pcre2_match(s, self._code, mdata, rc, self._named_groups)
-    _pcre2_lib.pcre2_match_data_free_8(mdata)
-    return m
+  local mdata = self._mdata
+  if not mdata then
+    mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+    self._mdata = ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8)
   end
-  _pcre2_lib.pcre2_match_data_free_8(mdata)
+  local rc
+  if _pcre2_lib.pcre2_jit_match_8 then
+    rc = _pcre2_lib.pcre2_jit_match_8(self._code, s, #s, pos, 0, mdata, nil)
+  else
+    rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+  end
+  if rc > 0 then
+    return _make_pcre2_match(s, self._code, mdata, rc, self._named_groups)
+  end
   return nil
 end
 
@@ -3757,14 +3805,21 @@ function _Pattern:match(s, pos)
   if s == nil then return nil end
   s = tostring(s)
   pos = pos or 0
-  local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
-  local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0x80000000, mdata, nil)
-  if rc > 0 then
-    local m = _make_pcre2_match(s, self._code, mdata, rc, self._named_groups)
-    _pcre2_lib.pcre2_match_data_free_8(mdata)
-    return m
+  local mdata = self._mdata
+  if not mdata then
+    mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+    self._mdata = ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8)
   end
-  _pcre2_lib.pcre2_match_data_free_8(mdata)
+  local rc
+  local opts = 0x80000000 -- PCRE2_ANCHORED
+  if _pcre2_lib.pcre2_jit_match_8 then
+    rc = _pcre2_lib.pcre2_jit_match_8(self._code, s, #s, pos, opts, mdata, nil)
+  else
+    rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, opts, mdata, nil)
+  end
+  if rc > 0 then
+    return _make_pcre2_match(s, self._code, mdata, rc, self._named_groups)
+  end
   return nil
 end
 
@@ -3833,9 +3888,18 @@ function _Pattern:split(s, maxsplit)
     local res = {}
     local pos = 0
     local splits = 0
-    local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+    local mdata = self._mdata
+    if not mdata then
+      mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
+      self._mdata = ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8)
+    end
     while pos <= #s do
-      local rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+      local rc
+      if _pcre2_lib.pcre2_jit_match_8 then
+        rc = _pcre2_lib.pcre2_jit_match_8(self._code, s, #s, pos, 0, mdata, nil)
+      else
+        rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+      end
       if rc <= 0 or (maxsplit > 0 and splits >= maxsplit) then
         table.insert(res, s:sub(pos + 1))
         break
@@ -3851,7 +3915,6 @@ function _Pattern:split(s, maxsplit)
         break
       end
     end
-    _pcre2_lib.pcre2_match_data_free_8(mdata)
     return setmetatable(res, _list_mt)
   end
   return string.split(s, tostring(self.pattern))
@@ -3873,12 +3936,15 @@ re.compile = function(pattern, flags)
     local pat_str = tostring(pattern)
     local code = _pcre2_lib.pcre2_compile_8(pat_str, #pat_str, opts, errcode, erroff, nil)
     if code ~= nil then
+      pcall(function() _pcre2_lib.pcre2_jit_compile_8(code, 1) end)
+      local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(code, nil)
       local named_groups = {}
       for gname in pat_str:gmatch("%(%?P<([%a_][%w_]*)>") do
         table.insert(named_groups, gname)
       end
       return setmetatable({
         _code = ffi.gc(code, _pcre2_lib.pcre2_code_free_8),
+        _mdata = mdata and ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8) or nil,
         pattern = pattern,
         flags = flags,
         _named_groups = named_groups
@@ -5549,29 +5615,78 @@ setmetatable(typing, {
   end
 })
 
--- json (complete with FFI cJSON acceleration and fast fallback)
+-- json (complete with native C / FFI acceleration and fast fallback)
 json = {}
-json.encode = function(x)
-  if type(x) == "table" then
-    local parts = {}
-    if #x > 0 then
-      for i,v in ipairs(x) do parts[#parts+1] = json.encode(v) end
-      return "[" .. table.concat(parts, ",") .. "]"
-    else
-      for k,v in pairs(x) do parts[#parts+1] = string.char(34) .. tostring(k) .. string.char(34) .. ":" .. json.encode(v) end
-      return "{" .. table.concat(parts, ",") .. "}"
+
+local _json_esc_map = {
+  ['"'] = '\\"',
+  ['\\'] = '\\\\',
+  ['\b'] = '\\b',
+  ['\f'] = '\\f',
+  ['\n'] = '\\n',
+  ['\r'] = '\\r',
+  ['\t'] = '\\t',
+}
+local function _json_escape_str(s)
+  return '"' .. s:gsub('["\\%z\1-\31]', function(c)
+    return _json_esc_map[c] or string.format("\\u%04x", string.byte(c))
+  end) .. '"'
+end
+
+local function _json_dumps_val(x, buf)
+  if x == nil or x == _G._luthon_none or (type(x) == "table" and (rawget(x, "__is_none__") == true or rawget(x, "_is_py_none") == true)) then
+    buf[#buf+1] = "null"
+    return
+  end
+  local t = type(x)
+  if t == "string" then
+    buf[#buf+1] = _json_escape_str(x)
+  elseif t == "number" then
+    if x ~= x then buf[#buf+1] = "NaN"
+    elseif x == 1/0 then buf[#buf+1] = "Infinity"
+    elseif x == -1/0 then buf[#buf+1] = "-Infinity"
+    else buf[#buf+1] = tostring(x) end
+  elseif t == "boolean" then
+    buf[#buf+1] = x and "true" or "false"
+  elseif t == "table" then
+    local is_arr = false
+    if getmetatable(x) == _list_mt or rawget(x, "_list") or rawget(x, "_buf") or rawget(x, "_len") ~= nil then
+      is_arr = true
+    elseif #x > 0 then
+      is_arr = true
     end
-  elseif type(x) == "string" then
-    return string.char(34) .. x .. string.char(34)
-  elseif type(x) == "boolean" then
-    return x and "true" or "false"
-  elseif x == nil then
-    return "null"
+    if is_arr then
+      buf[#buf+1] = "["
+      local n = len(x)
+      for i = 1, n do
+        if i > 1 then buf[#buf+1] = "," end
+        _json_dumps_val(x[i], buf)
+      end
+      buf[#buf+1] = "]"
+    else
+      buf[#buf+1] = "{"
+      local first = true
+      for k, v in pairs(x) do
+        if k ~= "_dict" and k ~= "_list" and k ~= "_len" and k ~= "__class__" and k ~= "__type" then
+          if not first then buf[#buf+1] = "," else first = false end
+          buf[#buf+1] = _json_escape_str(tostring(k))
+          buf[#buf+1] = ":"
+          _json_dumps_val(v, buf)
+        end
+      end
+      buf[#buf+1] = "}"
+    end
   else
-    return tostring(x)
+    buf[#buf+1] = _json_escape_str(tostring(x))
   end
 end
-json.dumps = json.encode
+
+json.dumps = function(x)
+  local buf = {}
+  _json_dumps_val(x, buf)
+  return table.concat(buf)
+end
+json.encode = json.dumps
 
 local _cjson_lib = nil
 local _cjson_init_done = false
@@ -5624,7 +5739,7 @@ local function _cjson_node_to_lua(node, ffi_str_fn)
       obj[ffi_str_fn(curr.string)] = _cjson_node_to_lua(curr, ffi_str_fn)
       curr = curr.next
     end
-    return obj
+    return setmetatable(obj, _dict_mt or _G._dict_mt or {})
   elseif t == 32 then -- cJSON_Array
     local arr = {}
     local curr = node.child
@@ -5635,13 +5750,13 @@ local function _cjson_node_to_lua(node, ffi_str_fn)
       curr = curr.next
     end
     rawset(arr, "_len", idx - 1)
-    return arr
+    return setmetatable(arr, _list_mt or _G._list_mt or {})
   elseif t == 2 then -- cJSON_True
     return true
   elseif t == 1 then -- cJSON_False
     return false
   elseif t == 4 then -- cJSON_NULL
-    return nil
+    return _G._luthon_none or _G.None
   end
   return nil
 end
@@ -5666,6 +5781,7 @@ function json._raw_decode(s, idx)
   function parse_object()
     pos = pos + 1
     local obj = {}
+    setmetatable(obj, _dict_mt or _G._dict_mt or {})
     skip_ws()
     if s:sub(pos,pos) == "}" then pos = pos + 1; return obj end
     while true do
@@ -5685,6 +5801,7 @@ function json._raw_decode(s, idx)
   function parse_array()
     pos = pos + 1
     local arr = {}
+    setmetatable(arr, _list_mt or _G._list_mt or {})
     skip_ws()
     if s:sub(pos,pos) == "]" then pos = pos + 1; return arr end
     while true do
@@ -5735,7 +5852,7 @@ function json._raw_decode(s, idx)
     pos = pos + 5; return false
   end
   function parse_null()
-    pos = pos + 4; return nil
+    pos = pos + 4; return _G._luthon_none or _G.None
   end
   function parse_number()
     local start = pos
@@ -5746,8 +5863,56 @@ function json._raw_decode(s, idx)
   return val, pos
 end
 
+local function _luthon_json_node_to_lua(node, ffi_str_fn)
+  if node == nil then return nil end
+  local t = node.type
+  if t == 3 then -- string
+    if node.str_val == nil then return "" end
+    return ffi_str_fn(node.str_val, node.str_len)
+  elseif t == 2 then -- number
+    return node.num_val
+  elseif t == 5 then -- object
+    local obj = {}
+    local curr = node.child
+    while curr ~= nil do
+      local k = (curr.key ~= nil) and ffi_str_fn(curr.key, curr.key_len) or ""
+      obj[k] = _luthon_json_node_to_lua(curr, ffi_str_fn)
+      curr = curr.next
+    end
+    return setmetatable(obj, _dict_mt or _G._dict_mt or {})
+  elseif t == 4 then -- array
+    local arr = {}
+    local curr = node.child
+    local idx = 1
+    while curr ~= nil do
+      arr[idx] = _luthon_json_node_to_lua(curr, ffi_str_fn)
+      idx = idx + 1
+      curr = curr.next
+    end
+    rawset(arr, "_len", idx - 1)
+    return setmetatable(arr, _list_mt or _G._list_mt or {})
+  elseif t == 1 then -- bool
+    return node.bool_val
+  elseif t == 0 then -- null
+    return _G._luthon_none or _G.None
+  end
+  return nil
+end
+
 json.decode = function(s)
   s = tostring(s or "")
+  if _luthon_native_lib and _luthon_native_lib.luthon_json_parse then
+    local out_consumed = ffi.new("size_t[1]")
+    local out_ctx = ffi.new("void*[1]")
+    local root = _luthon_native_lib.luthon_json_parse(s, #s, out_consumed, out_ctx)
+    if root ~= nil then
+      local ffi_str_fn = ffi.string
+      local res = _luthon_json_node_to_lua(root, ffi_str_fn)
+      _luthon_native_lib.luthon_json_free(out_ctx[0])
+      return res
+    end
+  end
+
   local cj = _get_cjson()
   if cj ~= nil then
     local root = cj.lib.cJSON_Parse(s)
@@ -5780,7 +5945,21 @@ setmetatable(JSONDecoder, { __call = function(cls, ...) return cls.new(...) end 
 function JSONDecoder:decode(s) return json.decode(s) end
 function JSONDecoder:raw_decode(s, idx)
   idx = idx or 0
-  local val, next_pos = json._raw_decode(tostring(s or ""), idx + 1)
+  s = tostring(s or "")
+  local sub = s:sub(idx + 1)
+  if _luthon_native_lib and _luthon_native_lib.luthon_json_parse then
+    local out_consumed = ffi.new("size_t[1]")
+    local out_ctx = ffi.new("void*[1]")
+    local root = _luthon_native_lib.luthon_json_parse(sub, #sub, out_consumed, out_ctx)
+    if root ~= nil then
+      local ffi_str_fn = ffi.string
+      local res = _luthon_json_node_to_lua(root, ffi_str_fn)
+      local consumed = tonumber(out_consumed[0])
+      _luthon_native_lib.luthon_json_free(out_ctx[0])
+      return setmetatable({res, idx + consumed}, _tuple_mt or {})
+    end
+  end
+  local val, next_pos = json._raw_decode(s, idx + 1)
   return setmetatable({val, (next_pos - 1)}, _tuple_mt or {})
 end
 json.JSONDecoder = JSONDecoder
@@ -8028,4 +8207,3 @@ function _luthon_import_from(mod_name, item_name)
   if ImportError then error(ImportError(err_msg), 0) else error("ImportError: " .. err_msg, 0) end
 end
 """
-
