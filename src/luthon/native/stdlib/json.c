@@ -33,6 +33,8 @@ static void *arena_alloc(LuthonJsonContext *ctx, size_t size) {
     return ptr;
 }
 
+#define LUTHON_JSON_MAX_DEPTH 512
+
 static inline const char *skip_ws(const char *p, const char *end) {
     while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
         p++;
@@ -91,15 +93,41 @@ static const char *parse_string(LuthonJsonContext *ctx, const char *p, const cha
                         else return NULL;
                     }
                     src += 4;
+                    /* Check UTF-16 surrogate pairs */
+                    if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+                        if (src + 6 < p && src[1] == '\\' && src[2] == 'u') {
+                            unsigned int low = 0;
+                            bool low_ok = true;
+                            for (int i = 3; i <= 6; i++) {
+                                char h = src[i];
+                                low <<= 4;
+                                if (h >= '0' && h <= '9') low |= (h - '0');
+                                else if (h >= 'a' && h <= 'f') low |= (h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') low |= (h - 'A' + 10);
+                                else { low_ok = false; break; }
+                            }
+                            if (low_ok && low >= 0xDC00 && low <= 0xDFFF) {
+                                codepoint = 0x10000 + (((codepoint - 0xD800) << 10) | (low - 0xDC00));
+                                src += 6;
+                            }
+                        }
+                    }
                     if (codepoint <= 0x7F) {
                         buf[dst_idx++] = (char)codepoint;
                     } else if (codepoint <= 0x7FF) {
                         buf[dst_idx++] = (char)(0xC0 | ((codepoint >> 6) & 0x1F));
                         buf[dst_idx++] = (char)(0x80 | (codepoint & 0x3F));
-                    } else {
+                    } else if (codepoint <= 0xFFFF) {
                         buf[dst_idx++] = (char)(0xE0 | ((codepoint >> 12) & 0x0F));
                         buf[dst_idx++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
                         buf[dst_idx++] = (char)(0x80 | (codepoint & 0x3F));
+                    } else if (codepoint <= 0x10FFFF) {
+                        buf[dst_idx++] = (char)(0xF0 | ((codepoint >> 18) & 0x07));
+                        buf[dst_idx++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+                        buf[dst_idx++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                        buf[dst_idx++] = (char)(0x80 | (codepoint & 0x3F));
+                    } else {
+                        return NULL;
                     }
                     break;
                 }
@@ -119,6 +147,10 @@ static const char *parse_string(LuthonJsonContext *ctx, const char *p, const cha
 }
 
 static const char *parse_number(const char *p, const char *end, double *out_num) {
+    if (p >= end) return NULL;
+    /* Reject leading zeros like 0123, -0123 */
+    if (*p == '0' && p + 1 < end && p[1] >= '0' && p[1] <= '9') return NULL;
+    if (*p == '-' && p + 1 < end && p[1] == '0' && p + 2 < end && p[2] >= '0' && p[2] <= '9') return NULL;
     char *endptr = NULL;
     double num = strtod(p, &endptr);
     if (endptr == p || endptr > end) return NULL;
@@ -126,10 +158,10 @@ static const char *parse_number(const char *p, const char *end, double *out_num)
     return endptr;
 }
 
-static const char *parse_value(LuthonJsonContext *ctx, const char *p, const char *end, LuthonJsonVal **out_val);
+static const char *parse_value(LuthonJsonContext *ctx, const char *p, const char *end, int depth, LuthonJsonVal **out_val);
 
-static const char *parse_array(LuthonJsonContext *ctx, const char *p, const char *end, LuthonJsonVal **out_val) {
-    if (p >= end || *p != '[') return NULL;
+static const char *parse_array(LuthonJsonContext *ctx, const char *p, const char *end, int depth, LuthonJsonVal **out_val) {
+    if (p >= end || *p != '[' || depth > LUTHON_JSON_MAX_DEPTH) return NULL;
     p++;
     p = skip_ws(p, end);
 
@@ -148,7 +180,7 @@ static const char *parse_array(LuthonJsonContext *ctx, const char *p, const char
 
     while (p < end) {
         LuthonJsonVal *elem = NULL;
-        p = parse_value(ctx, p, end, &elem);
+        p = parse_value(ctx, p, end, depth + 1, &elem);
         if (!p || !elem) return NULL;
 
         if (!head) {
@@ -176,8 +208,8 @@ static const char *parse_array(LuthonJsonContext *ctx, const char *p, const char
     return p;
 }
 
-static const char *parse_object(LuthonJsonContext *ctx, const char *p, const char *end, LuthonJsonVal **out_val) {
-    if (p >= end || *p != '{') return NULL;
+static const char *parse_object(LuthonJsonContext *ctx, const char *p, const char *end, int depth, LuthonJsonVal **out_val) {
+    if (p >= end || *p != '{' || depth > LUTHON_JSON_MAX_DEPTH) return NULL;
     p++;
     p = skip_ws(p, end);
 
@@ -206,7 +238,7 @@ static const char *parse_object(LuthonJsonContext *ctx, const char *p, const cha
         p = skip_ws(p, end);
 
         LuthonJsonVal *v_val = NULL;
-        p = parse_value(ctx, p, end, &v_val);
+        p = parse_value(ctx, p, end, depth + 1, &v_val);
         if (!p || !v_val) return NULL;
 
         v_val->key = k_str;
@@ -237,15 +269,15 @@ static const char *parse_object(LuthonJsonContext *ctx, const char *p, const cha
     return p;
 }
 
-static const char *parse_value(LuthonJsonContext *ctx, const char *p, const char *end, LuthonJsonVal **out_val) {
+static const char *parse_value(LuthonJsonContext *ctx, const char *p, const char *end, int depth, LuthonJsonVal **out_val) {
     p = skip_ws(p, end);
-    if (p >= end) return NULL;
+    if (p >= end || depth > LUTHON_JSON_MAX_DEPTH) return NULL;
 
     char c = *p;
     if (c == '{') {
-        return parse_object(ctx, p, end, out_val);
+        return parse_object(ctx, p, end, depth, out_val);
     } else if (c == '[') {
-        return parse_array(ctx, p, end, out_val);
+        return parse_array(ctx, p, end, depth, out_val);
     } else if (c == '"') {
         const char *s = NULL;
         size_t slen = 0;
@@ -313,7 +345,7 @@ LuthonJsonVal *luthon_json_parse(const char *dat, size_t len, size_t *out_consum
 
     const char *end = dat + len;
     LuthonJsonVal *root = NULL;
-    const char *p = parse_value(ctx, dat, end, &root);
+    const char *p = parse_value(ctx, dat, end, 0, &root);
     if (!p || !root) {
         luthon_json_free(ctx);
         return NULL;
