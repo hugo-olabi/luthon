@@ -125,6 +125,36 @@ EXPORT void luthon_img_flip_vertical(
     int channels
 );
 
+/* -------------------------------------------------------------------------
+ * 6. High-Performance Native JSON Parser & Serializer
+ * ------------------------------------------------------------------------- */
+
+typedef enum {
+    LUTHON_JSON_NULL = 0,
+    LUTHON_JSON_BOOL = 1,
+    LUTHON_JSON_NUMBER = 2,
+    LUTHON_JSON_STRING = 3,
+    LUTHON_JSON_ARRAY = 4,
+    LUTHON_JSON_OBJECT = 5,
+} LuthonJsonType;
+
+typedef struct LuthonJsonVal {
+    struct LuthonJsonVal *next;
+    struct LuthonJsonVal *child;
+    const char *key;
+    size_t key_len;
+    const char *str_val;
+    size_t str_len;
+    double num_val;
+    uint32_t type;
+    bool bool_val;
+} LuthonJsonVal;
+
+EXPORT LuthonJsonVal *luthon_json_parse(const char *dat, size_t len, size_t *out_consumed, void **out_ctx);
+EXPORT void          luthon_json_free(void *ctx);
+EXPORT const char   *luthon_json_read(const char *dat, size_t len, size_t *out_val_count);
+EXPORT char         *luthon_json_write(const void *val, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif
