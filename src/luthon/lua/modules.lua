@@ -592,6 +592,45 @@ end
 ------------------------------------------------------------------------------
 
 local transpile_cache = {}
+local _cache_dir_created = false
+
+local function get_file_stat(path)
+  local ok_ffi, ffi = pcall(require, "ffi")
+  if ok_ffi and ffi and ffi.C and ffi.C.stat then
+    local sbuf = _G._LUTHON_STAT_BUF
+    if not sbuf then
+      pcall(function() sbuf = ffi.new("stat_t") end)
+    end
+    if sbuf then
+      local rc = ffi.C.stat(path, sbuf)
+      if rc == 0 then
+        local mtime = tonumber(sbuf.st_mtime) + tonumber(sbuf.st_mtime_nsec) / 1e9
+        local size = tonumber(sbuf.st_size)
+        return mtime, size
+      end
+    end
+  end
+  return nil, nil
+end
+
+local function get_module_cache_info(py_path)
+  if os.getenv("LUTHON_NO_CACHE") == "1" then return nil end
+  local base_cache = os.getenv("LUTHON_CACHE_DIR")
+  if not base_cache or base_cache == "" then
+    base_cache = ".luthon_cache"
+  end
+  local mod_cache_dir = base_cache .. "/modules"
+
+  local h1, h2 = 5381, 52711
+  for i = 1, #py_path do
+    local b = string.byte(py_path, i)
+    h1 = (h1 * 33 + b) % 4294967291
+    h2 = (h2 * 37 + b) % 4294967291
+  end
+  local hash_str = string.format("%08x%08x", h1, h2)
+  local cache_path = mod_cache_dir .. "/" .. hash_str .. ".lua"
+  return cache_path, mod_cache_dir
+end
 
 function M.find_module(name)
   return M.find_lua_module(name)
@@ -645,10 +684,42 @@ function M.load(name)
       local pkg = py_path:match("__init__%.py$") and name or (name:match("^(.*)%.[^%.]+$") or "")
       local lua_out = transpile_cache[py_path]
       if not lua_out then
-        local ok_transpile, out = pcall(driver.transpile_file, py_path, pkg, true)
-        if ok_transpile and out then
-          lua_out = out
-          transpile_cache[py_path] = out
+        local cache_path, mod_cache_dir = get_module_cache_info(py_path)
+        local src_mtime, src_size = get_file_stat(py_path)
+        if cache_path and src_mtime and src_size then
+          local f = io.open(cache_path, "r")
+          if f then
+            local header = f:read("*l")
+            if header then
+              local c_mtime, c_size = header:match("^%-%- LUTHON_MODULE_CACHE:mtime=([%d%.]+):size=(%d+)")
+              if c_size and tonumber(c_size) == src_size and c_mtime and math.abs(tonumber(c_mtime) - src_mtime) < 0.001 then
+                lua_out = f:read("*a")
+              end
+            end
+            f:close()
+          end
+        end
+
+        if not lua_out then
+          local ok_transpile, out = pcall(driver.transpile_file, py_path, pkg, true)
+          if ok_transpile and out then
+            lua_out = out
+            transpile_cache[py_path] = out
+            if cache_path and src_mtime and src_size then
+              if not _cache_dir_created then
+                pcall(function() os.execute("mkdir -p '" .. mod_cache_dir .. "' 2>/dev/null") end)
+                _cache_dir_created = true
+              end
+              local f_out = io.open(cache_path, "w")
+              if f_out then
+                f_out:write(string.format("-- LUTHON_MODULE_CACHE:mtime=%.6f:size=%d\n", src_mtime, src_size))
+                f_out:write(out)
+                f_out:close()
+              end
+            end
+          end
+        else
+          transpile_cache[py_path] = lua_out
         end
       end
       if lua_out then

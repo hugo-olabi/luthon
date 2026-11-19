@@ -76,6 +76,7 @@ def run_file(
     direct_jit: bool = False,
     pure: bool = False,
     dump_vectorization: bool = False,
+    module_cache: bool = True,
 ) -> int:
     """Compiles a Python file and executes it immediately under LuaJIT."""
     # Fast path: direct execution of valid cached Lua artifact
@@ -93,6 +94,13 @@ def run_file(
             if script_args:
                 cmd.extend(script_args)
             env = os.environ.copy()
+            if no_cache:
+                if not module_cache:
+                    env["LUTHON_NO_CACHE"] = "1"
+            elif cache_dir:
+                env["LUTHON_CACHE_DIR"] = str(Path(cache_dir).resolve())
+            else:
+                env["LUTHON_CACHE_DIR"] = str((Path.cwd() / ".luthon_cache").resolve())
             env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
             luthon_sp = str(Path.home() / ".luthon" / "site-packages")
             env["LUTHON_SITE_PACKAGES"] = luthon_sp
@@ -153,6 +161,13 @@ def run_file(
             cmd.extend(script_args)
 
         env = os.environ.copy()
+        if no_cache:
+            if not module_cache:
+                env["LUTHON_NO_CACHE"] = "1"
+        elif cache_dir:
+            env["LUTHON_CACHE_DIR"] = str(Path(cache_dir).resolve())
+        else:
+            env["LUTHON_CACHE_DIR"] = str((Path.cwd() / ".luthon_cache").resolve())
         env["LUTHON_EXECUTED_FILE"] = str(Path(input_path).resolve())
         luthon_sp = str(Path.home() / ".luthon" / "site-packages")
         env["LUTHON_SITE_PACKAGES"] = luthon_sp
@@ -216,6 +231,8 @@ def run_code(
     dump_traces: bool = False,
     pure: bool = False,
     dump_vectorization: bool = False,
+    no_cache: bool = False,
+    cache_dir: str | None = None,
 ) -> int:
     """Compiles and runs a code string directly under LuaJIT."""
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp_py:
@@ -230,10 +247,12 @@ def run_code(
             use_ir=use_ir,
             optimize=optimize,
             no_cache=True,
+            cache_dir=cache_dir,
             profile=profile,
             dump_traces=dump_traces,
             pure=pure,
             dump_vectorization=dump_vectorization,
+            module_cache=not no_cache,
         )
     finally:
         try:
@@ -372,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
                 dump_traces=args.dump_traces,
                 pure=getattr(args, "pure", False),
                 dump_vectorization=getattr(args, "dump_vectorization", False),
+                no_cache=getattr(args, "no_cache", False),
+                cache_dir=getattr(args, "cache_dir", None),
             )
         if not args.input:
             parser.error("either input file or -c <code> must be specified")
