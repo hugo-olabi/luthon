@@ -909,11 +909,13 @@ def strip_mine_loop(fn: Function, rec: VectorizationRecord) -> bool:
         va = _alloc_tmp(fn, "_t_va")
         vres = _alloc_tmp(fn, "_t_vr")
         simd_body_instrs.extend([
+            Instr("SIMD_BLOCK", ["daxpy", upper_bound, alpha, x_arr, y_arr, elem_t]),
             Instr("VEC_LOAD", [x_arr, vec_i, width, elem_t], result=vx),
             Instr("VEC_LOAD", [y_arr, vec_i, width, elem_t], result=vy),
             Instr("VEC_BROADCAST", [alpha, width, elem_t], result=va),
             Instr("VEC_FMA", [va, vx, vy, width, elem_t], result=vres),
             Instr("VEC_STORE", [y_arr, vec_i, vres, width, elem_t]),
+            Instr("MOVE", [upper_bound], result=vec_i),
         ])
     elif "Dot Product" in (rec.pattern or "") and len(rec.source_arrays) >= 2:
         a_arr = rec.source_arrays[0]
@@ -922,9 +924,11 @@ def strip_mine_loop(fn: Function, rec: VectorizationRecord) -> bool:
         vb = _alloc_tmp(fn, "_t_vb")
         vacc = _alloc_tmp(fn, "_t_vacc")
         simd_body_instrs.extend([
+            Instr("SIMD_BLOCK", ["dot", upper_bound, a_arr, b_arr, elem_t], result=rec.reduction_var or "s"),
             Instr("VEC_LOAD", [a_arr, vec_i, width, elem_t], result=va),
             Instr("VEC_LOAD", [b_arr, vec_i, width, elem_t], result=vb),
             Instr("VEC_FMA", [va, vb, vacc, width, elem_t], result=vacc),
+            Instr("MOVE", [upper_bound], result=vec_i),
         ])
     elif "Euclidean" in (rec.pattern or "") and len(rec.source_arrays) >= 2:
         a_arr = rec.source_arrays[0]
@@ -934,10 +938,12 @@ def strip_mine_loop(fn: Function, rec: VectorizationRecord) -> bool:
         vdiff = _alloc_tmp(fn, "_t_vd")
         vacc = _alloc_tmp(fn, "_t_vacc")
         simd_body_instrs.extend([
+            Instr("SIMD_BLOCK", ["euclidean", upper_bound, a_arr, b_arr, elem_t], result=rec.reduction_var or "s"),
             Instr("VEC_LOAD", [a_arr, vec_i, width, elem_t], result=va),
             Instr("VEC_LOAD", [b_arr, vec_i, width, elem_t], result=vb),
             Instr("VEC_SUB", [va, vb, width, elem_t], result=vdiff),
             Instr("VEC_FMA", [vdiff, vdiff, vacc, width, elem_t], result=vacc),
+            Instr("MOVE", [upper_bound], result=vec_i),
         ])
     elif rec.target_arrays and len(rec.source_arrays) >= 2:
         # Vector elementwise add
@@ -945,10 +951,12 @@ def strip_mine_loop(fn: Function, rec: VectorizationRecord) -> bool:
         vb = _alloc_tmp(fn, "_t_vb")
         vres = _alloc_tmp(fn, "_t_vr")
         simd_body_instrs.extend([
+            Instr("SIMD_BLOCK", ["vec_add", upper_bound, rec.source_arrays[0], rec.source_arrays[1], rec.target_arrays[0], elem_t]),
             Instr("VEC_LOAD", [rec.source_arrays[0], vec_i, width, elem_t], result=va),
             Instr("VEC_LOAD", [rec.source_arrays[1], vec_i, width, elem_t], result=vb),
             Instr("VEC_ADD", [va, vb, width, elem_t], result=vres),
             Instr("VEC_STORE", [rec.target_arrays[0], vec_i, vres, width, elem_t]),
+            Instr("MOVE", [upper_bound], result=vec_i),
         ])
     else:
         # Fallback general vector load/store strip-mining

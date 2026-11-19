@@ -145,9 +145,11 @@ end"""
         pairs = []
         for kv in ins.args:
             if isinstance(kv, (list, tuple)) and len(kv) == 2:
-                pairs.append("[" + str(kv[0]) + "] = " + str(kv[1]))
+                v_expr = f"({kv[1]} == nil and _G._luthon_none or {kv[1]})"
+                pairs.append("[" + str(kv[0]) + "] = " + v_expr)
             else:
-                pairs.append("[" + str(kv[1]) + "] = " + str(kv[0]))
+                v_expr = f"({kv[0]} == nil and _G._luthon_none or {kv[0]})"
+                pairs.append("[" + str(kv[1]) + "] = " + v_expr)
         return ins.result + " = setmetatable({" + ", ".join(pairs) + "}, _dict_mt)"
     if o == "MAKE_TUPLE":
         if ins.args:
@@ -158,7 +160,7 @@ end"""
     if o == "SET_ADD":
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
     if o == "DICT_SET":
-        return ins.args[0] + "[" + ins.args[1] + "] = " + ins.args[2]
+        return ins.args[0] + "[" + ins.args[1] + "] = (" + ins.args[2] + " == nil and _G._luthon_none or " + ins.args[2] + ")"
     if o == "SELECT":
         return ins.result + " = (" + ins.args[0] + " and " + ins.args[1] + " or " + ins.args[2] + ")"
     if o == "DEFAULT_ARG":
@@ -197,6 +199,33 @@ end"""
         return ins.args[0] + " = _luthon_import(\"" + ins.args[1] + "\")"
     if o == "IMPORT_FROM":
         return ins.args[0] + " = _luthon_import_from(\"" + ins.args[1] + "\", \"" + ins.args[2] + "\")"
+    if o == "MOVE":
+        return ins.result + " = " + str(ins.args[0])
+    if o == "SIMD_BLOCK":
+        op_type = ins.args[0]
+        if op_type == "daxpy":
+            n, alpha, x, y = ins.args[1], ins.args[2], ins.args[3], ins.args[4]
+            x_buf = f"(rawget({x}, '_buf') and rawget({x}, '_buf') or {x})"
+            y_buf = f"(rawget({y}, '_buf') and rawget({y}, '_buf') or {y})"
+            return f"_simd_lib.luthon_simd_daxpy({n}, {alpha}, {x_buf}, {y_buf})"
+        elif op_type == "vec_add":
+            n, a, b, c = ins.args[1], ins.args[2], ins.args[3], ins.args[4]
+            a_buf = f"(rawget({a}, '_buf') and rawget({a}, '_buf') or {a})"
+            b_buf = f"(rawget({b}, '_buf') and rawget({b}, '_buf') or {b})"
+            c_buf = f"(rawget({c}, '_buf') and rawget({c}, '_buf') or {c})"
+            return f"_simd_lib.luthon_simd_add_f64({c_buf}, {a_buf}, {b_buf}, {n})"
+        elif op_type == "dot":
+            n, a, b = ins.args[1], ins.args[2], ins.args[3]
+            a_buf = f"(rawget({a}, '_buf') and rawget({a}, '_buf') or {a})"
+            b_buf = f"(rawget({b}, '_buf') and rawget({b}, '_buf') or {b})"
+            res = ins.result or "s"
+            return f"{res} = _simd_lib.luthon_simd_dot_f64({n}, {a_buf}, {b_buf})"
+        elif op_type == "euclidean":
+            n, a, b = ins.args[1], ins.args[2], ins.args[3]
+            a_buf = f"(rawget({a}, '_buf') and rawget({a}, '_buf') or {a})"
+            b_buf = f"(rawget({b}, '_buf') and rawget({b}, '_buf') or {b})"
+            res = ins.result or "s"
+            return f"{res} = _simd_lib.luthon_simd_euclidean_f64({n}, {a_buf}, {b_buf})"
     if o == "VEC_LOAD":
         arr = ins.args[0]
         idx = ins.args[1]
@@ -265,6 +294,8 @@ def generate(module, sourcemap=None):
         "        double      luthon_simd_v4df_reduce_sum(luthon_v4df a);",
         "        void   luthon_simd_saxpy(size_t n, float alpha, const float *x, float *y);",
         "        void   luthon_simd_daxpy(size_t n, double alpha, const double *x, double *y);",
+        "        void   luthon_simd_add_f64(double *out, const double *a, const double *b, size_t n);",
+        "        void   luthon_simd_add_f32(float *out, const float *a, const float *b, size_t n);",
         "        double luthon_simd_dot_f64(size_t n, const double *x, const double *y);",
         "        float  luthon_simd_dot_f32(size_t n, const float *x, const float *y);",
         "        double luthon_simd_euclidean_f64(size_t n, const double *x, const double *y);",
@@ -298,6 +329,8 @@ def generate(module, sourcemap=None):
         "    luthon_simd_v4df_reduce_sum = function(a) return a.v[1]+a.v[2]+a.v[3]+a.v[4] end,",
         "    luthon_simd_daxpy = function(n, alpha, x, y) for i=0, n-1 do y[i] = alpha*x[i] + y[i] end end,",
         "    luthon_simd_saxpy = function(n, alpha, x, y) for i=0, n-1 do y[i] = alpha*x[i] + y[i] end end,",
+        "    luthon_simd_add_f64 = function(out, a, b, n) for i=0, n-1 do out[i] = a[i] + b[i] end end,",
+        "    luthon_simd_add_f32 = function(out, a, b, n) for i=0, n-1 do out[i] = a[i] + b[i] end end,",
         "    luthon_simd_dot_f64 = function(n, x, y) local s=0 for i=0, n-1 do s = s + x[i]*y[i] end return s end,",
         "    luthon_simd_euclidean_f64 = function(n, x, y) local s=0 for i=0, n-1 do local d=x[i]-y[i] s = s + d*d end return math.sqrt(s) end,",
         "    luthon_simd_poly_eval_f64 = function(n, x, out, coeffs, deg)",
@@ -451,7 +484,10 @@ def generate(module, sourcemap=None):
 
         for b in fn.blocks:
             lines.append(f"{indent}  ::{b.label}::")
+            has_simd_block = any(ins.op == "SIMD_BLOCK" for ins in b.instrs)
             for ins in b.instrs:
+                if has_simd_block and ins.op in ("VEC_LOAD", "VEC_STORE", "VEC_BROADCAST", "VEC_FMA", "VEC_ADD", "VEC_SUB", "VEC_MUL", "VEC_REDUCE_SUM"):
+                    continue
                 if ins.op == "MAKE_FUNCTION" and ins.args and ins.args[0] in fn_map and getattr(fn_map[ins.args[0]], "is_nested", False):
                     child_fn = fn_map[ins.args[0]]
                     child_lines = _emit_func_lines(
