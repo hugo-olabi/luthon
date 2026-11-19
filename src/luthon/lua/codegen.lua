@@ -145,12 +145,27 @@ local function _emit(ins)
   elseif o == "TRY_RETURN" then
     local ret_val = args[1] or "nil"
     return "_luthon_ret_val = " .. ret_val .. "; _luthon_has_ret = true; do return end"
+  elseif o == "TRY_BREAK" then
+    return "_luthon_has_break = true; do return end"
+  elseif o == "TRY_CONTINUE" then
+    return "_luthon_has_continue = true; do return end"
   elseif o == "TRY_UNWIND" then
     local depth = (args and args[1]) and tonumber(args[1]) or 0
+    local break_lbl = (args and args[2] and args[2] ~= "") and args[2] or nil
+    local cont_lbl = (args and args[3] and args[3] ~= "") and args[3] or nil
+    local lines = {}
     if depth > 0 then
-      return "if _luthon_has_ret then do return end end"
+      table.insert(lines, "if _luthon_has_ret or _luthon_has_break or _luthon_has_continue then do return end end")
+    else
+      table.insert(lines, "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end")
+      if break_lbl then
+        table.insert(lines, "if _luthon_has_break then _luthon_has_break = false; goto " .. break_lbl .. " end")
+      end
+      if cont_lbl then
+        table.insert(lines, "if _luthon_has_continue then _luthon_has_continue = false; goto " .. cont_lbl .. " end")
+      end
     end
-    return "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end"
+    return table.concat(lines, "\n")
   elseif o == "JUMP" then
     return "goto " .. args[1]
   elseif o == "BRANCH" then
@@ -630,18 +645,28 @@ function M.generate(module, skip_prelude, sourcemap)
               end
             end
             if end_idx then
-              closure_counter = closure_counter + 1
-              local safe_fn_name = fn.name:gsub("%.", "_"):gsub("<", "_"):gsub(">", "_")
-              local closure_name = "_try_closure_" .. safe_fn_name .. "_" .. closure_counter
               local body_instrs = {}
+              local has_cf = false
               for k = idx + 1, end_idx - 1 do
+                local opk = instrs[k].op
+                if opk == "JUMP" or opk == "BRANCH" or opk == "BRANCH_NONE" or opk == "BRANCH_TRUE" or opk == "BRANCH_FALSE" or opk == "TRY_BREAK" or opk == "TRY_CONTINUE" or opk == "RETURN" then
+                  has_cf = true
+                end
                 table.insert(body_instrs, instrs[k])
               end
-              local scoped_vars = ins.args or {}
-              table.insert(hoisted_closures, {name = closure_name, scoped = scoped_vars, instrs = body_instrs})
-              table.insert(new_instrs, {op = "TRY_BEGIN_HOISTED", args = {closure_name}})
-              table.insert(new_instrs, {op = "END_TRY_HOISTED", args = {}})
-              idx = end_idx + 1
+              if not has_cf then
+                closure_counter = closure_counter + 1
+                local safe_fn_name = fn.name:gsub("%.", "_"):gsub("<", "_"):gsub(">", "_")
+                local closure_name = "_try_closure_" .. safe_fn_name .. "_" .. closure_counter
+                local scoped_vars = ins.args or {}
+                table.insert(hoisted_closures, {name = closure_name, scoped = scoped_vars, instrs = body_instrs})
+                table.insert(new_instrs, {op = "TRY_BEGIN_HOISTED", args = {closure_name}})
+                table.insert(new_instrs, {op = "END_TRY_HOISTED", args = {}})
+                idx = end_idx + 1
+              else
+                table.insert(new_instrs, ins)
+                idx = idx + 1
+              end
             else
               table.insert(new_instrs, ins)
               idx = idx + 1

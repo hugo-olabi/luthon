@@ -54,11 +54,24 @@ def _emit(ins):
     if o == "TRY_RETURN":
         ret_val = ins.args[0] if ins.args and ins.args[0] else "nil"
         return f"_luthon_ret_val = {ret_val}; _luthon_has_ret = true; do return end"
+    if o == "TRY_BREAK":
+        return "_luthon_has_break = true; do return end"
+    if o == "TRY_CONTINUE":
+        return "_luthon_has_continue = true; do return end"
     if o == "TRY_UNWIND":
         depth = int(ins.args[0]) if (ins.args and ins.args[0]) else 0
+        break_lbl = ins.args[1] if (len(ins.args) > 1 and ins.args[1]) else None
+        cont_lbl = ins.args[2] if (len(ins.args) > 2 and ins.args[2]) else None
+        lines = []
         if depth > 0:
-            return "if _luthon_has_ret then do return end end"
-        return "if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end"
+            lines.append("if _luthon_has_ret or _luthon_has_break or _luthon_has_continue then do return end end")
+        else:
+            lines.append("if _luthon_has_ret then local _r = _luthon_ret_val; _luthon_ret_val = nil; _luthon_has_ret = false; return _r end")
+            if break_lbl:
+                lines.append(f"if _luthon_has_break then _luthon_has_break = false; goto {break_lbl} end")
+            if cont_lbl:
+                lines.append(f"if _luthon_has_continue then _luthon_has_continue = false; goto {cont_lbl} end")
+        return "\n".join(lines)
     if o == "JUMP":
         return "goto " + ins.args[0]
     if o == "BRANCH":
@@ -581,16 +594,21 @@ def generate(module, sourcemap=None):
                                 else:
                                     nested_depth -= 1
                         if end_idx is not None:
-                            closure_counter += 1
-                            safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
-                            closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
                             body_instrs = b.instrs[idx + 1 : end_idx]
-                            scoped_vars = [str(a) for a in ins.args] if ins.args else []
-                            hoisted_closures.append((closure_name, scoped_vars, body_instrs))
-                            new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name]))
-                            new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
-                            idx = end_idx + 1
-                            continue
+                            has_cf = any(
+                                ins.op in ("JUMP", "BRANCH", "BRANCH_NONE", "BRANCH_TRUE", "BRANCH_FALSE", "TRY_BREAK", "TRY_CONTINUE", "RETURN")
+                                for ins in body_instrs
+                            )
+                            if not has_cf:
+                                closure_counter += 1
+                                safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
+                                closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
+                                scoped_vars = [str(a) for a in ins.args] if ins.args else []
+                                hoisted_closures.append((closure_name, scoped_vars, body_instrs))
+                                new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name]))
+                                new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
+                                idx = end_idx + 1
+                                continue
                     new_instrs.append(ins)
                     idx += 1
                 b.instrs = new_instrs

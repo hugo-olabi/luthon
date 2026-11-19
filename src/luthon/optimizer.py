@@ -680,7 +680,7 @@ def dead_store_elimination_function(fn: Function) -> bool:
     protected.update(getattr(fn, "upvalues", []) or [])
     protected.update(getattr(fn, "freevars", []) or [])
     protected.update(getattr(fn, "nonlocals", []) or [])
-    protected.update({"...", "self", "_exc", "_exc_matched", "_luthon_ret_val", "_luthon_has_ret"})
+    protected.update({"...", "self", "_exc", "_exc_matched", "_luthon_ret_val", "_luthon_has_ret", "_luthon_has_break", "_luthon_has_continue"})
 
     # 1. Compute per-block def/use
     b_def: Dict[str, Set[str]] = {}
@@ -812,7 +812,7 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
     protected.update(getattr(fn, "upvalues", []) or [])
     protected.update(getattr(fn, "freevars", []) or [])
     protected.update(getattr(fn, "nonlocals", []) or [])
-    protected.update({"...", "self", "_exc", "_exc_matched", "_luthon_ret_val", "_luthon_has_ret"})
+    protected.update({"...", "self", "_exc", "_exc_matched", "_luthon_ret_val", "_luthon_has_ret", "_luthon_has_break", "_luthon_has_continue"})
 
     # Collect temporaries and eligible locals
     poolable: Set[str] = set()
