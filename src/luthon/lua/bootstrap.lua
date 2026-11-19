@@ -476,6 +476,23 @@ True = true
 False = false
 None = _G._luthon_none
 
+local function _wrap_pybridge_method(raw_val, t)
+  return function(self_arg, ...)
+    if self_arg == t then
+      return raw_val(...)
+    else
+      return raw_val(self_arg, ...)
+    end
+  end
+end
+
+function _luthon_subscr_fast(t, idx)
+  if type(t) == "table" and not rawget(t, "_py") and not rawget(t, "_buf") then
+    return t[idx + 1]
+  end
+  return __luthon_get(t, idx)
+end
+
 function __luthon_get(t, i)
   if t == nil or t == _G._luthon_none or (type(t) == "table" and rawget(t, "__is_none__") == true) then return nil end
   if type(t) == "table" and rawget(t, "_buf") and rawget(t, "_len") then
@@ -535,13 +552,7 @@ function __luthon_get(t, i)
         local self_obj = libpy.PyObject_GetAttrString(raw_val._py, "__self__")
         if self_obj ~= nil then
           libpy.Py_DecRef(self_obj)
-          return function(self_arg, ...)
-            if self_arg == t then
-              return raw_val(...)
-            else
-              return raw_val(self_arg, ...)
-            end
-          end
+          return _wrap_pybridge_method(raw_val, t)
         else
           libpy.PyErr_Clear()
         end
@@ -979,6 +990,9 @@ function _luthon_slice(obj, lower, upper, step)
 end
 
 function _luthon_add(a, b)
+  if type(a) == "number" and type(b) == "number" then
+    return a + b
+  end
   local ta = type(a)
   local tb = type(b)
   if (ta == "number" or ta == "cdata") and (tb == "number" or tb == "cdata") then
@@ -1016,6 +1030,16 @@ end
 _G._luthon_truthy = _luthon_truthy
 
 function _luthon_cmp(op, a, b)
+  local ta = type(a)
+  local tb = type(b)
+  if (ta == "string" and tb == "string") or (ta == "number" and tb == "number") or (ta == "boolean" and tb == "boolean") then
+    if op == "==" or op == "eq" or op == "is" then return a == b end
+    if op == "~=" or op == "!=" or op == "ne" or op == "isnot" then return a ~= b end
+    if op == "<" or op == "lt" then return a < b end
+    if op == "<=" or op == "le" then return a <= b end
+    if op == ">" or op == "gt" then return a > b end
+    if op == ">=" or op == "ge" then return a >= b end
+  end
   if op == "is" then
     local a_is_none = (a == nil) or (a == _G._luthon_none) or (type(a) == "table" and rawget(a, "__is_none__") == true)
     local b_is_none = (b == nil) or (b == _G._luthon_none) or (type(b) == "table" and rawget(b, "__is_none__") == true)
@@ -1344,6 +1368,13 @@ end
 local _list_methods = {
   append = function(self, x) self[#self + 1] = x end,
   extend = function(self, other)
+    if type(other) == "table" and not rawget(other, "_py") and not rawget(other, "__iter__") then
+      local n = #other
+      for i = 1, n do
+        self[#self + 1] = other[i]
+      end
+      return
+    end
     local it = iter(other)
     while true do
       local v = it()
@@ -1790,17 +1821,23 @@ local _orig_string_format = string.format
 local _str_methods
 _str_methods = {
   join = function(sep, iterable)
-    local parts = {}
     if type(iterable) == "table" then
-      for _, v in ipairs(iterable) do table.insert(parts, tostring(v)) end
+      local ok, res = pcall(table.concat, iterable, sep)
+      if ok then return res end
+      local parts = {}
+      local n = #iterable
+      for i = 1, n do parts[i] = tostring(iterable[i]) end
+      return table.concat(parts, sep)
     elseif type(iterable) == "function" then
+      local parts = {}
       while true do
         local v = iterable()
         if v == nil then break end
-        table.insert(parts, tostring(v))
+        parts[#parts + 1] = tostring(v)
       end
+      return table.concat(parts, sep)
     end
-    return table.concat(parts, sep)
+    return ""
   end,
   startswith = function(s, prefix)
     if type(prefix) == "table" then
@@ -2080,8 +2117,35 @@ local function _str_mod(fmt, args)
   if type(fmt) ~= "string" then
     error("TypeError: unsupported operand type(s) for %")
   end
-  local t = {}
   local is_tuple = (type(args) == "table" and (rawget(args, "__is_tuple") or (getmetatable(args) and getmetatable(args).__tuple__)))
+  if is_tuple then
+    local spec, rest = fmt:match("^%%%.%*([a-zA-Z])(.*)$")
+    if spec then
+      local n = #args
+      if n == 2 then
+        return string.format("%." .. tostring(args[1]) .. spec .. rest, args[2])
+      elseif n == 3 then
+        return string.format("%." .. tostring(args[1]) .. spec .. rest, args[2], args[3])
+      end
+    end
+    if not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*") then
+      local n = #args
+      if n == 1 then
+        return string.format(fmt, args[1])
+      elseif n == 2 then
+        return string.format(fmt, args[1], args[2])
+      elseif n == 3 then
+        return string.format(fmt, args[1], args[2], args[3])
+      elseif n == 4 then
+        return string.format(fmt, args[1], args[2], args[3], args[4])
+      end
+    end
+  elseif type(args) ~= "table" then
+    if not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*") then
+      return string.format(fmt, args)
+    end
+  end
+  local t = {}
   if is_tuple then
     for i = 1, #args do
       t[i] = args[i]
@@ -6541,14 +6605,19 @@ local _sock_ffi = require("ffi")
 local _sock_ipv4_buf = _sock_ffi.new("uint8_t[4]")
 local _sock_ipv6_buf = _sock_ffi.new("uint8_t[16]")
 local _sock_ntop_buf = _sock_ffi.new("char[46]")
+local _sock_oserror = nil
 
 _socket_mod.inet_pton = function(family, ip_str)
   local is_v6 = (family == 10)
   local buf_size = is_v6 and 16 or 4
   local buf = is_v6 and _sock_ipv6_buf or _sock_ipv4_buf
-  local rc = _sock_ffi.C.inet_pton(family, tostring(ip_str or ""), buf)
+  local s = type(ip_str) == "string" and ip_str or tostring(ip_str or "")
+  local rc = _sock_ffi.C.inet_pton(family, s, buf)
   if rc <= 0 then
-    error(OSError("illegal IP address string passed to inet_pton"), 2)
+    if not _sock_oserror then
+      _sock_oserror = OSError("illegal IP address string passed to inet_pton")
+    end
+    error(_sock_oserror, 2)
   end
   return _sock_ffi.string(buf, buf_size)
 end
