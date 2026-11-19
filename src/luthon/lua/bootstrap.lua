@@ -31,6 +31,8 @@ end
 -- Return unwinding for try/except blocks
 local _luthon_ret_val = nil
 local _luthon_has_ret = false
+local _luthon_has_break = false
+local _luthon_has_continue = false
 
 -- FFI and C-runtime bindings
 local ffi = require("ffi")
@@ -559,11 +561,9 @@ end
 function __luthon_get(t, i)
   if type(t) == "table" then
     local mt = getmetatable(t)
-    if mt == _list_mt or mt == _tuple_mt or (mt and (mt.__list__ or mt.__tuple__)) or rawget(t, "_list") or rawget(t, "_tuple") then
-      if type(i) == "number" then
-        if i < 0 then i = #t + i + 1 else i = i + 1 end
-        return t[i]
-      end
+    if type(i) == "number" and (mt == nil or mt == _list_mt or mt == _tuple_mt or (mt and (mt.__list__ or mt.__tuple__)) or rawget(t, "_list") or rawget(t, "_tuple")) then
+      if i < 0 then i = #t + i + 1 else i = i + 1 end
+      return t[i]
     elseif mt == _dict_mt or (mt and mt.__dict__) or rawget(t, "_dict") then
       if type(i) == "table" then i = _luthon_key_repr(i) end
       local v = rawget(t, i)
@@ -2215,8 +2215,6 @@ function _str_partition_head(s, sep)
   return string.sub(s, 1, p - 1)
 end
 
-local _fmt_star_cache = {}
-local _fmt_std_cache = {}
 local _fmt_f_s_prec = {
   [0] = "%.0f %s",
   [1] = "%.1f %s",
@@ -2229,14 +2227,9 @@ local _fmt_f_pcnt_prec = {
   [2] = "%.2f%%",
   [3] = "%.3f%%",
 }
-
-local function _str_mod(fmt, args)
-  if type(fmt) ~= "string" then
-    error("TypeError: unsupported operand type(s) for %")
-  end
-  local is_tuple = (type(args) == "table" and (rawget(args, "__is_tuple") or (getmetatable(args) and getmetatable(args).__tuple__)))
-  if is_tuple then
-    if fmt == "%.*f %s" and #args == 3 then
+local _fmt_cache = {
+  ["%.*f %s"] = function(args, is_tup)
+    if is_tup then
       local p = args[1]
       local f = _fmt_f_s_prec[p]
       if not f then
@@ -2244,7 +2237,10 @@ local function _str_mod(fmt, args)
         _fmt_f_s_prec[p] = f
       end
       return string.format(f, args[2], args[3])
-    elseif fmt == "%.*f%%" and #args == 2 then
+    end
+  end,
+  ["%.*f%%"] = function(args, is_tup)
+    if is_tup then
       local p = args[1]
       local f = _fmt_f_pcnt_prec[p]
       if not f then
@@ -2253,59 +2249,66 @@ local function _str_mod(fmt, args)
       end
       return string.format(f, args[2])
     end
+  end,
+  ["%d %s"] = function(args, is_tup)
+    if is_tup then
+      return string.format("%d %s", args[1], args[2])
+    end
+  end,
+  ["%s"] = function(args, is_tup)
+    if is_tup then
+      return tostring(args[1])
+    else
+      return tostring(args)
+    end
+  end,
+}
 
-    local star_info = _fmt_star_cache[fmt]
-    if star_info == nil then
-      local spec, rest = fmt:match("^%%%.%*([a-zA-Z])(.*)$")
-      if spec then
-        star_info = {spec = spec, rest = rest, prec = {}}
-      else
-        star_info = false
+local function _str_mod(fmt, args)
+  if type(fmt) ~= "string" then
+    error("TypeError: unsupported operand type(s) for %")
+  end
+  local is_tuple = (type(args) == "table" and (rawget(args, "__is_tuple") or (getmetatable(args) and getmetatable(args).__tuple__)))
+  local cached_fn = _fmt_cache[fmt]
+  if cached_fn then
+    local res = cached_fn(args, is_tuple)
+    if res ~= nil then return res end
+  elseif cached_fn == nil then
+    local spec, rest = fmt:match("^%%%.%*([a-zA-Z])(.*)$")
+    if spec then
+      local prec_cache = {}
+      _fmt_cache[fmt] = function(a, is_tup)
+        if is_tup then
+          local prec = tostring(a[1])
+          local spec_fmt = prec_cache[prec]
+          if not spec_fmt then
+            spec_fmt = "%." .. prec .. spec .. rest
+            prec_cache[prec] = spec_fmt
+          end
+          local n = #a
+          if n == 2 then return string.format(spec_fmt, a[2])
+          elseif n == 3 then return string.format(spec_fmt, a[2], a[3]) end
+        end
       end
-      _fmt_star_cache[fmt] = star_info
-    end
-
-    if star_info then
-      local prec = tostring(args[1])
-      local spec_fmt = star_info.prec[prec]
-      if not spec_fmt then
-        spec_fmt = "%." .. prec .. star_info.spec .. star_info.rest
-        star_info.prec[prec] = spec_fmt
+    elseif not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*") then
+      _fmt_cache[fmt] = function(a, is_tup)
+        if is_tup then
+          local n = #a
+          if n == 1 then return string.format(fmt, a[1])
+          elseif n == 2 then return string.format(fmt, a[1], a[2])
+          elseif n == 3 then return string.format(fmt, a[1], a[2], a[3])
+          elseif n == 4 then return string.format(fmt, a[1], a[2], a[3], a[4]) end
+        elseif type(a) ~= "table" then
+          return string.format(fmt, a)
+        end
       end
-      local n = #args
-      if n == 2 then
-        return string.format(spec_fmt, args[2])
-      elseif n == 3 then
-        return string.format(spec_fmt, args[2], args[3])
-      end
+    else
+      _fmt_cache[fmt] = false
     end
-
-    local is_std = _fmt_std_cache[fmt]
-    if is_std == nil then
-      is_std = not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*")
-      _fmt_std_cache[fmt] = is_std
-    end
-
-    if is_std then
-      local n = #args
-      if n == 1 then
-        return string.format(fmt, args[1])
-      elseif n == 2 then
-        return string.format(fmt, args[1], args[2])
-      elseif n == 3 then
-        return string.format(fmt, args[1], args[2], args[3])
-      elseif n == 4 then
-        return string.format(fmt, args[1], args[2], args[3], args[4])
-      end
-    end
-  elseif type(args) ~= "table" then
-    local is_std = _fmt_std_cache[fmt]
-    if is_std == nil then
-      is_std = not fmt:find("%%[%-+0 #]*%d*%.?%d*[ra]") and not fmt:find("%*")
-      _fmt_std_cache[fmt] = is_std
-    end
-    if is_std then
-      return string.format(fmt, args)
+    cached_fn = _fmt_cache[fmt]
+    if cached_fn then
+      local res = cached_fn(args, is_tuple)
+      if res ~= nil then return res end
     end
   end
   local t = {}
@@ -2408,61 +2411,69 @@ function make_coroutine(fn, ...)
 end
 
 function iter(t)
-  if t == nil or t == _G._luthon_none or (type(t) == "table" and rawget(t, "__is_none__")) then
-    return _empty_iter
+  if t == nil or t == _G._luthon_none then return _empty_iter end
+  if type(t) == "table" then
+    local mt = getmetatable(t)
+    if mt == _list_mt or mt == _tuple_mt or (mt and (mt.__list__ or mt.__tuple__)) or (mt == nil and #t > 0) then
+      return setmetatable({t, 0}, _list_iter_mt)
+    elseif mt == _dict_mt or (mt and mt.__dict__) then
+      return setmetatable({t, nil}, _dict_iter_mt)
+    end
+    if rawget(t, "__is_none__") then
+      return _empty_iter
+    end
+    if t.__anext__ then
+      return function() return t:__anext__() end
+    end
+    if t.__aiter__ then
+      local it = t:__aiter__()
+      if type(it) == "table" and it.__anext__ then
+        return function() return it:__anext__() end
+      end
+      return it
+    end
+    if rawget(t, "_py") then
+      local ok, pb = pcall(require, "luthon.lua.pybridge")
+      if not ok or not pb then ok, pb = pcall(require, "src/luthon/lua/pybridge") end
+      if ok and pb and pb.get_lib then
+        local lib = pb.get_lib()
+        local it = lib.PyObject_GetIter(t._py)
+        if it ~= nil then
+          return function()
+            local item = lib.PyIter_Next(it)
+            if item == nil then
+              lib.Py_DecRef(it)
+              return nil
+            end
+            local res = pb.py_to_lua(item)
+            lib.Py_DecRef(item)
+            return res
+          end
+        end
+      end
+    end
+    if type(t.__iter__) == "function" then
+      local it = t:__iter__()
+      if type(it) == "table" and it.__next__ then
+        return setmetatable({it}, _obj_next_mt)
+      end
+      return it
+    end
+    if t.__next__ then
+      return setmetatable({t}, _obj_next_mt)
+    end
+    if t.lines then return t:lines() end
+    if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
+      return setmetatable({t, nil}, _dict_iter_mt)
+    end
+    return setmetatable({t, 0}, _list_iter_mt)
   end
   if type(t) == "string" then
     return setmetatable({t, 0}, _str_iter_mt)
   end
-  if type(t) == "table" and t.__anext__ then
-    return function() return t:__anext__() end
-  end
-  if type(t) == "table" and t.__aiter__ then
-    local it = t:__aiter__()
-    if type(it) == "table" and it.__anext__ then
-      return function() return it:__anext__() end
-    end
-    return it
-  end
-  if type(t) == "table" and rawget(t, "_py") then
-    local ok, pb = pcall(require, "luthon.lua.pybridge")
-    if not ok or not pb then ok, pb = pcall(require, "src/luthon/lua/pybridge") end
-    if ok and pb and pb.get_lib then
-      local lib = pb.get_lib()
-      local it = lib.PyObject_GetIter(t._py)
-      if it ~= nil then
-        return function()
-          local item = lib.PyIter_Next(it)
-          if item == nil then
-            lib.Py_DecRef(it)
-            return nil
-          end
-          local res = pb.py_to_lua(item)
-          lib.Py_DecRef(item)
-          return res
-        end
-      end
-    end
-  end
-  if type(t) == "table" and type(t.__iter__) == "function" then
-    local it = t:__iter__()
-    if type(it) == "table" and it.__next__ then
-      return setmetatable({it}, _obj_next_mt)
-    end
-    return it
-  end
-  if type(t) == "table" and t.__next__ then
-    return setmetatable({t}, _obj_next_mt)
-  end
   if type(t) == "userdata" and io.type(t) == "file" then return t:lines() end
-  if type(t) == "table" and t.lines then return t:lines() end
   if type(t) == "function" then return t end
-  if type(t) ~= "table" then return _empty_iter end
-  local mt = getmetatable(t)
-  if rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt))) or (mt == nil and #t == 0 and next(t) ~= nil) then
-    return setmetatable({t, nil}, _dict_iter_mt)
-  end
-  return setmetatable({t, 0}, _list_iter_mt)
+  return _empty_iter
 end
 function unpack_list(t)
   return t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10]
@@ -2470,7 +2481,9 @@ end
 function list_repeat(t, n) local r={}; for i=1,n do for _,v in ipairs(t) do r[#r+1]=v end end; return r end
 local _raw_str = function(x)
   if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return "None" end
-  return tostring(x or "")
+  if x == false then return "False" end
+  if x == true then return "True" end
+  return tostring(x)
 end
 local _raw_int = function(x, base)
   if x == nil then return 0 end
