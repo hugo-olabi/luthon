@@ -485,7 +485,9 @@ function __luthon_get(t, i)
   if type(t) == "table" and rawget(t, "_py") then
     return t[i]
   end
-  i = _luthon_key_repr(i)
+  if type(i) == "table" then
+    i = _luthon_key_repr(i)
+  end
   if type(t) == "string" then
     if type(i) == "number" then
       if i < 0 then i = #t + i + 1 else i = i + 1 end
@@ -856,7 +858,9 @@ function __luthon_set(t, i, v)
       return
     end
   end
-  i = _luthon_key_repr(i)
+  if type(i) == "table" then
+    i = _luthon_key_repr(i)
+  end
   local mt = getmetatable(t)
   if type(t) == "table" and (rawget(t, "_dict") or (mt and (mt.__dict__ == true or mt == _G._dict_mt or (_dict_mt ~= nil and mt == _dict_mt)))) then
     if v == nil then v = _G._luthon_none end
@@ -886,8 +890,14 @@ function _luthon_slice_desc(lower, upper, step)
 end
 
 function _luthon_slice(obj, lower, upper, step)
-  step = step or 1
   if type(obj) == "string" then
+    if (step == nil or step == 1) and (lower == nil or (type(lower) == "number" and lower >= 0)) and (upper == nil or (type(upper) == "number" and upper >= 0)) then
+      if lower == nil and upper == nil then return obj end
+      local l = (lower and (lower + 1)) or 1
+      local u = upper or -1
+      return string.sub(obj, l, u)
+    end
+    step = step or 1
     local n = #obj
     if step > 0 then
       local l = 1
@@ -1173,7 +1183,9 @@ function _luthon_cmp(op, a, b)
 end
 
 function _luthon_in(a, b)
-  a = _luthon_key_repr(a)
+  if type(a) == "table" then
+    a = _luthon_key_repr(a)
+  end
   if type(b) == "table" then
     if b[a] ~= nil then return true end
     local n = #b
@@ -1331,32 +1343,29 @@ local function _sync_if_sys_argv(lst)
 end
 
 local _list_methods = {
-  append = function(self, x) table.insert(self, x); _sync_if_sys_argv(self) end,
+  append = function(self, x) self[#self + 1] = x end,
   extend = function(self, other)
     local it = iter(other)
     while true do
       local v = it()
       if v == nil then break end
-      table.insert(self, v)
+      self[#self + 1] = v
     end
-    _sync_if_sys_argv(self)
   end,
   pop = function(self, idx)
     idx = idx or (#self - 1)
     if idx < 0 then idx = #self + idx end
-    local v = table.remove(self, idx + 1)
-    _sync_if_sys_argv(self)
-    return v
+    return table.remove(self, idx + 1)
   end,
-  insert = function(self, idx, x) table.insert(self, idx + 1, x); _sync_if_sys_argv(self) end,
+  insert = function(self, idx, x) table.insert(self, idx + 1, x) end,
   remove = function(self, x)
     local n = #self
     for i=1,n do
-      if self[i] == x then table.remove(self, i); _sync_if_sys_argv(self); return end
+      if self[i] == x then table.remove(self, i); return end
     end
     error("ValueError: list.remove(x): x not in list")
   end,
-  clear = function(self) for i=#self,1,-1 do self[i] = nil end; _sync_if_sys_argv(self) end,
+  clear = function(self) for i=#self,1,-1 do self[i] = nil end end,
   sort = function(self, key_fn, reverse)
     if type(key_fn) == "table" and key_fn.key ~= nil then
       if key_fn.reverse ~= nil then reverse = key_fn.reverse end
@@ -1434,6 +1443,42 @@ end
 
 _list_mt = {
   __index = _list_methods,
+  __lt = _luthon_lt,
+  __add = _list_add,
+  __mul = _list_mul,
+}
+
+local _sys_argv_methods = {
+  append = function(self, x) self[#self + 1] = x; _sync_if_sys_argv(self) end,
+  extend = function(self, other)
+    local it = iter(other)
+    while true do
+      local v = it()
+      if v == nil then break end
+      self[#self + 1] = v
+    end
+    _sync_if_sys_argv(self)
+  end,
+  pop = function(self, idx)
+    idx = idx or (#self - 1)
+    if idx < 0 then idx = #self + idx end
+    local v = table.remove(self, idx + 1)
+    _sync_if_sys_argv(self)
+    return v
+  end,
+  insert = function(self, idx, x) table.insert(self, idx + 1, x); _sync_if_sys_argv(self) end,
+  remove = function(self, x)
+    local n = #self
+    for i=1,n do
+      if self[i] == x then table.remove(self, i); _sync_if_sys_argv(self); return end
+    end
+    error("ValueError: list.remove(x): x not in list")
+  end,
+  clear = function(self) for i=#self,1,-1 do self[i] = nil end; _sync_if_sys_argv(self) end,
+}
+setmetatable(_sys_argv_methods, {__index = _list_methods})
+local _sys_argv_mt = {
+  __index = _sys_argv_methods,
   __lt = _luthon_lt,
   __add = _list_add,
   __mul = _list_mul,
@@ -2049,20 +2094,22 @@ local function _str_mod(fmt, args)
   end
   local f2, t2 = _expand_dynamic_format(fmt, t)
   if #t2 > 0 then
-    local arg_idx = 1
-    f2 = f2:gsub("%%([%-+0 #]*)(%d*)%.?(%d*)([a-zA-Z%%])", function(flags, w, p, spec)
-      if spec == "%" then return "%%" end
-      local cur_idx = arg_idx
-      arg_idx = arg_idx + 1
-      if spec == "r" or spec == "a" then
-        if t2[cur_idx] ~= nil then
-          local r_fn = _G.repr or repr or tostring
-          t2[cur_idx] = r_fn(t2[cur_idx])
+    if f2:find("%%[%-+0 #]*%d*%.?%d*[ra]") then
+      local arg_idx = 1
+      f2 = f2:gsub("%%([%-+0 #]*)(%d*)%.?(%d*)([a-zA-Z%%])", function(flags, w, p, spec)
+        if spec == "%" then return "%%" end
+        local cur_idx = arg_idx
+        arg_idx = arg_idx + 1
+        if spec == "r" or spec == "a" then
+          if t2[cur_idx] ~= nil then
+            local r_fn = _G.repr or repr or tostring
+            t2[cur_idx] = r_fn(t2[cur_idx])
+          end
+          return "%" .. flags .. w .. (p ~= "" and ("." .. p) or "") .. "s"
         end
-        return "%" .. flags .. w .. (p ~= "" and ("." .. p) or "") .. "s"
-      end
-      return "%" .. flags .. w .. (p ~= "" and ("." .. p) or "") .. spec
-    end)
+        return "%" .. flags .. w .. (p ~= "" and ("." .. p) or "") .. spec
+      end)
+    end
     local fmt_args = {}
     for i = 1, #t2 do
       local val = t2[i]
@@ -3468,7 +3515,7 @@ os.walk = os.walk or function(top)
   return results
 end
 
-sys = {argv = {}, path = setmetatable({}, _list_mt), meta_path = setmetatable({}, _list_mt), version = "3.14", version_info = setmetatable({3, 14, 0, "final", 0}, _list_mt), implementation = {name = "cpython", version = setmetatable({3, 14, 0, "final", 0}, _list_mt)}, modules = setmetatable({}, {__index = function(t, k) if _dict_methods and _dict_methods[k] ~= nil then return _dict_methods[k] end; local ok, m = pcall(_luthon_import, k); if ok and m ~= nil then return m end; return nil end})}
+sys = {argv = setmetatable({}, _sys_argv_mt), path = setmetatable({}, _list_mt), meta_path = setmetatable({}, _list_mt), version = "3.14", version_info = setmetatable({3, 14, 0, "final", 0}, _list_mt), implementation = {name = "cpython", version = setmetatable({3, 14, 0, "final", 0}, _list_mt)}, modules = setmetatable({}, {__index = function(t, k) if _dict_methods and _dict_methods[k] ~= nil then return _dict_methods[k] end; local ok, m = pcall(_luthon_import, k); if ok and m ~= nil then return m end; return nil end})}
 __import__ = function(name) return _luthon_import(name) end
 
 json = {}
@@ -3886,7 +3933,7 @@ _sys_table.stderr = io.stderr
 _sys_table.stdin = io.stdin
 
 if arg and type(arg) == "table" then
-  _sys_table.argv = setmetatable({}, _list_mt)
+  _sys_table.argv = setmetatable({}, _sys_argv_mt)
   table.insert(_sys_table.argv, arg[0] or "luthon")
   local n = #arg
   for i = 1, n do table.insert(_sys_table.argv, arg[i]) end
@@ -3897,6 +3944,9 @@ sys = setmetatable({}, {
   __newindex = function(t, k, v)
     _sys_table[k] = v
     if k == "argv" then
+      if type(v) == "table" and getmetatable(v) ~= _sys_argv_mt then
+        setmetatable(v, _sys_argv_mt)
+      end
       pcall(function()
         local pb = _G.pybridge or package.loaded["pybridge"] or package.loaded["luthon.lua.pybridge"] or package.loaded["src/luthon/lua/pybridge"]
         if pb and pb.sync_sys_argv then
@@ -6488,26 +6538,29 @@ _socket_mod.socket = function(family, sock_type, proto)
   return setmetatable({ _fd = fd, _family = family, _type = sock_type }, Socket_mt)
 end
 
+local _sock_ffi = require("ffi")
+local _sock_ipv4_buf = _sock_ffi.new("uint8_t[4]")
+local _sock_ipv6_buf = _sock_ffi.new("uint8_t[16]")
+local _sock_ntop_buf = _sock_ffi.new("char[46]")
+
 _socket_mod.inet_pton = function(family, ip_str)
-  local ffi = require("ffi")
-  local buf_size = (family == 10) and 16 or 4
-  local buf = ffi.new("uint8_t[?]", buf_size)
-  local rc = ffi.C.inet_pton(family, tostring(ip_str or ""), buf)
+  local is_v6 = (family == 10)
+  local buf_size = is_v6 and 16 or 4
+  local buf = is_v6 and _sock_ipv6_buf or _sock_ipv4_buf
+  local rc = _sock_ffi.C.inet_pton(family, tostring(ip_str or ""), buf)
   if rc <= 0 then
     error(OSError("illegal IP address string passed to inet_pton"), 2)
   end
-  return ffi.string(buf, buf_size)
+  return _sock_ffi.string(buf, buf_size)
 end
 
 _socket_mod.inet_ntop = function(family, packed_ip)
-  local ffi = require("ffi")
   local max_len = (family == 10) and 46 or 16
-  local dst = ffi.new("char[?]", max_len)
-  local ptr = ffi.C.inet_ntop(family, packed_ip, dst, max_len)
+  local ptr = _sock_ffi.C.inet_ntop(family, packed_ip, _sock_ntop_buf, max_len)
   if ptr == nil then
     error(OSError("unknown address family or invalid packed IP"), 2)
   end
-  return ffi.string(ptr)
+  return _sock_ffi.string(ptr)
 end
 
 local _socket_gaierror = function(msg)
