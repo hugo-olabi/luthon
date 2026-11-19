@@ -160,6 +160,7 @@ function IRLowerer.new(package)
   self._break_stack = {}
   self._continue_stack = {}
   self._try_depth = 0
+  self._try_loop_depth_stack = {}
   self._fn_counter = {}
   return self
 end
@@ -495,7 +496,10 @@ function IRLowerer:_lower_stmt_impl(node)
     local prev_fn = self._cur_fn
     local prev_block = self._cur_block
     local prev_try_depth = self._try_depth
+    local prev_try_loop_depth = {}
+    for _, d in ipairs(self._try_loop_depth_stack) do table.insert(prev_try_loop_depth, d) end
     self._try_depth = 0
+    self._try_loop_depth_stack = {}
     self._cur_fn = fn
     local b = Block.new("entry")
     table.insert(fn.blocks, b)
@@ -586,6 +590,7 @@ function IRLowerer:_lower_stmt_impl(node)
       fn_ref = fn.name
     end
     self._try_depth = prev_try_depth
+    self._try_loop_depth_stack = prev_try_loop_depth
 
     if is_nested then
       local fn_tmp = self:_new_tmp()
@@ -652,18 +657,40 @@ function IRLowerer:_lower_stmt_impl(node)
     local orelse = node.orelse or {}
     local finalbody = node.finalbody or {}
 
+    local is_inet_pton = false
+    local fam_node = nil
+    local ip_node = nil
     if node.body and #node.body == 1
        and node.body[1]._type == "Expr" and node.body[1].value and node.body[1].value._type == "Call"
        and node.body[1].value.func and node.body[1].value.func._type == "Attribute" and node.body[1].value.func.attr == "inet_pton"
        and node.body[1].value.args and #node.body[1].value.args >= 2
        and #handlers == 1
-       and (not handlers[1].type or (handlers[1].type._type == "Name" and (handlers[1].type.id == "OSError" or handlers[1].type.id == "Exception")))
+       and (not handlers[1].type or (handlers[1].type._type == "Name" and (handlers[1].type.id == "OSError" or handlers[1].type.id == "Exception" or handlers[1].type.id == "error")))
        and handlers[1].body and #handlers[1].body == 1
        and handlers[1].body[1]._type == "Return" and handlers[1].body[1].value and handlers[1].body[1].value._type == "Constant" and handlers[1].body[1].value.value == false
        and #orelse == 1
        and orelse[1]._type == "Return" and orelse[1].value and orelse[1].value._type == "Constant" and orelse[1].value.value == true then
-      local fam_tmp = self:lower_expr(node.body[1].value.args[1])
-      local ip_tmp = self:lower_expr(node.body[1].value.args[2])
+      is_inet_pton = true
+      fam_node = node.body[1].value.args[1]
+      ip_node = node.body[1].value.args[2]
+    elseif node.body and #node.body == 2
+       and node.body[1]._type == "Expr" and node.body[1].value and node.body[1].value._type == "Call"
+       and node.body[1].value.func and node.body[1].value.func._type == "Attribute" and node.body[1].value.func.attr == "inet_pton"
+       and node.body[1].value.args and #node.body[1].value.args >= 2
+       and node.body[2]._type == "Return" and node.body[2].value and node.body[2].value._type == "Constant" and node.body[2].value.value == true
+       and #handlers == 1
+       and (not handlers[1].type or (handlers[1].type._type == "Name" and (handlers[1].type.id == "OSError" or handlers[1].type.id == "Exception" or handlers[1].type.id == "error")))
+       and handlers[1].body and #handlers[1].body == 1
+       and handlers[1].body[1]._type == "Return" and handlers[1].body[1].value and handlers[1].body[1].value._type == "Constant" and handlers[1].body[1].value.value == false
+       and #orelse == 0 then
+      is_inet_pton = true
+      fam_node = node.body[1].value.args[1]
+      ip_node = node.body[1].value.args[2]
+    end
+
+    if is_inet_pton then
+      local fam_tmp = self:lower_expr(fam_node)
+      local ip_tmp = self:lower_expr(ip_node)
       local chk_tmp = self:_new_tmp()
       self:_emit("CALL", {"_socket_mod.inet_pton_bool", fam_tmp, ip_tmp}, chk_tmp)
       self:_emit("RETURN", {chk_tmp})
@@ -689,6 +716,10 @@ function IRLowerer:_lower_stmt_impl(node)
       return
     end
 
+    local outer_break = #self._break_stack > 0 and self._break_stack[#self._break_stack] or ""
+    local outer_continue = #self._continue_stack > 0 and self._continue_stack[#self._continue_stack] or ""
+    table.insert(self._try_loop_depth_stack, #self._break_stack)
+
     if #finalbody > 0 then
       local try_label = self:_new_label("try")
       local try_block = self:_new_block(try_label)
@@ -699,6 +730,7 @@ function IRLowerer:_lower_stmt_impl(node)
         self:lower_stmt(s)
       end
       self._try_depth = self._try_depth - 1
+      table.remove(self._try_loop_depth_stack)
       self:_emit("FINALLY_BEGIN", {}, self:_new_tmp())
       local finally_label = self:_new_label("finally")
       self._cur_block = self:_new_block(finally_label)
@@ -708,7 +740,7 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("FINALLY_END", {}, self:_new_tmp())
       local end_label = self:_new_label("end_try")
       self._cur_block = self:_new_block(end_label)
-      self:_emit("TRY_UNWIND", {tostring(self._try_depth)})
+      self:_emit("TRY_UNWIND", {tostring(self._try_depth), outer_break, outer_continue})
       return
     end
 
@@ -721,6 +753,7 @@ function IRLowerer:_lower_stmt_impl(node)
       self:lower_stmt(s)
     end
     self._try_depth = self._try_depth - 1
+    table.remove(self._try_loop_depth_stack)
     self:_emit("END_TRY", {}, self:_new_tmp())
     for _, h in ipairs(handlers) do
       local handler_lbl = self:_new_label("except")
@@ -753,7 +786,7 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("TRY_CLOSE", {}, self:_new_tmp())
     local end_label = self:_new_label("end_try")
     self._cur_block = self:_new_block(end_label)
-    self:_emit("TRY_UNWIND", {tostring(self._try_depth)})
+    self:_emit("TRY_UNWIND", {tostring(self._try_depth), outer_break, outer_continue})
   elseif t == "Pass" then
     -- no-op
   elseif t == "AnnAssign" then
@@ -859,7 +892,10 @@ function IRLowerer:_lower_stmt_impl(node)
         local prev_fn = self._cur_fn
         local prev_block = self._cur_block
         local prev_try_depth = self._try_depth
+        local prev_try_loop_depth = {}
+        for _, d in ipairs(self._try_loop_depth_stack or {}) do table.insert(prev_try_loop_depth, d) end
         self._try_depth = 0
+        self._try_loop_depth_stack = {}
         self._cur_fn = fn
         local b = Block.new("entry")
         table.insert(fn.blocks, b)
@@ -941,6 +977,7 @@ function IRLowerer:_lower_stmt_impl(node)
           self._cur_block = prev_block
         end
         self._try_depth = prev_try_depth
+    self._try_loop_depth_stack = prev_try_loop_depth
         self._cur_method_first_arg = prev_method_first_arg
 
         local clean_params = {}
@@ -1089,11 +1126,19 @@ function IRLowerer:_lower_stmt_impl(node)
     self:_emit("STORE", {node.name, cls})
   elseif t == "Break" then
     if #self._break_stack > 0 then
-      self:_emit("JUMP", {self._break_stack[#self._break_stack]})
+      if self._try_depth > 0 and (#self._try_loop_depth_stack == 0 or #self._break_stack <= self._try_loop_depth_stack[#self._try_loop_depth_stack]) then
+        self:_emit("TRY_BREAK", {self._break_stack[#self._break_stack]})
+      else
+        self:_emit("JUMP", {self._break_stack[#self._break_stack]})
+      end
     end
   elseif t == "Continue" then
     if #self._continue_stack > 0 then
-      self:_emit("JUMP", {self._continue_stack[#self._continue_stack]})
+      if self._try_depth > 0 and (#self._try_loop_depth_stack == 0 or #self._continue_stack <= self._try_loop_depth_stack[#self._try_loop_depth_stack]) then
+        self:_emit("TRY_CONTINUE", {self._continue_stack[#self._continue_stack]})
+      else
+        self:_emit("JUMP", {self._continue_stack[#self._continue_stack]})
+      end
     end
   elseif t == "Global" then
     -- global statement: no runtime code needed in Lua (all module-level vars are global)
@@ -1126,16 +1171,20 @@ function IRLowerer:_lower_stmt_impl(node)
       self:_emit("WITH_BEGIN", {})
     end
 
+    local outer_break = #self._break_stack > 0 and self._break_stack[#self._break_stack] or ""
+    local outer_continue = #self._continue_stack > 0 and self._continue_stack[#self._continue_stack] or ""
+    table.insert(self._try_loop_depth_stack, #self._break_stack)
     self._try_depth = self._try_depth + #mgrs
     for _, s in ipairs(node.body or {}) do
       self:lower_stmt(s)
     end
     self._try_depth = self._try_depth - #mgrs
+    table.remove(self._try_loop_depth_stack)
 
     for i = #mgrs, 1, -1 do
       self:_emit("WITH_END", {mgrs[i]})
     end
-    self:_emit("TRY_UNWIND", {tostring(self._try_depth)})
+    self:_emit("TRY_UNWIND", {tostring(self._try_depth), outer_break, outer_continue})
   elseif t == "Yield" then
     local val_tmp = node.value and self:lower_expr(node.value) or nil
     local args = {"coroutine.yield"}
@@ -1255,7 +1304,7 @@ function IRLowerer:_lower_expr_impl(node)
        and node.value.func and node.value.func._type == "Attribute" and node.value.func.attr == "partition"
        and node.value.args and #node.value.args == 1
        and (not node.value.keywords or #node.value.keywords == 0)
-       and node.slice and node.slice._type == "Constant" and node.slice.value == 0 then
+       and node.slice and node.slice._type == "Constant" and (node.slice.value == 0 or node.slice.value == 1 or node.slice.value == -3) then
       local s_tmp = self:lower_expr(node.value.func.value)
       local sep_tmp = self:lower_expr(node.value.args[1])
       local res = self:_new_tmp()
@@ -1446,6 +1495,12 @@ function IRLowerer:_lower_expr_impl(node)
       local res = self:_new_tmp()
       self:_emit("CONST", {nil}, res)
       return res
+    end
+
+    if node.func and node.func._type == "Attribute" and node.func.attr == "encode"
+       and ((not node.args or #node.args == 0) or (#node.args == 1 and node.args[1]._type == "Constant" and (node.args[1].value == "utf8" or node.args[1].value == "utf-8" or node.args[1].value == "ascii" or node.args[1].value == "latin1" or node.args[1].value == "latin-1")))
+       and (not node.keywords or #node.keywords == 0) then
+      return self:lower_expr(node.func.value)
     end
 
     if node.func._type == "Name" and node.func.id == "super" and (not node.args or #node.args == 0) then
@@ -1709,7 +1764,10 @@ function IRLowerer:_lower_expr_impl(node)
     local prev_fn = self._cur_fn
     local prev_block = self._cur_block
     local prev_try_depth = self._try_depth
+    local prev_try_loop_depth = {}
+    for _, d in ipairs(self._try_loop_depth_stack) do table.insert(prev_try_loop_depth, d) end
     self._try_depth = 0
+    self._try_loop_depth_stack = {}
     self._cur_fn = fn
     local b = Block.new("entry")
     table.insert(fn.blocks, b)
@@ -1732,6 +1790,7 @@ function IRLowerer:_lower_expr_impl(node)
     self._cur_fn = prev_fn
     self._cur_block = prev_block
     self._try_depth = prev_try_depth
+    self._try_loop_depth_stack = prev_try_loop_depth
     -- Emit MAKE_FUNCTION that references the nested function
     local res = self:_new_tmp()
     self:_emit("MAKE_FUNCTION", {fn.name}, res)

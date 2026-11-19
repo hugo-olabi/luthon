@@ -88,6 +88,7 @@ class IRLowerer:
         self._break_stack = []
         self._continue_stack = []
         self._try_depth = 0
+        self._try_loop_depth_stack = []
         self._imported_modules = set()
 
     def _new_tmp(self):
@@ -350,7 +351,9 @@ class IRLowerer:
             prev_fn = self._cur_fn
             prev_block = self._cur_block
             prev_try_depth = self._try_depth
+            prev_try_loop_depth = list(self._try_loop_depth_stack)
             self._try_depth = 0
+            self._try_loop_depth_stack = []
             self._cur_fn = fn
             b = Block(label="entry")
             fn.blocks.append(b)
@@ -427,6 +430,7 @@ class IRLowerer:
                 self._cur_fn = prev_fn
                 self._cur_block = prev_block
             self._try_depth = prev_try_depth
+            self._try_loop_depth_stack = prev_try_loop_depth
 
             if is_nested:
                 fn_tmp = self._new_tmp()
@@ -482,26 +486,57 @@ class IRLowerer:
         elif isinstance(node, ast.Pass):
             pass
         elif isinstance(node, ast.Try):
-            if (
-                len(node.body) == 1
+            is_inet_pton = False
+            fam_node = None
+            ip_node = None
+            if len(node.body) == 1 and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Call):
+                call = node.body[0].value
+                if (
+                    isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "inet_pton"
+                    and len(call.args) >= 2
+                    and len(node.handlers) == 1
+                    and (node.handlers[0].type is None or (isinstance(node.handlers[0].type, ast.Name) and node.handlers[0].type.id in ("OSError", "Exception", "error")))
+                    and len(node.handlers[0].body) == 1
+                    and isinstance(node.handlers[0].body[0], ast.Return)
+                    and isinstance(node.handlers[0].body[0].value, ast.Constant)
+                    and node.handlers[0].body[0].value.value is False
+                    and len(node.orelse) == 1
+                    and isinstance(node.orelse[0], ast.Return)
+                    and isinstance(node.orelse[0].value, ast.Constant)
+                    and node.orelse[0].value.value is True
+                ):
+                    is_inet_pton = True
+                    fam_node = call.args[0]
+                    ip_node = call.args[1]
+            elif (
+                len(node.body) == 2
                 and isinstance(node.body[0], ast.Expr)
                 and isinstance(node.body[0].value, ast.Call)
-                and isinstance(node.body[0].value.func, ast.Attribute)
-                and node.body[0].value.func.attr == "inet_pton"
-                and len(node.body[0].value.args) >= 2
+                and isinstance(node.body[1], ast.Return)
+                and isinstance(node.body[1].value, ast.Constant)
+                and node.body[1].value.value is True
                 and len(node.handlers) == 1
-                and (node.handlers[0].type is None or (isinstance(node.handlers[0].type, ast.Name) and node.handlers[0].type.id in ("OSError", "Exception")))
+                and (node.handlers[0].type is None or (isinstance(node.handlers[0].type, ast.Name) and node.handlers[0].type.id in ("OSError", "Exception", "error")))
                 and len(node.handlers[0].body) == 1
                 and isinstance(node.handlers[0].body[0], ast.Return)
                 and isinstance(node.handlers[0].body[0].value, ast.Constant)
                 and node.handlers[0].body[0].value.value is False
-                and len(node.orelse) == 1
-                and isinstance(node.orelse[0], ast.Return)
-                and isinstance(node.orelse[0].value, ast.Constant)
-                and node.orelse[0].value.value is True
+                and len(node.orelse) == 0
             ):
-                fam_tmp = self.lower_expr(node.body[0].value.args[0])
-                ip_tmp = self.lower_expr(node.body[0].value.args[1])
+                call = node.body[0].value
+                if (
+                    isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "inet_pton"
+                    and len(call.args) >= 2
+                ):
+                    is_inet_pton = True
+                    fam_node = call.args[0]
+                    ip_node = call.args[1]
+
+            if is_inet_pton:
+                fam_tmp = self.lower_expr(fam_node)
+                ip_tmp = self.lower_expr(ip_node)
                 chk_tmp = self._new_tmp()
                 self._emit("CALL", ["_socket_mod.inet_pton_bool", fam_tmp, ip_tmp], result=chk_tmp)
                 self._emit("RETURN", [chk_tmp])
@@ -513,6 +548,10 @@ class IRLowerer:
                 self.lower_stmt(outer)
                 return
 
+            outer_break = self._break_stack[-1] if self._break_stack else ""
+            outer_continue = self._continue_stack[-1] if self._continue_stack else ""
+            self._try_loop_depth_stack.append(len(self._break_stack))
+
             if node.finalbody:
                 try_label = self._new_label("try")
                 try_block = self._new_block(try_label)
@@ -522,6 +561,7 @@ class IRLowerer:
                 for s in node.body:
                     self.lower_stmt(s)
                 self._try_depth -= 1
+                self._try_loop_depth_stack.pop()
                 self._emit("FINALLY_BEGIN", [], result=self._new_tmp())
                 finally_label = self._new_label("finally")
                 self._cur_block = self._new_block(finally_label)
@@ -530,7 +570,7 @@ class IRLowerer:
                 self._emit("FINALLY_END", [], result=self._new_tmp())
                 end_label = self._new_label("end_try")
                 self._cur_block = self._new_block(end_label)
-                self._emit("TRY_UNWIND", [str(self._try_depth)])
+                self._emit("TRY_UNWIND", [str(self._try_depth), outer_break, outer_continue])
                 return
 
             try_label = self._new_label("try")
@@ -541,6 +581,7 @@ class IRLowerer:
             for s in node.body:
                 self.lower_stmt(s)
             self._try_depth -= 1
+            self._try_loop_depth_stack.pop()
             self._emit("END_TRY", [], result=self._new_tmp())
             for h in node.handlers:
                 handler_lbl = self._new_label("except")
@@ -567,7 +608,7 @@ class IRLowerer:
             self._emit("TRY_CLOSE", [], result=self._new_tmp())
             end_label = self._new_label("end_try")
             self._cur_block = self._new_block(end_label)
-            self._emit("TRY_UNWIND", [str(self._try_depth)])
+            self._emit("TRY_UNWIND", [str(self._try_depth), outer_break, outer_continue])
         elif isinstance(node, ast.ClassDef):
             # Check for @dataclass or @struct / @native_struct decorator
             is_dataclass = False
@@ -658,7 +699,9 @@ class IRLowerer:
                     prev_fn = self._cur_fn
                     prev_block = self._cur_block
                     prev_try_depth = self._try_depth
+                    prev_try_loop_depth = list(self._try_loop_depth_stack)
                     self._try_depth = 0
+                    self._try_loop_depth_stack = []
                     self._cur_fn = fn
                     b = Block(label="entry")
                     fn.blocks.append(b)
@@ -717,6 +760,7 @@ class IRLowerer:
                         self._cur_fn = prev_fn
                         self._cur_block = prev_block
                     self._try_depth = prev_try_depth
+                    self._try_loop_depth_stack = prev_try_loop_depth
                     self._cur_method_first_arg = prev_method_first_arg
 
                     # Register method parameters for keyword call resolution
@@ -863,14 +907,18 @@ class IRLowerer:
                 mgrs.append(mgr_tmp)
                 self._emit("WITH_BEGIN", [])
 
+            outer_break = self._break_stack[-1] if self._break_stack else ""
+            outer_continue = self._continue_stack[-1] if self._continue_stack else ""
+            self._try_loop_depth_stack.append(len(self._break_stack))
             self._try_depth += len(mgrs)
             for s in node.body:
                 self.lower_stmt(s)
             self._try_depth -= len(mgrs)
+            self._try_loop_depth_stack.pop()
 
             for mgr_tmp in reversed(mgrs):
                 self._emit("WITH_END", [mgr_tmp])
-            self._emit("TRY_UNWIND", [str(self._try_depth)])
+            self._emit("TRY_UNWIND", [str(self._try_depth), outer_break, outer_continue])
         elif isinstance(node, ast.Raise):
             if node.exc:
                 exc_tmp = self.lower_expr(node.exc)
@@ -895,10 +943,16 @@ class IRLowerer:
             self._cur_block = self._new_block(pass_lbl)
         elif isinstance(node, ast.Break):
             if self._break_stack:
-                self._emit("JUMP", [self._break_stack[-1]])
+                if self._try_depth > 0 and (not self._try_loop_depth_stack or len(self._break_stack) <= self._try_loop_depth_stack[-1]):
+                    self._emit("TRY_BREAK", [self._break_stack[-1]])
+                else:
+                    self._emit("JUMP", [self._break_stack[-1]])
         elif isinstance(node, ast.Continue):
             if self._continue_stack:
-                self._emit("JUMP", [self._continue_stack[-1]])
+                if self._try_depth > 0 and (not self._try_loop_depth_stack or len(self._continue_stack) <= self._try_loop_depth_stack[-1]):
+                    self._emit("TRY_CONTINUE", [self._continue_stack[-1]])
+                else:
+                    self._emit("JUMP", [self._continue_stack[-1]])
         elif isinstance(node, ast.Yield):
             val_tmp = self.lower_expr(node.value) if node.value else None
             args = [val_tmp] if val_tmp else []
@@ -1133,7 +1187,7 @@ class IRLowerer:
                 and len(node.value.args) == 1
                 and not getattr(node.value, "keywords", None)
                 and isinstance(node.slice, ast.Constant)
-                and node.slice.value == 0
+                and node.slice.value in (0, 1, -3)
             ):
                 s_tmp = self.lower_expr(node.value.func.value)
                 sep_tmp = self.lower_expr(node.value.args[0])
@@ -1281,6 +1335,21 @@ class IRLowerer:
                 res = self._new_tmp()
                 self._emit("CONST", [None], result=res)
                 return res
+
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "encode"
+                and (
+                    len(node.args) == 0
+                    or (
+                        len(node.args) == 1
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value in ("utf8", "utf-8", "ascii", "latin1", "latin-1")
+                    )
+                )
+                and not getattr(node, "keywords", None)
+            ):
+                return self.lower_expr(node.func.value)
 
             if isinstance(node.func, ast.Name) and node.func.id == "super" and not node.args:
                 cur_cls = getattr(self, "_cur_class", None)
@@ -1521,7 +1590,9 @@ class IRLowerer:
             prev_fn = self._cur_fn
             prev_block = self._cur_block
             prev_try_depth = self._try_depth
+            prev_try_loop_depth = list(self._try_loop_depth_stack)
             self._try_depth = 0
+            self._try_loop_depth_stack = []
             self._cur_fn = fn
             b = Block(label="entry")
             fn.blocks.append(b)
@@ -1542,6 +1613,7 @@ class IRLowerer:
             self._cur_fn = prev_fn
             self._cur_block = prev_block
             self._try_depth = prev_try_depth
+            self._try_loop_depth_stack = prev_try_loop_depth
             # Emit MAKE_FUNCTION that references the nested function
             t = self._new_tmp()
             self._emit("MAKE_FUNCTION", [fn.name], result=t)

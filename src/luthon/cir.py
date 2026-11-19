@@ -709,7 +709,7 @@ def analyze_loop_vectorizability(
 
     for b in body_blocks:
         for ins in b.instrs:
-            if ins.op in ("TRY_BEGIN", "END_TRY", "TRY_RETURN"):
+            if ins.op in ("TRY_BEGIN", "END_TRY", "TRY_RETURN", "TRY_BREAK", "TRY_CONTINUE"):
                 return VectorizationRecord(fn.name, header_lbl, "REJECTED", reason="Exception handling in loop body", line_number=line_no)
             if ins.op == "RETURN":
                 return VectorizationRecord(fn.name, header_lbl, "REJECTED", reason="Early return in loop body", line_number=line_no)
