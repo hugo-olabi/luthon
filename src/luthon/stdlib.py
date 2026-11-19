@@ -1327,6 +1327,9 @@ function frozenset(t)
 end
 
 function range(a, b, step)
+  a = tonumber(a) or a
+  if b ~= nil then b = tonumber(b) or b end
+  if step ~= nil then step = tonumber(step) or step end
   if b == nil then a, b = 0, a; step = 1 end
   if step == nil then step = 1 end
   if step == 0 then error("ValueError: range() arg 3 must not be zero") end
@@ -3729,7 +3732,12 @@ local function _make_pcre2_match(subj, code, mdata, count, named_groups)
   local ovec_ptr = _pcre2_lib.pcre2_get_ovector_pointer_8(mdata)
   local ovec = {}
   for i = 0, count * 2 - 1 do
-    ovec[i] = tonumber(ovec_ptr[i])
+    local v = ovec_ptr[i]
+    if v >= 0x7fffffffffffffffULL or tonumber(v) > 1e18 then
+      ovec[i] = -1
+    else
+      ovec[i] = tonumber(v)
+    end
   end
   local m = {
     _subj = subj,
@@ -3745,37 +3753,44 @@ local function _make_pcre2_match(subj, code, mdata, count, named_groups)
       g_num = _pcre2_lib.pcre2_substring_number_from_name_8(self._code, idx)
       if g_num < 0 then error("no such group: " .. idx) end
     end
-    if g_num < 0 or g_num >= self._count then return nil end
+    if g_num < 0 or g_num >= self._count then return _G._luthon_none or _G.None end
     local s = tonumber(self._ovec[g_num * 2])
     local e = tonumber(self._ovec[g_num * 2 + 1])
-    if s < 0 or e < 0 then return nil end
+    if s < 0 or e < 0 then return _G._luthon_none or _G.None end
     return self._subj:sub(s + 1, e)
   end
-  function m:groups()
+  function m:groups(default)
+    default = (default ~= nil) and default or (_G._luthon_none or _G.None)
     local res = {}
     for i = 1, self._count - 1 do
-      table.insert(res, self:group(i))
+      local val = self:group(i)
+      table.insert(res, (val ~= nil and val ~= (_G._luthon_none or _G.None)) and val or default)
     end
-    return res
+    rawset(res, "_len", self._count - 1)
+    return setmetatable(res, _tuple_mt or _list_mt or {})
   end
-  function m:groupdict()
+  function m:groupdict(default)
+    default = (default ~= nil) and default or (_G._luthon_none or _G.None)
     local d = {}
     for _, gname in ipairs(self._named_groups or {}) do
-      d[gname] = self:group(gname)
+      local val = self:group(gname)
+      d[gname] = (val ~= nil and val ~= (_G._luthon_none or _G.None)) and val or default
     end
     return setmetatable(d, _dict_mt or {})
   end
   function m:start(idx)
     idx = idx or 0
-    return tonumber(self._ovec[idx * 2])
+    local v = tonumber(self._ovec[idx * 2])
+    return (v == nil or v < 0) and -1 or v
   end
   function m:end_pos(idx)
     idx = idx or 0
-    return tonumber(self._ovec[idx * 2 + 1])
+    local v = tonumber(self._ovec[idx * 2 + 1])
+    return (v == nil or v < 0) and -1 or v
   end
   m["end"] = m.end_pos
   function m:span(idx)
-    return {self:start(idx), self:end_pos(idx)}
+    return setmetatable({self:start(idx), self:end_pos(idx)}, _tuple_mt or {})
   end
   return m
 end
@@ -3789,10 +3804,13 @@ function _Pattern:search(s, pos)
     mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
     self._mdata = ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8)
   end
-  local rc
-  if _pcre2_lib.pcre2_jit_match_8 then
+  local rc = -1
+  if self._jit_ok and _pcre2_lib.pcre2_jit_match_8 then
     rc = _pcre2_lib.pcre2_jit_match_8(self._code, s, #s, pos, 0, mdata, nil)
-  else
+  end
+  if rc < 0 and rc ~= -1 then
+    rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+  elseif not self._jit_ok then
     rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
   end
   if rc > 0 then
@@ -3810,11 +3828,14 @@ function _Pattern:match(s, pos)
     mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(self._code, nil)
     self._mdata = ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8)
   end
-  local rc
   local opts = 0x80000000 -- PCRE2_ANCHORED
-  if _pcre2_lib.pcre2_jit_match_8 then
+  local rc = -1
+  if self._jit_ok and _pcre2_lib.pcre2_jit_match_8 then
     rc = _pcre2_lib.pcre2_jit_match_8(self._code, s, #s, pos, opts, mdata, nil)
-  else
+  end
+  if rc < 0 and rc ~= -1 then
+    rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, opts, mdata, nil)
+  elseif not self._jit_ok then
     rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, opts, mdata, nil)
   end
   if rc > 0 then
@@ -3834,20 +3855,28 @@ function _Pattern:fullmatch(s)
 end
 
 function _Pattern:findall(s)
-  if s == nil then return {} end
+  if s == nil then return setmetatable({}, _list_mt) end
   s = tostring(s)
   local res = {}
   local pos = 0
   while pos <= #s do
     local m = self:search(s, pos)
     if not m then break end
-    local g = m:group(1) or m:group(0)
-    table.insert(res, g)
+    local item
+    if m._count <= 1 then
+      item = m:group(0)
+    elseif m._count == 2 then
+      item = m:group(1)
+    else
+      item = m:groups()
+    end
+    table.insert(res, item)
     local next_pos = m:end_pos(0)
     if next_pos == pos then next_pos = pos + 1 end
     pos = next_pos
   end
-  return res
+  rawset(res, "_len", #res)
+  return setmetatable(res, _list_mt)
 end
 
 function _Pattern:sub(repl, s, count)
@@ -3894,10 +3923,13 @@ function _Pattern:split(s, maxsplit)
       self._mdata = ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8)
     end
     while pos <= #s do
-      local rc
-      if _pcre2_lib.pcre2_jit_match_8 then
+      local rc = -1
+      if self._jit_ok and _pcre2_lib.pcre2_jit_match_8 then
         rc = _pcre2_lib.pcre2_jit_match_8(self._code, s, #s, pos, 0, mdata, nil)
-      else
+      end
+      if rc < 0 and rc ~= -1 then
+        rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
+      elseif not self._jit_ok then
         rc = _pcre2_lib.pcre2_match_8(self._code, s, #s, pos, 0, mdata, nil)
       end
       if rc <= 0 or (maxsplit > 0 and splits >= maxsplit) then
@@ -3908,6 +3940,21 @@ function _Pattern:split(s, maxsplit)
       local m_start = tonumber(ovec[0])
       local m_end = tonumber(ovec[1])
       table.insert(res, s:sub(pos + 1, m_start))
+      if rc > 1 then
+        for g = 1, rc - 1 do
+          local gs = ovec[g * 2]
+          local ge = ovec[g * 2 + 1]
+          if gs >= 0x7fffffffffffffffULL or tonumber(gs) > 1e18 or gs == ge then
+            if gs >= 0x7fffffffffffffffULL or tonumber(gs) > 1e18 then
+              table.insert(res, _G._luthon_none or _G.None)
+            else
+              table.insert(res, "")
+            end
+          else
+            table.insert(res, s:sub(tonumber(gs) + 1, tonumber(ge)))
+          end
+        end
+      end
       splits = splits + 1
       if m_end == pos then pos = pos + 1 else pos = m_end end
       if pos > #s then
@@ -3915,6 +3962,7 @@ function _Pattern:split(s, maxsplit)
         break
       end
     end
+    rawset(res, "_len", #res)
     return setmetatable(res, _list_mt)
   end
   return string.split(s, tostring(self.pattern))
@@ -3936,7 +3984,13 @@ re.compile = function(pattern, flags)
     local pat_str = tostring(pattern)
     local code = _pcre2_lib.pcre2_compile_8(pat_str, #pat_str, opts, errcode, erroff, nil)
     if code ~= nil then
-      pcall(function() _pcre2_lib.pcre2_jit_compile_8(code, 1) end)
+      local jit_ok = false
+      if _pcre2_lib.pcre2_jit_compile_8 then
+        pcall(function()
+          local jrc = _pcre2_lib.pcre2_jit_compile_8(code, 1)
+          if jrc == 0 then jit_ok = true end
+        end)
+      end
       local mdata = _pcre2_lib.pcre2_match_data_create_from_pattern_8(code, nil)
       local named_groups = {}
       for gname in pat_str:gmatch("%(%?P<([%a_][%w_]*)>") do
@@ -3945,6 +3999,7 @@ re.compile = function(pattern, flags)
       return setmetatable({
         _code = ffi.gc(code, _pcre2_lib.pcre2_code_free_8),
         _mdata = mdata and ffi.gc(mdata, _pcre2_lib.pcre2_match_data_free_8) or nil,
+        _jit_ok = jit_ok,
         pattern = pattern,
         flags = flags,
         _named_groups = named_groups
@@ -5649,11 +5704,15 @@ local function _json_dumps_val(x, buf)
   elseif t == "boolean" then
     buf[#buf+1] = x and "true" or "false"
   elseif t == "table" then
+    local mt = getmetatable(x)
+    local is_dict = (mt and (mt.__dict__ or mt == _dict_mt or (_G._dict_mt and mt == _G._dict_mt))) or rawget(x, "_dict")
     local is_arr = false
-    if getmetatable(x) == _list_mt or rawget(x, "_list") or rawget(x, "_buf") or rawget(x, "_len") ~= nil then
-      is_arr = true
-    elseif #x > 0 then
-      is_arr = true
+    if not is_dict then
+      if (mt and (mt.__list__ or mt.__tuple__ or mt == _list_mt or mt == _tuple_mt or (_G._list_mt and mt == _G._list_mt) or (_G._tuple_mt and mt == _G._tuple_mt))) or rawget(x, "_list") or rawget(x, "_buf") or rawget(x, "_len") ~= nil then
+        is_arr = true
+      elseif #x > 0 then
+        is_arr = true
+      end
     end
     if is_arr then
       buf[#buf+1] = "["
@@ -5669,7 +5728,8 @@ local function _json_dumps_val(x, buf)
       for k, v in pairs(x) do
         if k ~= "_dict" and k ~= "_list" and k ~= "_len" and k ~= "__class__" and k ~= "__type" then
           if not first then buf[#buf+1] = "," else first = false end
-          buf[#buf+1] = _json_escape_str(tostring(k))
+          local k_str = (k == _G._luthon_none or (type(k) == "table" and rawget(k, "__is_none__"))) and "null" or tostring(k)
+          buf[#buf+1] = _json_escape_str(k_str)
           buf[#buf+1] = ":"
           _json_dumps_val(v, buf)
         end
@@ -5856,8 +5916,14 @@ function json._raw_decode(s, idx)
   end
   function parse_number()
     local start = pos
-    while pos <= len and s:sub(pos,pos):match("[%-%.%deE]") do pos = pos + 1 end
-    return tonumber(s:sub(start, pos-1))
+    if s:sub(pos, pos) == "-" then pos = pos + 1 end
+    if s:sub(pos, pos) == "0" and pos < len and s:sub(pos+1, pos+1):match("%d") then
+      error("JSONDecodeError: Leading zeros not allowed", 0)
+    end
+    while pos <= len and s:sub(pos,pos):match("[%-%.%deE+]") do pos = pos + 1 end
+    local num = tonumber(s:sub(start, pos-1))
+    if num == nil then error("JSONDecodeError: Invalid number", 0) end
+    return num
   end
   local val = parse_value()
   return val, pos
@@ -5906,10 +5972,24 @@ json.decode = function(s)
     local out_ctx = ffi.new("void*[1]")
     local root = _luthon_native_lib.luthon_json_parse(s, #s, out_consumed, out_ctx)
     if root ~= nil then
-      local ffi_str_fn = ffi.string
-      local res = _luthon_json_node_to_lua(root, ffi_str_fn)
-      _luthon_native_lib.luthon_json_free(out_ctx[0])
-      return res
+      local consumed = tonumber(out_consumed[0])
+      local trailing = s:sub(consumed + 1)
+      if trailing:match("^%s*$") then
+        local ffi_str_fn = ffi.string
+        local res = _luthon_json_node_to_lua(root, ffi_str_fn)
+        _luthon_native_lib.luthon_json_free(out_ctx[0])
+        return res
+      else
+        _luthon_native_lib.luthon_json_free(out_ctx[0])
+        error("JSONDecodeError: Extra data", 0)
+      end
+    else
+      local ok, val, next_pos = pcall(json._raw_decode, s, 1)
+      if ok and val ~= nil and s:sub(next_pos):match("^%s*$") then
+        return val
+      else
+        error("JSONDecodeError: Failed to parse JSON", 0)
+      end
     end
   end
 
@@ -5924,7 +6004,10 @@ json.decode = function(s)
     end
   end
 
-  local val, _ = json._raw_decode(s, 1)
+  local val, next_pos = json._raw_decode(s, 1)
+  if s:sub(next_pos):match("^%s*$") == nil then
+    error("JSONDecodeError: Extra data", 0)
+  end
   return val
 end
 json.loads = json.decode
