@@ -560,6 +560,10 @@ end
 
 function __luthon_get(t, i)
   if type(t) == "table" then
+    if type(i) ~= "number" then
+      local v = rawget(t, i)
+      if v ~= nil then return v end
+    end
     local mt = getmetatable(t)
     if type(i) == "number" and (mt == nil or mt == _list_mt or mt == _tuple_mt or (mt and (mt.__list__ or mt.__tuple__)) or rawget(t, "_list") or rawget(t, "_tuple")) then
       if i < 0 then i = #t + i + 1 else i = i + 1 end
@@ -965,6 +969,9 @@ function _luthon_slice_desc(lower, upper, step)
 end
 
 function _luthon_slice(obj, lower, upper, step)
+  if type(obj) == "string" and (step == nil or step == 1) and type(lower) == "number" and type(upper) == "number" and lower >= 0 and upper >= 0 then
+    return string.sub(obj, lower + 1, upper)
+  end
   step = step or 1
   if type(obj) == "string" then
     if step == 1 and (lower == nil or (type(lower) == "number" and lower >= 0)) and (upper == nil or (type(upper) == "number" and upper >= 0)) then
@@ -1407,6 +1414,7 @@ function range(a, b, step)
 end
 function len(t)
   if t == nil then return 0 end
+  if type(t) == "string" then return #t end
   if type(t) == "table" then
     if rawget(t, "_len") ~= nil then return rawget(t, "_len") end
     local n = #t
@@ -2110,9 +2118,14 @@ _str_methods = {
     return pos - 1
   end,
   index = function(s, sub, start, stop)
+    if stop == nil and type(start) == "number" and start >= 0 then
+      local pos = _lua_raw_str_find(s, sub, start + 1, true)
+      if pos then return pos - 1 end
+      error("ValueError: substring not found", 0)
+    end
     local idx = _str_methods.find(s, sub, start, stop)
     if idx == -1 then
-      error("ValueError: substring not found")
+      error("ValueError: substring not found", 0)
     end
     return idx
   end,
@@ -2368,6 +2381,167 @@ debug.setmetatable("", {
   __mod = _str_mod
 })
 
+local _fmt_f_s_prec = {
+  [0] = "%.0f %s",
+  [1] = "%.1f %s",
+  [2] = "%.2f %s",
+  [3] = "%.3f %s",
+}
+local _fmt_f_pcnt_prec = {
+  [0] = "%.0f%%",
+  [1] = "%.1f%%",
+  [2] = "%.2f%%",
+  [3] = "%.3f%%",
+}
+
+function _str_mod_prec_s(p, val, unit)
+  local f = _fmt_f_s_prec[p]
+  if not f then
+    f = "%." .. tostring(p) .. "f %s"
+    _fmt_f_s_prec[p] = f
+  end
+  return string.format(f, val, unit)
+end
+_G._str_mod_prec_s = _str_mod_prec_s
+
+function _str_mod_prec_pcnt(p, val)
+  local f = _fmt_f_pcnt_prec[p]
+  if not f then
+    f = "%." .. tostring(p) .. "f%%"
+    _fmt_f_pcnt_prec[p] = f
+  end
+  return string.format(f, val)
+end
+_G._str_mod_prec_pcnt = _str_mod_prec_pcnt
+
+function _str_mod_d_s(d, s)
+  return string.format("%d %s", d, s)
+end
+_G._str_mod_d_s = _str_mod_d_s
+
+local _fmt_direct_cache = {
+  ["%.*f %s"] = _str_mod_prec_s,
+  ["%.*f%%"] = _str_mod_prec_pcnt,
+  ["%d %s"] = _str_mod_d_s,
+  ["%s"] = function(a)
+    return tostring(a)
+  end,
+}
+
+function _str_mod_direct(fmt, ...)
+  if type(fmt) ~= "string" then
+    error("TypeError: unsupported operand type(s) for %")
+  end
+  local fn = _fmt_direct_cache[fmt]
+  if fn then
+    return fn(...)
+  end
+  return string.format(fmt, ...)
+end
+_G._str_mod_direct = _str_mod_direct
+
+function _str_mod_single(fmt, arg)
+  if type(fmt) ~= "string" then
+    error("TypeError: unsupported operand type(s) for %")
+  end
+  local fn = _fmt_direct_cache[fmt]
+  if fn then
+    return fn(arg)
+  end
+  if type(arg) == "table" and (rawget(arg, "__is_tuple") or (getmetatable(arg) and getmetatable(arg).__tuple__)) then
+    return _str_mod(fmt, arg)
+  end
+  return string.format(fmt, arg)
+end
+_G._str_mod_single = _str_mod_single
+
+local function _sort_keys_fallback(keys)
+  if not pcall(table.sort, keys) then
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  end
+end
+
+function _luthon_sorted_dict_keys(d)
+  local keys = {}
+  for k in pairs(d) do keys[#keys + 1] = k end
+  local n = #keys
+  if n == 2 then
+    local a, b = keys[1], keys[2]
+    if type(a) == type(b) then
+      if a > b then keys[1], keys[2] = b, a end
+    else
+      _sort_keys_fallback(keys)
+    end
+    return keys
+  elseif n == 3 then
+    local a, b, c = keys[1], keys[2], keys[3]
+    if type(a) == type(b) and type(b) == type(c) then
+      if a > b then a, b = b, a end
+      if b > c then
+        b, c = c, b
+        if a > b then a, b = b, a end
+      end
+      keys[1], keys[2], keys[3] = a, b, c
+    else
+      _sort_keys_fallback(keys)
+    end
+    return keys
+  elseif n <= 1 then
+    return keys
+  end
+  _sort_keys_fallback(keys)
+  return keys
+end
+_G._luthon_sorted_dict_keys = _luthon_sorted_dict_keys
+
+function _luthon_raw_len(t)
+  return #t
+end
+_G._luthon_raw_len = _luthon_raw_len
+
+local _len_cache = {
+  [0]="0",[1]="1",[2]="2",[3]="3",[4]="4",[5]="5",[6]="6",[7]="7",[8]="8",[9]="9",
+  [10]="10",[11]="11",[12]="12",[13]="13",[14]="14",[15]="15",[16]="16",[17]="17",
+  [18]="18",[19]="19",[20]="20",[21]="21",[22]="22",[23]="23",[24]="24",[25]="25",
+  [26]="26",[27]="27",[28]="28",[29]="29",[30]="30",[31]="31",[32]="32"
+}
+
+function _luthon_str_len(x)
+  local n
+  if type(x) == "string" then
+    n = #x
+  elseif type(x) == "table" then
+    n = rawget(x, "_len") or #x
+  else
+    n = len(x)
+  end
+  return _len_cache[n] or tostring(n)
+end
+_G._luthon_str_len = _luthon_str_len
+
+function _luthon_fast_append(obj, val)
+  if type(obj) == "table" then
+    local mt = getmetatable(obj)
+    if mt == _list_mt or (mt and mt.__list__) or (mt == nil and not rawget(obj, "_buf")) then
+      obj[#obj + 1] = val
+      return nil
+    end
+    local ap = obj.append
+    if ap then return ap(obj, val) end
+  end
+  error("AttributeError: object has no attribute 'append'", 0)
+end
+_G._luthon_fast_append = _luthon_fast_append
+
+function _luthon_fast_join(sep, seq)
+  if type(seq) == "table" then
+    local ok, res = pcall(table.concat, seq, sep)
+    if ok then return res end
+  end
+  return _str_methods.join(sep, seq)
+end
+_G._luthon_fast_join = _luthon_fast_join
+
 local _fn_attrs = {}
 debug.setmetatable(function() end, {
   __index = function(f, k)
@@ -2410,6 +2584,27 @@ function make_coroutine(fn, ...)
   return co
 end
 
+local function _wrap_anext(t)
+  return function() return t:__anext__() end
+end
+
+local function _wrap_aiter(it)
+  return function() return it:__anext__() end
+end
+
+local function _wrap_py_iter(lib, it, pb)
+  return function()
+    local item = lib.PyIter_Next(it)
+    if item == nil then
+      lib.Py_DecRef(it)
+      return nil
+    end
+    local res = pb.py_to_lua(item)
+    lib.Py_DecRef(item)
+    return res
+  end
+end
+
 function iter(t)
   if t == nil or t == _G._luthon_none then return _empty_iter end
   if type(t) == "table" then
@@ -2423,12 +2618,12 @@ function iter(t)
       return _empty_iter
     end
     if t.__anext__ then
-      return function() return t:__anext__() end
+      return _wrap_anext(t)
     end
     if t.__aiter__ then
       local it = t:__aiter__()
       if type(it) == "table" and it.__anext__ then
-        return function() return it:__anext__() end
+        return _wrap_aiter(it)
       end
       return it
     end
@@ -2439,16 +2634,7 @@ function iter(t)
         local lib = pb.get_lib()
         local it = lib.PyObject_GetIter(t._py)
         if it ~= nil then
-          return function()
-            local item = lib.PyIter_Next(it)
-            if item == nil then
-              lib.Py_DecRef(it)
-              return nil
-            end
-            local res = pb.py_to_lua(item)
-            lib.Py_DecRef(item)
-            return res
-          end
+          return _wrap_py_iter(lib, it, pb)
         end
       end
     end
@@ -2485,39 +2671,48 @@ local _raw_str = function(x)
   if x == true then return "True" end
   return tostring(x)
 end
-local _raw_int = function(x, base)
+
+function _luthon_str(x)
+  local tx = type(x)
+  if tx == "string" then return x
+  elseif tx == "number" then return tostring(x)
+  elseif tx == "boolean" then return x and "True" or "False"
+  elseif x == nil or x == _G._luthon_none then return "None"
+  end
+  return _raw_str(x)
+end
+_G._luthon_str = _luthon_str
+function _luthon_fast_int(x)
+  if type(x) == "number" then return math.floor(x) end
+  local num = tonumber(x)
+  if num ~= nil then return math.floor(num) end
   if x == nil then return 0 end
   if type(x) == "boolean" then return x and 1 or 0 end
-  if type(x) == "string" then
-    x = x:match("^%s*(.-)%s*$")
-  end
-  local num = base and tonumber(x, base) or tonumber(x)
-  if num == nil then
+  local ve = _G.ValueError or ValueError
+  if ve then error(ve("invalid literal for int(): " .. tostring(x)), 0) end
+  error("ValueError: invalid literal for int(): " .. tostring(x), 0)
+end
+_G._luthon_fast_int = _luthon_fast_int
+
+local _raw_int = function(x, base)
+  if base ~= nil then
+    local num = tonumber(x, base)
+    if num ~= nil then return math.floor(num) end
     local ve = _G.ValueError or ValueError
-    if ve then
-      error(ve("invalid literal for int(): " .. tostring(x)), 0)
-    else
-      error("ValueError: invalid literal for int(): " .. tostring(x), 0)
-    end
+    if ve then error(ve("invalid literal for int(): " .. tostring(x)), 0) end
+    error("ValueError: invalid literal for int(): " .. tostring(x), 0)
   end
-  return math.floor(num)
+  return _luthon_fast_int(x)
 end
 local _raw_float = function(x)
+  if type(x) == "number" then return x end
+  local num = tonumber(x)
+  if num ~= nil then return num end
   if x == nil then return 0.0 end
   if type(x) == "boolean" then return x and 1.0 or 0.0 end
-  if type(x) == "string" then
-    x = x:match("^%s*(.-)%s*$")
-  end
-  local num = tonumber(x)
-  if num == nil then
-    local ve = _G.ValueError or ValueError
-    if ve then
-      error(ve("could not convert string to float: " .. tostring(x)), 0)
-    else
-      error("ValueError: could not convert string to float: " .. tostring(x), 0)
-    end
-  end
-  return num
+  local ve = _G.ValueError or ValueError
+  if ve then error(ve("could not convert string to float: " .. tostring(x)), 0) end
+  error("ValueError: could not convert string to float: " .. tostring(x), 0)
 end
 function abs(x) return math.abs(x) end
 function repr(x)
@@ -2602,32 +2797,7 @@ bytes = _create_builtin_type("bytes", _raw_bytes)
 NoneType = _create_builtin_type("NoneType", function() return None end)
 object = _create_builtin_type("object", function() return {} end)
 
-_luthon_type = _create_builtin_type("type", function(x, ...)
-  if select("#", ...) > 0 then
-    local bases, dict_cls = ...
-    local name = x
-    local cls = dict_cls or {}
-    cls.__name__ = name
-    cls.__name = name
-    if bases and #bases > 0 then
-      cls.__base__ = bases[1]
-    end
-    cls.__index = cls
-    cls.__instance_mt = {__index = cls}
-    setmetatable(cls, {
-      __index = function(t, k)
-        local b = rawget(t, '__base__')
-        return b and b[k]
-      end,
-      __call = function(self, ...)
-        local instance = setmetatable({__class__ = cls}, cls.__instance_mt)
-        if cls.__init__ then cls.__init__(instance, ...) end
-        return instance
-      end,
-      __tostring = function() return "<class '" .. name .. "'>" end
-    })
-    return cls
-  end
+local function _luthon_fast_type(x)
   if x == nil or x == _G._luthon_none or (type(x) == "table" and rawget(x, "__is_none__") == true) then return _builtin_types["NoneType"] end
   local lt = type(x)
   if lt == "number" then
@@ -2658,6 +2828,36 @@ _luthon_type = _create_builtin_type("type", function(x, ...)
     return dict
   end
   return _builtin_types["object"]
+end
+_G._luthon_fast_type = _luthon_fast_type
+
+_luthon_type = _create_builtin_type("type", function(x, ...)
+  if select("#", ...) > 0 then
+    local bases, dict_cls = ...
+    local name = x
+    local cls = dict_cls or {}
+    cls.__name__ = name
+    cls.__name = name
+    if bases and #bases > 0 then
+      cls.__base__ = bases[1]
+    end
+    cls.__index = cls
+    cls.__instance_mt = {__index = cls}
+    setmetatable(cls, {
+      __index = function(t, k)
+        local b = rawget(t, '__base__')
+        return b and b[k]
+      end,
+      __call = function(self, ...)
+        local instance = setmetatable({__class__ = cls}, cls.__instance_mt)
+        if cls.__init__ then cls.__init__(instance, ...) end
+        return instance
+      end,
+      __tostring = function() return "<class '" .. name .. "'>" end
+    })
+    return cls
+  end
+  return _luthon_fast_type(x)
 end)
 
 _luthon_type.__class__ = _luthon_type
@@ -2915,7 +3115,11 @@ function any(t) local n=#t; for i=1,n do if t[i] then return true end end; retur
 function all(t) local n=#t; for i=1,n do if not t[i] then return false end end; return true end
 
 local _py_builtins = nil
+local _tr_cache = {}
 _ = _ or function(s)
+  local cached = _tr_cache[s]
+  if cached ~= nil then return cached end
+  local res = s
   if _py_builtins == nil then
     local ok, pb = pcall(require, "src/luthon/lua/pybridge")
     if ok and pb and pb.is_available() then
@@ -2925,13 +3129,19 @@ _ = _ or function(s)
     if not _py_builtins then _py_builtins = false end
   end
   if _py_builtins and _py_builtins._ then
-    local ok_call, res = pcall(_py_builtins._, s)
-    if ok_call and res ~= nil then return res end
+    local ok_call, r = pcall(_py_builtins._, s)
+    if ok_call and r ~= nil then res = r end
   end
-  return s
+  _tr_cache[s] = res
+  return res
 end
 
+local _tr_plural_cache = {}
 _n = _n or function(singular, plural, n)
+  local key = tostring(singular) .. "\0" .. tostring(plural) .. "\0" .. tostring(n)
+  local cached = _tr_plural_cache[key]
+  if cached ~= nil then return cached end
+  local res = (n == 1) and singular or plural
   if _py_builtins == nil then
     local ok, pb = pcall(require, "src/luthon/lua/pybridge")
     if ok and pb and pb.is_available() then
@@ -2941,10 +3151,11 @@ _n = _n or function(singular, plural, n)
     if not _py_builtins then _py_builtins = false end
   end
   if _py_builtins and _py_builtins.ngettext then
-    local ok_call, res = pcall(_py_builtins.ngettext, singular, plural, n)
-    if ok_call and res ~= nil then return res end
+    local ok_call, r = pcall(_py_builtins.ngettext, singular, plural, n)
+    if ok_call and r ~= nil then res = r end
   end
-  if n == 1 then return singular else return plural end
+  _tr_plural_cache[key] = res
+  return res
 end
 ngettext = ngettext or _n
 
@@ -3104,13 +3315,13 @@ function isinstance(val, cls)
     return false
   end
   if t == "number" then
-    if cls == "int" or cls == "float" or cls == int or cls == float then return true end
+    if cls == "int" or cls == "float" or cls == int or cls == float or cls == _luthon_fast_int then return true end
     local name = type(cls) == "string" and cls or (type(cls) == "table" and (rawget(cls, "__name__") or cls.__name__))
     if name == "Number" or name == "Real" or name == "Complex" then return true end
     if (name == "Integral" or name == "Rational") and math.floor(val) == val then return true end
     return false
   end
-  if t == "string" then return cls == "str" or cls == str end
+  if t == "string" then return cls == "str" or cls == str or cls == _luthon_str end
   if t == "boolean" then return cls == "bool" or cls == bool end
   if t == "table" then
     if cls == "tuple" or cls == tuple then return rawget(val, "_tuple") or (getmetatable(val) and (getmetatable(val).__tuple or getmetatable(val) == _tuple_mt)) end
