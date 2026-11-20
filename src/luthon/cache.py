@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-LUTHON_VERSION = "0.9.0"
+LUTHON_VERSION = "0.10.0"
 
 _CACHED_COMPILER_HASH = None
 
