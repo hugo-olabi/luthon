@@ -340,7 +340,7 @@ local function _emit(ins)
     local t = args[1]
     local idx = args[2]
     return ins.result .. " = _luthon_subscr_fast(" .. t .. ", " .. idx .. ")"
-  elseif o == "SUBSCR_FAST_INDEX" then
+  elseif o == "SUBSCR_FAST_INDEX" or o == "SUBSCR_FAST_VAR_INDEX" then
     local t = args[1]
     local idx = tonumber(args[2])
     if idx then

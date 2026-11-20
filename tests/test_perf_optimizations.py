@@ -593,6 +593,27 @@ print(check_truthiness([1, 2], "hello"))
     assert "#" in body
 
 
+def test_variable_sequence_indexing_fast_var_path():
+    code = """
+def sum_indexed_list(nums: list, indices: list[int]):
+    s = 0
+    for i in indices:
+        s += nums[i]
+    return s
+
+print(sum_indexed_list([10, 20, 30, 40], [0, 2, 3]))
+"""
+    out = _run_lua(code, optimize=True)
+    assert out == "80"
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function sum_indexed_list")[1].split("local function _luthon_module_entry")[0]
+    assert "_luthon_subscr_fast" not in body
+    assert "__luthon_get" not in body
+    assert "+ 1]" in body
+
+
+
 
 
 

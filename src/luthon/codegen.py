@@ -248,7 +248,7 @@ end"""
         t = ins.args[0]
         idx = ins.args[1]
         return f"{ins.result} = _luthon_subscr_fast({t}, {idx})"
-    if o == "SUBSCR_FAST_INDEX":
+    if o in ("SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX"):
         t = ins.args[0]
         idx = ins.args[1]
         try:

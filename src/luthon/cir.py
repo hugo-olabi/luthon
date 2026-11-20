@@ -484,7 +484,7 @@ class TypeInferrer:
                 self._attr_sources[str(ins.result)] = (str(ins.args[0]), str(ins.args[1]))
             return {ANY_TYPE}
 
-        elif op in ("SUBSCR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX"):
+        elif op in ("SUBSCR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX"):
             if len(ins.args) >= 1:
                 cont_t = self._get_type(ins.args[0])
                 if isinstance(cont_t, ListType):
@@ -647,16 +647,17 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                         if diary:
                             diary.record_decision(fn.name, "COMPARISON", cmpop, "_luthon_cmp", is_native=False, reason=f"Operands {left_arg} ({lt}) and {right_arg} ({rt}) require generic Python equality/order comparison", line=ins.src_line, col=ins.src_col)
 
-            elif ins.op == "SUBSCR_FAST_INDEX" and len(ins.args) >= 2:
+            elif ins.op in ("SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX") and len(ins.args) >= 2:
                 cont_arg, idx_arg = ins.args[0], ins.args[1]
+                dec_name = "subscr_fast_index" if ins.op == "SUBSCR_FAST_INDEX" else "subscr_fast_var_index"
                 if diary:
                     diary.record_decision(
                         fn.name,
                         "SUBSCRIPT",
                         f"{cont_arg}[{idx_arg}]",
-                        "subscr_fast_index",
+                        dec_name,
                         is_native=True,
-                        reason=f"Positional sequence unpack index {idx_arg}",
+                        reason=f"Positional sequence unpack or fast variable index {idx_arg}",
                         line=ins.src_line,
                         col=ins.src_col,
                     )
@@ -680,6 +681,11 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                         if diary:
                             diary.record_decision(fn.name, "SUBSCRIPT", f"{cont_arg}[{idx_arg}]", "subscr_fast_index", is_native=True, reason=f"Container {cont_arg} ({cont_t}) indexed with non-negative constant {idx_arg}", line=ins.src_line, col=ins.src_col)
                     elif it == INT_TYPE:
+                        ins.op = "SUBSCR_FAST_VAR_INDEX"
+                        changed = True
+                        if diary:
+                            diary.record_decision(fn.name, "SUBSCRIPT", f"{cont_arg}[{idx_arg}]", "subscr_fast_var_index", is_native=True, reason=f"Sequence {cont_arg} indexed with integer variable {idx_arg}", line=ins.src_line, col=ins.src_col)
+                    else:
                         ins.op = "SUBSCR_DIRECT"
                         changed = True
                         if diary:
@@ -1070,8 +1076,8 @@ def analyze_loop_vectorizability(
             body_lbl = branch_ins.args[1]
             exit_lbl = branch_ins.args[2]
 
-    if not ind_var:
-        return VectorizationRecord(fn.name, header_lbl, "REJECTED", reason="Could not detect affine induction variable with unit stride", line_number=line_no)
+    if not ind_var or not upper_bound:
+        return VectorizationRecord(fn.name, header_lbl, "REJECTED", reason="Could not detect affine induction variable with unit stride and known upper bound", line_number=line_no)
 
     # 2. Find preheader
     preheader_lbl = next((p for p in preds.get(header_lbl, []) if p not in loop_blocks), None)
