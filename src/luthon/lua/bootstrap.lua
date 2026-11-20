@@ -552,6 +552,10 @@ local function _wrap_pybridge_method(raw_val, t)
 end
 
 function _luthon_subscr_fast(t, idx)
+  local mt = getmetatable(t)
+  if mt and (mt.__tuple__ or mt.__list__) then
+    return t[idx + 1]
+  end
   if type(t) == "table" and not rawget(t, "_py") and not rawget(t, "_buf") then
     return t[idx + 1]
   end
@@ -5232,6 +5236,7 @@ local _b64_bit_ok, _b64_bit = pcall(require, "bit")
 local _b64lut = nil
 local _b64chars_ptr = nil
 local _b32chars_ptr = nil
+local _static_b32_buf = nil
 local b32chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 if _b64_ffi_ok and _b64_bit_ok then
   _b64lut = _b64_ffi.new("int16_t[256]")
@@ -5244,6 +5249,7 @@ if _b64_ffi_ok and _b64_bit_ok then
   _b64lut[32] = -3 -- space
   _b64chars_ptr = _b64_ffi.cast("const uint8_t*", b64chars)
   _b32chars_ptr = _b64_ffi.cast("const uint8_t*", b32chars)
+  _static_b32_buf = _b64_ffi.new("uint8_t[512]")
 end
 
 base64.b64encode = function(data)
@@ -5396,7 +5402,7 @@ base64.b32encode = function(data)
   if len == 0 then return "" end
   if _b64_ffi_ok and _b64_bit_ok then
     local max_out = math.ceil(len / 5) * 8 + 8
-    local buf = _b64_ffi.new("uint8_t[?]", max_out)
+    local buf = (max_out <= 512 and _static_b32_buf) or _b64_ffi.new("uint8_t[?]", max_out)
     local ptr = _b64_ffi.cast("const uint8_t*", data)
     local out_pos = 0
     local i = 0
@@ -5507,22 +5513,25 @@ end
 binascii.b2a_hex = binascii.hexlify
 
 local _hexlut = nil
+local _static_hex_buf = nil
 if _b64_ffi_ok then
   _hexlut = _b64_ffi.new("int8_t[256]")
   for i = 0, 255 do _hexlut[i] = -1 end
   for i = string.byte('0'), string.byte('9') do _hexlut[i] = i - string.byte('0') end
   for i = string.byte('a'), string.byte('f') do _hexlut[i] = i - string.byte('a') + 10 end
   for i = string.byte('A'), string.byte('F') do _hexlut[i] = i - string.byte('A') + 10 end
+  _static_hex_buf = _b64_ffi.new("uint8_t[512]")
 end
 
 function binascii.unhexlify(hexstr)
-  hexstr = tostring(hexstr or ""):gsub("%s+", "")
-  local len = #hexstr
+  local s = type(hexstr) == "string" and hexstr or tostring(hexstr or "")
+  if s:find("%s") then s = s:gsub("%s+", "") end
+  local len = #s
   if len % 2 ~= 0 then error("binascii.Error: Odd-length string") end
   if _hexlut then
     local out_len = math.floor(len / 2)
-    local buf = _b64_ffi.new("uint8_t[?]", out_len)
-    local ptr = _b64_ffi.cast("const uint8_t*", hexstr)
+    local buf = (out_len <= 512 and _static_hex_buf) or _b64_ffi.new("uint8_t[?]", out_len)
+    local ptr = _b64_ffi.cast("const uint8_t*", s)
     local out_pos = 0
     for i = 0, len - 1, 2 do
       local h1 = _hexlut[ptr[i]]
@@ -5535,7 +5544,7 @@ function binascii.unhexlify(hexstr)
   end
   local res = {}
   for i = 1, len, 2 do
-    local b = tonumber(hexstr:sub(i, i + 1), 16)
+    local b = tonumber(s:sub(i, i + 1), 16)
     if not b then error("binascii.Error: Non-hexadecimal digit found") end
     table.insert(res, string.char(b))
   end
