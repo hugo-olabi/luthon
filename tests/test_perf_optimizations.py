@@ -234,3 +234,64 @@ print(f"N:{n}")
     out = _run_lua(code)
     assert out == "N:42"
 
+
+def test_unhexlify_and_b32encode_fast_codecs():
+    code = """
+import binascii
+import base64
+
+raw = binascii.unhexlify("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+b32 = base64.b32encode(raw).decode("utf-8")
+print(f"RAW_LEN:{len(raw)} B32:{b32}")
+"""
+    out = _run_lua(code)
+    assert "RAW_LEN:20 B32:3I42H3S6NNFQ2MSVX7XZKYAYSCX5QBYJ" in out
+
+
+def test_typed_dict_mutation_and_subscr():
+    code = """
+def build_dict():
+    d = {}
+    d["alpha"] = 100
+    d["beta"] = 200
+    return d["alpha"] + d["beta"]
+
+print(f"RES:{build_dict()}")
+"""
+    out = _run_lua(code)
+    assert out == "RES:300"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function build_dict")[1].split("end")[0]
+    assert "__luthon_set" not in body
+    assert "__luthon_get" not in body
+
+
+def test_string_slice_str_lowering():
+    code = """
+def slice_str(s, start, stop):
+    return s[start:stop]
+
+print(f"SUB:{slice_str('abcdefg', 1, 4)}")
+"""
+    out = _run_lua(code)
+    assert out == "SUB:bcd"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function slice_str")[1].split("end")[0]
+    assert "string.sub" in body
+
+
+def test_parameter_constraint_type_inference():
+    code = """
+def inc(x):
+    return x + 1
+
+print(f"INC:{inc(41)}")
+"""
+    out = _run_lua(code)
+    assert out == "INC:42"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function inc")[1].split("end")[0]
+    assert "_luthon_add" not in body
+    assert "+" in body
+
+
