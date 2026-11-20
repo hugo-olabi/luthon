@@ -362,4 +362,119 @@ print(f"B32:{b32}")
     assert "decode" not in entry
 
 
+def test_decision_diary_generation(tmp_path):
+    import json
+    from luthon.debug import start_diary, stop_diary
+
+    debug_dir = tmp_path / "debug_out"
+    diary = start_diary("sample_perf_mod", debug_dir=str(debug_dir), force=True)
+
+    code = """
+def compute(x):
+    total = 0
+    for i in range(10):
+        total += i
+    return total
+
+print(f"RES:{compute(5)}")
+"""
+    lua = transpile_ir(code, optimize=True, package="sample_perf_mod")
+    out = _run_lua(code)
+    assert out == "RES:45"
+
+    stopped = stop_diary(flush=True, target_dir=str(debug_dir))
+    assert stopped is not None
+    assert stopped.module_name == "sample_perf_mod"
+
+    md_file = debug_dir / "sample_perf_mod.diary.md"
+    json_file = debug_dir / "sample_perf_mod.decisions.json"
+
+    assert md_file.exists(), f"Expected {md_file} to exist"
+    assert json_file.exists(), f"Expected {json_file} to exist"
+
+    md_content = md_file.read_text(encoding="utf-8")
+    assert "Luthon Lowering & Decision Diary: `sample_perf_mod`" in md_content
+    assert "Native" in md_content
+
+    data = json.loads(json_file.read_text(encoding="utf-8"))
+    assert data["module_name"] == "sample_perf_mod"
+    assert "stats" in data
+    assert data["stats"]["total_operations"] > 0
+    assert data["stats"]["native_operations"] > 0
+
+
+def test_cir_non_degrading_concrete_type_in_loop():
+    code = """
+def parse_chunks(data, length):
+    idx = 0
+    chunks = []
+    while idx < length:
+        idx += 1
+        chunks.append(idx)
+    return chunks
+
+print(f"COUNT:{len(parse_chunks('test', 5))}")
+"""
+    out = _run_lua(code)
+    assert out == "COUNT:5"
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function parse_chunks")[1].split("local function _luthon_module_entry")[0]
+    # idx should retain INT_TYPE and use native +
+    assert "_luthon_add" not in body
+    assert "+" in body
+
+
+def test_module_constant_seeding_and_interprocedural_propagation():
+    code = """
+DELIM = "e"
+
+def is_delim(ch):
+    return ch == DELIM
+
+def process(s):
+    if is_delim(s[0]):
+        return "MATCH"
+    return "NO_MATCH"
+
+print(f"R1:{process('e_start')} R2:{process('x_start')}")
+"""
+    out = _run_lua(code)
+    assert "R1:MATCH R2:NO_MATCH" in out
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function is_delim")[1].split("end")[0]
+    # Native comparison with seeded DELIM constant
+    assert "_luthon_eq" not in body
+    assert "==" in body
+
+
+def test_pure_pcall_closure_hoisting():
+    code = """
+def parse_int_safe(val):
+    res = -1
+    try:
+        res = int(val)
+    except Exception:
+        pass
+    return res
+
+def run_loop():
+    total = 0
+    for s in ["10", "bad", "20"]:
+        v = parse_int_safe(s)
+        total += v
+    return total
+
+print(f"TOTAL:{run_loop()}")
+"""
+    out = _run_lua(code)
+    assert out == "TOTAL:29"
+
+    lua = transpile_ir(code, optimize=True)
+    # The pure try block without non-local control flow should hoist its closure
+    assert "_try_closure_" in lua
+
+
+
 
