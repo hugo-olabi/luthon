@@ -1525,13 +1525,13 @@ class IRLowerer:
 
             if (
                 isinstance(node.func, ast.Attribute)
-                and node.func.attr == "encode"
+                and node.func.attr in ("encode", "decode")
                 and (
                     len(node.args) == 0
                     or (
                         len(node.args) == 1
                         and isinstance(node.args[0], ast.Constant)
-                        and node.args[0].value in ("utf8", "utf-8", "ascii", "latin1", "latin-1")
+                        and str(node.args[0].value).strip("'\"").lower() in ("utf8", "utf-8", "ascii", "latin1", "latin-1")
                     )
                 )
                 and not getattr(node, "keywords", None)

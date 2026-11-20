@@ -1688,7 +1688,7 @@ function IRLowerer:_lower_expr_impl(node)
     end
 
     local enc_val = (node.args and #node.args == 1 and node.args[1]._type == "Constant") and _unquote(node.args[1].value) or nil
-    if node.func and node.func._type == "Attribute" and node.func.attr == "encode"
+    if node.func and node.func._type == "Attribute" and (node.func.attr == "encode" or node.func.attr == "decode")
        and ((not node.args or #node.args == 0) or (enc_val and (enc_val == "utf8" or enc_val == "utf-8" or enc_val == "ascii" or enc_val == "latin1" or enc_val == "latin-1")))
        and (not node.keywords or #node.keywords == 0) then
       return self:lower_expr(node.func.value)
