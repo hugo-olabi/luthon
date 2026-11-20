@@ -295,3 +295,71 @@ print(f"INC:{inc(41)}")
     assert "+" in body
 
 
+def test_cir_method_and_builtin_type_inference():
+    code = """
+def parse_token(s, start):
+    pos = s.index(":", start)
+    length = int(s[start:pos])
+    return s[pos + 1 : pos + 1 + length]
+
+print(f"TOK:{parse_token('prefix:5:hello_world', 7)}")
+"""
+    out = _run_lua(code)
+    assert out == "TOK:hello"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function parse_token")[1].split("end")[0]
+    assert "_luthon_add" not in body
+    assert "string.sub" in body
+
+
+def test_direct_boolean_branching():
+    code = """
+def check_val(x):
+    if x > 10:
+        return "high"
+    return "low"
+
+print(f"CHK:{check_val(15)}")
+"""
+    out = _run_lua(code)
+    assert out == "CHK:high"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function check_val")[1].split("end")[0]
+    assert "_luthon_truthy" not in body
+
+
+def test_direct_tuple_unpack_indexing():
+    code = """
+def unpack_pair():
+    p = (42, 99)
+    x, y = p
+    return x + y
+
+print(f"UNPACK:{unpack_pair()}")
+"""
+    out = _run_lua(code)
+    assert out == "UNPACK:141"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function unpack_pair")[1].split("end")[0]
+    assert "_luthon_subscr_fast" not in body
+    assert "[1]" in body
+    assert "[2]" in body
+
+
+def test_decode_utf8_folding():
+    code = """
+import base64
+
+raw = b"hello world"
+b32 = base64.b32encode(raw).decode("utf-8")
+print(f"B32:{b32}")
+"""
+    out = _run_lua(code)
+    assert "B32:NBSWY3DPEB3W64TMMQ======" in out
+    lua = transpile_ir(code, optimize=True)
+    # Check that .decode is folded and not dispatched dynamically in module entry
+    entry = lua.split("local function _luthon_module_entry")[1]
+    assert "decode" not in entry
+
+
+
