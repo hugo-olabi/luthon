@@ -476,5 +476,99 @@ print(f"TOTAL:{run_loop()}")
     assert "_try_closure_" in lua
 
 
+def test_sequence_unpack_native_subscripts():
+    code = """
+def split_val(x):
+    return (x, x + 10)
+
+def compute():
+    a, b = split_val(5)
+    return a * b
+
+print(f"RES:{compute()}")
+"""
+    out = _run_lua(code)
+    assert out == "RES:75"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function compute")[1].split("end")[0]
+    assert "_luthon_subscr_fast" not in body
+    assert "[1]" in body
+    assert "[2]" in body
+
+
+def test_string_concatenation_native_cat():
+    code = """
+def greet(first: str, last: str) -> str:
+    full = first + " " + last
+    return f"Hello, {full}!"
+
+print(greet("Jane", "Doe"))
+"""
+    out = _run_lua(code)
+    assert out == "Hello, Jane Doe!"
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function greet")[1].split("end")[0]
+    assert ".." in body
+    assert "_luthon_add" not in body
+
+
+def test_math_return_propagation_and_float_ops():
+    code = """
+import math
+
+def calc_norm(x):
+    k = 1.0 / (1.0 + 0.25 * math.abs(x))
+    approx = 1.0 - math.exp(-0.5 * x * x) * k
+    return approx
+
+print(f"CALC:{calc_norm(2.0):.4f}")
+"""
+    out = _run_lua(code)
+    assert "CALC:" in out
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function calc_norm")[1].split("end")[0]
+    assert "_luthon_add" not in body
+
+
+def test_parameter_default_priors_eliminate_truthy():
+    code = """
+def format_unit(val, precision=1, shortform=False):
+    if shortform:
+        return f"{val}K"
+    return f"{val} KiB"
+
+print(f"L1:{format_unit(100)} L2:{format_unit(100, shortform=True)}")
+"""
+    out = _run_lua(code)
+    assert "L1:100 KiB L2:100K" in out
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function format_unit")[1].split("end")[0]
+    assert "_luthon_truthy" not in body
+
+
+def test_type_dispatch_table_seeding():
+    code = """
+encode_map = {}
+
+def encode_bool_val(x):
+    if x:
+        return "TRUE"
+    return "FALSE"
+
+encode_map[bool] = encode_bool_val
+
+def run(flag):
+    return encode_map[bool](flag)
+
+print(f"R1:{run(True)} R2:{run(False)}")
+"""
+    out = _run_lua(code)
+    assert "R1:TRUE R2:FALSE" in out
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function encode_bool_val")[1].split("end")[0]
+    assert "_luthon_truthy" not in body
+
+
+
 
 
