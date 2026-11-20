@@ -220,7 +220,8 @@ end"""
     if o == "SET_ADD":
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
     if o == "DICT_SET":
-        k_expr = f"({ins.args[1]} == nil and _G._luthon_none or {ins.args[1]})"
+        is_raw_key = len(ins.args) > 3 and ins.args[3] == "raw_key"
+        k_expr = ins.args[1] if is_raw_key else f"({ins.args[1]} == nil and _G._luthon_none or {ins.args[1]})"
         v_expr = f"({ins.args[2]} == nil and _G._luthon_none or {ins.args[2]})"
         return f"{ins.args[0]}[{k_expr}] = {v_expr}"
     if o == "SELECT":
@@ -620,43 +621,68 @@ def generate(module, sourcemap=None):
         hoisted_closures = []
         closure_counter = 0
         from .ir import Instr
+        from .debug import get_active_diary
+        diary = get_active_diary()
         for b in fn.blocks:
-            if b.label in loop_blocks:
-                new_instrs = []
-                idx = 0
-                while idx < len(b.instrs):
-                    ins = b.instrs[idx]
-                    if ins.op == "TRY_BEGIN":
-                        end_idx = None
-                        nested_depth = 0
-                        for j in range(idx + 1, len(b.instrs)):
-                            if b.instrs[j].op == "TRY_BEGIN":
-                                nested_depth += 1
-                            elif b.instrs[j].op == "END_TRY":
-                                if nested_depth == 0:
-                                    end_idx = j
-                                    break
-                                else:
-                                    nested_depth -= 1
-                        if end_idx is not None:
-                            body_instrs = b.instrs[idx + 1 : end_idx]
-                            has_cf = any(
-                                ins.op in ("JUMP", "BRANCH", "BRANCH_NONE", "BRANCH_TRUE", "BRANCH_FALSE", "TRY_BREAK", "TRY_CONTINUE", "RETURN")
-                                for ins in body_instrs
-                            )
-                            if not has_cf:
-                                closure_counter += 1
-                                safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
-                                closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
-                                scoped_vars = [str(a) for a in ins.args] if ins.args else []
-                                hoisted_closures.append((closure_name, scoped_vars, body_instrs))
-                                new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name]))
-                                new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
-                                idx = end_idx + 1
-                                continue
-                    new_instrs.append(ins)
-                    idx += 1
-                b.instrs = new_instrs
+            new_instrs = []
+            idx = 0
+            while idx < len(b.instrs):
+                ins = b.instrs[idx]
+                if ins.op == "TRY_BEGIN":
+                    end_idx = None
+                    nested_depth = 0
+                    for j in range(idx + 1, len(b.instrs)):
+                        if b.instrs[j].op == "TRY_BEGIN":
+                            nested_depth += 1
+                        elif b.instrs[j].op == "END_TRY":
+                            if nested_depth == 0:
+                                end_idx = j
+                                break
+                            else:
+                                nested_depth -= 1
+                    if end_idx is not None:
+                        body_instrs = b.instrs[idx + 1 : end_idx]
+                        has_cf = any(
+                            ins.op in ("JUMP", "BRANCH", "BRANCH_NONE", "BRANCH_TRUE", "BRANCH_FALSE", "TRY_BREAK", "TRY_CONTINUE", "RETURN")
+                            for ins in body_instrs
+                        )
+                        if not has_cf:
+                            closure_counter += 1
+                            safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
+                            closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
+                            scoped_vars = [str(a) for a in ins.args] if ins.args else []
+                            hoisted_closures.append((closure_name, scoped_vars, body_instrs))
+                            new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name]))
+                            new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
+                            if diary:
+                                diary.record_decision(
+                                    fn.name,
+                                    "TRY_BLOCK",
+                                    "pcall",
+                                    "hoisted_closure",
+                                    is_native=True,
+                                    reason="Pure try block without control flow hoisted to eliminate inner anonymous closure (FNEW)",
+                                    line=ins.src_line,
+                                    col=ins.src_col,
+                                )
+                            idx = end_idx + 1
+                            continue
+                        else:
+                            if diary:
+                                diary.record_decision(
+                                    fn.name,
+                                    "TRY_BLOCK",
+                                    "pcall",
+                                    "anonymous_closure",
+                                    is_native=False,
+                                    reason="Try block contains non-local control flow; kept anonymous closure",
+                                    line=ins.src_line,
+                                    col=ins.src_col,
+                                    suggestion="Refactor non-local jumps out of try block to unlock closure hoisting",
+                                )
+                new_instrs.append(ins)
+                idx += 1
+            b.instrs = new_instrs
 
         for c_name, c_scoped, c_instrs in hoisted_closures:
             lines.append(f"{indent}  local {c_name} = function()")

@@ -670,50 +670,45 @@ function M.generate(module, skip_prelude, sourcemap)
     local hoisted_closures = {}
     local closure_counter = 0
     for _, b in ipairs(fn.blocks or {}) do
-      if loop_blocks[b.label] then
-        local new_instrs = {}
-        local idx = 1
-        local instrs = b.instrs or {}
-        while idx <= #instrs do
-          local ins = instrs[idx]
-          if ins.op == "TRY_BEGIN" then
-            local end_idx = nil
-            local nested_depth = 0
-            for j = idx + 1, #instrs do
-              if instrs[j].op == "TRY_BEGIN" then
-                nested_depth = nested_depth + 1
-              elseif instrs[j].op == "END_TRY" then
-                if nested_depth == 0 then
-                  end_idx = j
-                  break
-                else
-                  nested_depth = nested_depth - 1
-                end
+      local new_instrs = {}
+      local idx = 1
+      local instrs = b.instrs or {}
+      while idx <= #instrs do
+        local ins = instrs[idx]
+        if ins.op == "TRY_BEGIN" then
+          local end_idx = nil
+          local nested_depth = 0
+          for j = idx + 1, #instrs do
+            if instrs[j].op == "TRY_BEGIN" then
+              nested_depth = nested_depth + 1
+            elseif instrs[j].op == "END_TRY" then
+              if nested_depth == 0 then
+                end_idx = j
+                break
+              else
+                nested_depth = nested_depth - 1
               end
             end
-            if end_idx then
-              local body_instrs = {}
-              local has_cf = false
-              for k = idx + 1, end_idx - 1 do
-                local opk = instrs[k].op
-                if opk == "JUMP" or opk == "BRANCH" or opk == "BRANCH_NONE" or opk == "BRANCH_TRUE" or opk == "BRANCH_FALSE" or opk == "TRY_BREAK" or opk == "TRY_CONTINUE" or opk == "RETURN" then
-                  has_cf = true
-                end
-                table.insert(body_instrs, instrs[k])
+          end
+          if end_idx then
+            local body_instrs = {}
+            local has_cf = false
+            for k = idx + 1, end_idx - 1 do
+              local opk = instrs[k].op
+              if opk == "JUMP" or opk == "BRANCH" or opk == "BRANCH_NONE" or opk == "BRANCH_TRUE" or opk == "BRANCH_FALSE" or opk == "TRY_BREAK" or opk == "TRY_CONTINUE" or opk == "RETURN" then
+                has_cf = true
               end
-              if not has_cf then
-                closure_counter = closure_counter + 1
-                local safe_fn_name = fn.name:gsub("%.", "_"):gsub("<", "_"):gsub(">", "_")
-                local closure_name = "_try_closure_" .. safe_fn_name .. "_" .. closure_counter
-                local scoped_vars = ins.args or {}
-                table.insert(hoisted_closures, {name = closure_name, scoped = scoped_vars, instrs = body_instrs})
-                table.insert(new_instrs, {op = "TRY_BEGIN_HOISTED", args = {closure_name}})
-                table.insert(new_instrs, {op = "END_TRY_HOISTED", args = {}})
-                idx = end_idx + 1
-              else
-                table.insert(new_instrs, ins)
-                idx = idx + 1
-              end
+              table.insert(body_instrs, instrs[k])
+            end
+            if not has_cf then
+              closure_counter = closure_counter + 1
+              local safe_fn_name = fn.name:gsub("%.", "_"):gsub("<", "_"):gsub(">", "_")
+              local closure_name = "_try_closure_" .. safe_fn_name .. "_" .. closure_counter
+              local scoped_vars = ins.args or {}
+              table.insert(hoisted_closures, {name = closure_name, scoped = scoped_vars, instrs = body_instrs})
+              table.insert(new_instrs, {op = "TRY_BEGIN_HOISTED", args = {closure_name}})
+              table.insert(new_instrs, {op = "END_TRY_HOISTED", args = {}})
+              idx = end_idx + 1
             else
               table.insert(new_instrs, ins)
               idx = idx + 1
@@ -722,9 +717,12 @@ function M.generate(module, skip_prelude, sourcemap)
             table.insert(new_instrs, ins)
             idx = idx + 1
           end
+        else
+          table.insert(new_instrs, ins)
+          idx = idx + 1
         end
-        b.instrs = new_instrs
       end
+      b.instrs = new_instrs
     end
 
     for _, c in ipairs(hoisted_closures) do
