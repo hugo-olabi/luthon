@@ -179,3 +179,58 @@ print(f"OK:{check_protocol('https')} BAD:{check_protocol('gopher')}")
 """
     out = _run_lua(code)
     assert "OK:True BAD:False" in out
+
+
+def test_sorted_dict_items_unroll():
+    code = """
+d2 = {"path": "dir/file", "length": 1024}
+res2 = []
+for k, v in sorted(d2.items()):
+    res2.append(f"{k}:{v}")
+
+d3 = {"z": 3, "a": 1, "m": 2}
+res3 = []
+for k, v in sorted(d3.items()):
+    res3.append(f"{k}:{v}")
+
+print("D2:" + ",".join(res2))
+print("D3:" + ",".join(res3))
+"""
+    out = _run_lua(code)
+    assert "D2:length:1024,path:dir/file" in out
+    assert "D3:a:1,m:2,z:3" in out
+
+
+def test_specialized_format_lowering():
+    code = """
+s1 = '%.*f %s' % (1, 109.612, 'KiB')
+s2 = '%.*f%%' % (2, 93.114)
+s3 = '%d %s' % (42, 'bytes')
+print(f"S1:{s1} S2:{s2} S3:{s3}")
+"""
+    out = _run_lua(code)
+    assert "S1:109.6 KiB S2:93.11% S3:42 bytes" in out
+
+
+def test_str_len_and_fast_append():
+    code = """
+r = []
+x = "sample_string"
+r.append(str(len(x)))
+r.append(":")
+r.append(x)
+print(",".join(r))
+"""
+    out = _run_lua(code)
+    assert out == "13,:,sample_string"
+
+
+def test_fast_int_conversion():
+    code = """
+s = "  42  "
+n = int(s)
+print(f"N:{n}")
+"""
+    out = _run_lua(code)
+    assert out == "N:42"
+
