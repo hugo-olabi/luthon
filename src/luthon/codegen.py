@@ -90,12 +90,18 @@ def _emit(ins):
     if o == "JUMP":
         return "goto " + ins.args[0]
     if o == "BRANCH":
+        if len(ins.args) >= 4 and ins.args[3] == "bool":
+            return "if " + ins.args[0] + " then goto " + ins.args[1] + " else goto " + ins.args[2] + " end"
         return "if _luthon_truthy(" + ins.args[0] + ") then goto " + ins.args[1] + " else goto " + ins.args[2] + " end"
     if o == "BRANCH_NONE":
         return "if " + ins.args[0] + " == nil or " + ins.args[0] + " == _G.None then goto " + ins.args[1] + " end"
     if o == "BRANCH_TRUE":
+        if len(ins.args) >= 3 and ins.args[2] == "bool":
+            return "if " + ins.args[0] + " then goto " + ins.args[1] + " end"
         return "if _luthon_truthy(" + ins.args[0] + ") then goto " + ins.args[1] + " end"
     if o == "BRANCH_FALSE":
+        if len(ins.args) >= 3 and ins.args[2] == "bool":
+            return "if not " + ins.args[0] + " then goto " + ins.args[1] + " end"
         return "if not _luthon_truthy(" + ins.args[0] + ") then goto " + ins.args[1] + " end"
     if o == "CMP":
         cmp_op = (ins.args[0] or "")
@@ -227,6 +233,14 @@ end"""
         t = ins.args[0]
         idx = ins.args[1]
         return f"{ins.result} = _luthon_subscr_fast({t}, {idx})"
+    if o == "SUBSCR_FAST_INDEX":
+        t = ins.args[0]
+        idx = ins.args[1]
+        try:
+            k = int(idx) + 1
+            return f"{ins.result} = {t}[{k}]"
+        except (ValueError, TypeError):
+            return f"{ins.result} = {t}[{idx} + 1]"
     if o == "GET_ATTR":
         return ins.result + " = " + ins.args[0] + "." + ins.args[1]
     if o == "SET_ATTR":
@@ -240,6 +254,15 @@ end"""
         idx = ins.args[1]
         val = ins.args[2]
         return f"if rawget({t}, '_buf') or rawget({t}, '_py') then {t}[{idx}] = {val} else {t}[{idx} + 1] = {val} end"
+    if o == "STORE_SUBSCR_FAST_LIST":
+        t = ins.args[0]
+        idx = ins.args[1]
+        val = ins.args[2]
+        try:
+            k = int(idx) + 1
+            return f"{t}[{k}] = {val}"
+        except (ValueError, TypeError):
+            return f"{t}[{idx} + 1] = {val}"
     if o == "LIST_REPEAT":
         return ins.result + " = list_repeat(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "LIST_APPEND":

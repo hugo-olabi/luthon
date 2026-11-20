@@ -183,12 +183,21 @@ local function _emit(ins)
   elseif o == "JUMP" then
     return "goto " .. args[1]
   elseif o == "BRANCH" then
+    if #args >= 4 and args[4] == "bool" then
+      return "if " .. args[1] .. " then goto " .. args[2] .. " else goto " .. args[3] .. " end"
+    end
     return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " else goto " .. args[3] .. " end"
   elseif o == "BRANCH_NONE" then
     return "if " .. args[1] .. " == nil or " .. args[1] .. " == _G.None then goto " .. args[2] .. " end"
   elseif o == "BRANCH_TRUE" then
+    if #args >= 3 and args[3] == "bool" then
+      return "if " .. args[1] .. " then goto " .. args[2] .. " end"
+    end
     return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "BRANCH_FALSE" then
+    if #args >= 3 and args[3] == "bool" then
+      return "if not " .. args[1] .. " then goto " .. args[2] .. " end"
+    end
     return "if not _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "IN_UNROLL" or o == "NOT_IN_UNROLL" then
     local lhs = args[1]
@@ -320,6 +329,14 @@ local function _emit(ins)
     local t = args[1]
     local idx = args[2]
     return ins.result .. " = _luthon_subscr_fast(" .. t .. ", " .. idx .. ")"
+  elseif o == "SUBSCR_FAST_INDEX" then
+    local t = args[1]
+    local idx = tonumber(args[2])
+    if idx then
+      return ins.result .. " = " .. t .. "[" .. tostring(idx + 1) .. "]"
+    else
+      return ins.result .. " = " .. t .. "[" .. args[2] .. " + 1]"
+    end
   elseif o == "STORE_SUBSCR" then
     return "__luthon_set(" .. args[1] .. ", " .. args[2] .. ", " .. args[3] .. ")"
   elseif o == "STORE_SUBSCR_DIRECT" then
@@ -327,6 +344,15 @@ local function _emit(ins)
     local idx = args[2]
     local val = args[3]
     return "if rawget(" .. t .. ", '_buf') or rawget(" .. t .. ", '_py') then " .. t .. "[" .. idx .. "] = " .. val .. " else " .. t .. "[" .. idx .. " + 1] = " .. val .. " end"
+  elseif o == "STORE_SUBSCR_FAST_LIST" then
+    local t = args[1]
+    local idx = tonumber(args[2])
+    local val = args[3]
+    if idx then
+      return t .. "[" .. tostring(idx + 1) .. "] = " .. val
+    else
+      return t .. "[" .. args[2] .. " + 1] = " .. val
+    end
   elseif o == "SET_ADD" then
     return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
   elseif o == "DICT_SET" then

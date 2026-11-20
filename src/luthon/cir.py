@@ -143,6 +143,8 @@ class TypeInferrer:
         self.param_types = param_types or {}
         # Variable name -> Set of possible CIRTypes
         self.type_env: Dict[str, Set[CIRType]] = {}
+        # Temporary name -> (receiver_arg, attr_name) for method calls
+        self._attr_sources: Dict[str, Tuple[str, str]] = {}
         # Initial seeding: explicit param_types or function signature type annotations
         fn_annots = getattr(fn, "param_annotations", {}) or {}
         for p in fn.params:
@@ -387,7 +389,12 @@ class TypeInferrer:
                     self.type_env[lst_var] = updated
             return set()
 
-        elif op in ("SUBSCR", "SUBSCR_DIRECT"):
+        elif op == "GET_ATTR":
+            if len(ins.args) >= 2 and ins.result:
+                self._attr_sources[str(ins.result)] = (str(ins.args[0]), str(ins.args[1]))
+            return {ANY_TYPE}
+
+        elif op in ("SUBSCR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX"):
             if len(ins.args) >= 1:
                 cont_t = self._get_type(ins.args[0])
                 if isinstance(cont_t, ListType):
@@ -396,8 +403,13 @@ class TypeInferrer:
                     return {cont_t.value_type}
                 elif isinstance(cont_t, TupleType):
                     idx = ins.args[1] if len(ins.args) > 1 else None
-                    if isinstance(idx, int) and 0 <= idx < len(cont_t.item_types):
-                        return {cont_t.item_types[idx]}
+                    int_idx = None
+                    try:
+                        int_idx = int(idx)
+                    except (ValueError, TypeError):
+                        pass
+                    if int_idx is not None and 0 <= int_idx < len(cont_t.item_types):
+                        return {cont_t.item_types[int_idx]}
                     return set(cont_t.item_types) if cont_t.item_types else {ANY_TYPE}
             return {ANY_TYPE}
 
@@ -415,6 +427,34 @@ class TypeInferrer:
                 callee = str(ins.args[0])
                 if callee == "iter" and len(ins.args) > 1:
                     return {self._get_type(ins.args[1])}
+                if callee in ("int", "_luthon_fast_int", "len", "_luthon_raw_len"):
+                    return {INT_TYPE}
+                if callee in ("str", "_luthon_str", "_luthon_str_len"):
+                    return {STR_TYPE}
+                if callee == "float":
+                    return {FLOAT_TYPE}
+                if callee in ("bool", "_luthon_truthy"):
+                    return {BOOL_TYPE}
+                if callee in ("_luthon_slice", "SLICE_STR"):
+                    if len(ins.args) > 1 and self._get_type(ins.args[1]) == STR_TYPE:
+                        return {STR_TYPE}
+                if hasattr(self, "_attr_sources") and callee in self._attr_sources:
+                    recv_arg, attr_name = self._attr_sources[callee]
+                    recv_t = self._get_type(recv_arg)
+                    if recv_t == STR_TYPE:
+                        if attr_name in ("index", "find", "rfind", "count"):
+                            return {INT_TYPE}
+                        elif attr_name in ("strip", "lstrip", "rstrip", "replace", "lower", "upper", "decode", "encode"):
+                            return {STR_TYPE}
+                        elif attr_name in ("startswith", "endswith", "isdigit", "isalpha", "isalnum"):
+                            return {BOOL_TYPE}
+                        elif attr_name in ("split", "splitlines"):
+                            return {ListType(STR_TYPE)}
+                    elif isinstance(recv_t, ListType):
+                        if attr_name in ("index", "count"):
+                            return {INT_TYPE}
+                        elif attr_name == "pop":
+                            return {recv_t.item_type}
             return {ANY_TYPE}
 
         return {ANY_TYPE}
@@ -461,27 +501,52 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                         ins.op = "CMP_DIRECT"
                         changed = True
 
-            elif ins.op == "SUBSCR" and len(ins.args) >= 2:
+            elif ins.op in ("SUBSCR", "SUBSCR_DIRECT") and len(ins.args) >= 2:
                 cont_arg, idx_arg = ins.args[0], ins.args[1]
                 cont_t = type_map.get(str(cont_arg), ANY_TYPE)
                 it = type_map.get(str(idx_arg), INT_TYPE if isinstance(idx_arg, int) else ANY_TYPE)
-                # If index is known integer and container is homogeneous ListType or constant index
-                if (isinstance(idx_arg, int) and idx_arg >= 0) or (isinstance(cont_t, (ListType, TupleType)) and it == INT_TYPE):
-                    ins.op = "SUBSCR_DIRECT"
-                    changed = True
+                is_nonneg_const = False
+                try:
+                    int_val = int(idx_arg)
+                    if int_val >= 0:
+                        is_nonneg_const = True
+                except (ValueError, TypeError):
+                    pass
+
+                if isinstance(cont_t, (ListType, TupleType)):
+                    if is_nonneg_const:
+                        ins.op = "SUBSCR_FAST_INDEX"
+                        changed = True
+                    elif it == INT_TYPE:
+                        ins.op = "SUBSCR_DIRECT"
+                        changed = True
                 elif isinstance(cont_t, DictType):
                     ins.op = "SUBSCR_FAST_KEY"
                     changed = True
+                elif is_nonneg_const:
+                    ins.op = "SUBSCR_DIRECT"
+                    changed = True
 
-            elif ins.op == "STORE_SUBSCR" and len(ins.args) >= 3:
+            elif ins.op in ("STORE_SUBSCR", "STORE_SUBSCR_DIRECT") and len(ins.args) >= 3:
                 cont_arg, idx_arg = ins.args[0], ins.args[1]
                 cont_t = type_map.get(str(cont_arg), ANY_TYPE)
                 it = type_map.get(str(idx_arg), INT_TYPE if isinstance(idx_arg, int) else ANY_TYPE)
-                if (isinstance(idx_arg, int) and idx_arg >= 0) or (isinstance(cont_t, ListType) and it == INT_TYPE):
-                    ins.op = "STORE_SUBSCR_DIRECT"
+                is_nonneg_const = False
+                try:
+                    int_val = int(idx_arg)
+                    if int_val >= 0:
+                        is_nonneg_const = True
+                except (ValueError, TypeError):
+                    pass
+
+                if isinstance(cont_t, ListType):
+                    ins.op = "STORE_SUBSCR_FAST_LIST"
                     changed = True
                 elif isinstance(cont_t, DictType):
                     ins.op = "DICT_SET"
+                    changed = True
+                elif is_nonneg_const or it == INT_TYPE:
+                    ins.op = "STORE_SUBSCR_DIRECT"
                     changed = True
 
             elif ins.op == "CALL" and ins.args and ins.args[0] == "_luthon_slice":
@@ -491,10 +556,24 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                     upper_arg = ins.args[3]
                     step_arg = ins.args[4] if len(ins.args) > 4 else "nil"
                     obj_t = type_map.get(str(obj_arg), ANY_TYPE)
-                    if obj_t == STR_TYPE and step_arg in ("nil", None, 1):
+                    if obj_t == STR_TYPE and step_arg in ("nil", None, 1, "1"):
                         ins.op = "SLICE_STR"
                         ins.args = [obj_arg, lower_arg, upper_arg]
                         changed = True
+
+            elif ins.op == "BRANCH" and len(ins.args) >= 3:
+                cond_arg = ins.args[0]
+                cond_t = type_map.get(str(cond_arg), ANY_TYPE)
+                if cond_t == BOOL_TYPE and len(ins.args) == 3:
+                    ins.args.append("bool")
+                    changed = True
+
+            elif ins.op in ("BRANCH_TRUE", "BRANCH_FALSE") and len(ins.args) >= 2:
+                cond_arg = ins.args[0]
+                cond_t = type_map.get(str(cond_arg), ANY_TYPE)
+                if cond_t == BOOL_TYPE and len(ins.args) == 2:
+                    ins.args.append("bool")
+                    changed = True
 
     return changed
 
