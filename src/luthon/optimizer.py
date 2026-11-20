@@ -51,7 +51,7 @@ def _is_tmp(s: Any) -> bool:
     return False
 
 # Operations with no side effects whose results can be dropped if unused
-_PURE_OPS = {"CONST", "LOAD", "BINOP", "UNOP", "CMP", "GET_ATTR"}
+_PURE_OPS = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR"}
 
 
 def constant_fold_function(fn: Function) -> bool:
@@ -106,7 +106,7 @@ def constant_fold_function(fn: Function) -> bool:
                 if not folded:
                     const_env.pop(ins.result, None)
                     new_instrs.append(ins)
-            elif op == "CMP" and ins.result and len(ins.args) >= 3:
+            elif op in ("CMP", "CMP_DIRECT") and ins.result and len(ins.args) >= 3:
                 cmpop, left, right = ins.args[0].lower(), ins.args[1], ins.args[2]
                 left_c = const_env.get(left, None) if isinstance(left, str) and left in const_env else (left if not isinstance(left, str) else None)
                 right_c = const_env.get(right, None) if isinstance(right, str) and right in const_env else (right if not isinstance(right, str) else None)
@@ -497,7 +497,7 @@ def common_subexpression_elimination_function(fn: Function) -> bool:
                 else:
                     sorted_args = (str(l), str(r))
                 key = ("BINOP", raw_binop, sorted_args)
-            elif ins.op == "CMP" and ins.result and len(ins.args) >= 3:
+            elif ins.op in ("CMP", "CMP_DIRECT") and ins.result and len(ins.args) >= 3:
                 cmpop = str(ins.args[0]).lower()
                 l, r = ins.args[1], ins.args[2]
                 if cmpop in ("eq", "ne"):
@@ -619,7 +619,7 @@ def loop_invariant_code_motion_function(fn: Function) -> bool:
                     loop_defs.add(str(ins.args[0]))
 
         # 3. Iteratively hoist invariant instructions
-        hoist_ops = {"CONST", "LOAD", "BINOP", "UNOP", "CMP", "GET_ATTR", "SUBSCR_DIRECT"}
+        hoist_ops = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR", "SUBSCR_DIRECT"}
         hoisted_any = True
         while hoisted_any:
             hoisted_any = False
@@ -636,7 +636,7 @@ def loop_invariant_code_motion_function(fn: Function) -> bool:
                             # Loaded variable must not be written in the loop
                             if str(ins.args[0]) in loop_defs:
                                 is_invariant = False
-                        elif ins.op in ("BINOP", "CMP") and len(ins.args) >= 3:
+                        elif ins.op in ("BINOP", "BINOP_DIRECT", "CMP", "CMP_DIRECT") and len(ins.args) >= 3:
                             for arg in ins.args[1:]:
                                 if isinstance(arg, str) and arg in loop_defs:
                                     is_invariant = False
@@ -892,7 +892,7 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                             uses.add(sub)
                 if isinstance(target, str) and target in poolable:
                     defs.add(target)
-            elif ins.op in ("BINOP", "CMP", "UNOP") and ins.args:
+            elif ins.op in ("BINOP", "BINOP_DIRECT", "CMP", "CMP_DIRECT", "UNOP") and ins.args:
                 # args[0] is operator name (not a variable)
                 for arg in ins.args[1:]:
                     if isinstance(arg, str) and arg in poolable and arg not in defs:
@@ -976,7 +976,7 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                     for sub in val:
                         if isinstance(sub, str) and sub in poolable:
                             live.add(sub)
-            elif ins.op in ("BINOP", "CMP", "UNOP") and ins.args:
+            elif ins.op in ("BINOP", "BINOP_DIRECT", "CMP", "CMP_DIRECT", "UNOP") and ins.args:
                 if ins.result and ins.result in poolable:
                     live.discard(ins.result)
                     for other in live:
@@ -1067,7 +1067,7 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
                 new_val = reg_map.get(val, val) if isinstance(val, str) else val
                 ins.args[0] = new_target
                 ins.args[1] = new_val
-            elif ins.op in ("BINOP", "CMP", "UNOP") and ins.args:
+            elif ins.op in ("BINOP", "BINOP_DIRECT", "CMP", "CMP_DIRECT", "UNOP") and ins.args:
                 # In BINOP/CMP/UNOP, args[0] is the operator name (e.g. "add", "eq", "neg").
                 # It must NOT be rewritten even if it happens to match a variable name!
                 if ins.result and ins.result in reg_map:

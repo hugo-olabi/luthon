@@ -64,6 +64,18 @@ def _safe_var(name: str) -> str:
     return name
 
 
+def _is_numeric_ast(n) -> bool:
+    if n is None:
+        return False
+    if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+        return True
+    if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)) and _is_numeric_ast(n.operand):
+        return True
+    if isinstance(n, ast.BinOp) and _is_numeric_ast(n.left) and _is_numeric_ast(n.right):
+        return True
+    return False
+
+
 def _has_yield(node: ast.AST) -> bool:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.Yield, ast.YieldFrom)):
@@ -188,6 +200,8 @@ class IRLowerer:
 
     def _lower_stmt_impl(self, node):
         if isinstance(node, ast.Expr):
+            if isinstance(node.value, ast.Constant):
+                return
             if isinstance(node.value, ast.YieldFrom):
                 it_tmp = self.lower_expr(node.value.value)
                 iter_fn = self._new_tmp()
@@ -284,6 +298,78 @@ class IRLowerer:
                 self._continue_stack.pop()
             self._cur_block = self._new_block(end_lbl)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
+            is_sorted_items = False
+            sorted_dict_expr = None
+            if (
+                isinstance(node.target, (ast.Tuple, ast.List))
+                and len(node.target.elts) == 2
+                and isinstance(node.target.elts[0], ast.Name)
+                and isinstance(node.target.elts[1], ast.Name)
+                and isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Name)
+                and node.iter.func.id == "sorted"
+                and len(node.iter.args) == 1
+                and not getattr(node.iter, "keywords", None)
+            ):
+                inner = node.iter.args[0]
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "items"
+                    and not inner.args
+                    and not getattr(inner, "keywords", None)
+                ):
+                    is_sorted_items = True
+                    sorted_dict_expr = inner.func.value
+
+            if is_sorted_items:
+                dict_tmp = self.lower_expr(sorted_dict_expr)
+                keys_tmp = self._new_tmp()
+                self._emit("CALL", ["_luthon_sorted_dict_keys", dict_tmp], result=keys_tmp)
+                idx_tmp = self._new_tmp()
+                self._emit("CONST", [0], result=idx_tmp)
+                len_tmp = self._new_tmp()
+                self._emit("CALL", ["_luthon_raw_len", keys_tmp], result=len_tmp)
+                cond_lbl = self._new_label("forcond")
+                body_lbl = self._new_label("forbody")
+                end_lbl = self._new_label("forend")
+                self._break_stack.append(end_lbl)
+                self._continue_stack.append(cond_lbl)
+                self._emit("JUMP", [cond_lbl])
+                self._cur_block = self._new_block(cond_lbl)
+                one_tmp = self._new_tmp()
+                self._emit("CONST", [1], result=one_tmp)
+                self._emit("BINOP", ["add", idx_tmp, one_tmp], result=idx_tmp)
+                cmp_tmp = self._new_tmp()
+                self._emit("CMP_DIRECT", ["gt", idx_tmp, len_tmp], result=cmp_tmp)
+                self._emit("BRANCH", [cmp_tmp, end_lbl, body_lbl])
+                self._cur_block = self._new_block(body_lbl)
+                k_tmp = self._new_tmp()
+                self._emit("SUBSCR_FAST_KEY", [keys_tmp, idx_tmp], result=k_tmp)
+                k_name = node.target.elts[0].id
+                safe_k = _safe_var(k_name)
+                if self._cur_fn is not None and (k_name in getattr(self._cur_fn, "cellvars", []) or k_name in getattr(self._cur_fn, "freevars", [])):
+                    self._emit("CELL_SET", [safe_k, k_tmp])
+                else:
+                    self._emit("STORE", [safe_k, k_tmp])
+                v_tmp = self._new_tmp()
+                self._emit("SUBSCR_FAST_KEY", [dict_tmp, k_tmp], result=v_tmp)
+                v_name = node.target.elts[1].id
+                safe_v = _safe_var(v_name)
+                if self._cur_fn is not None and (v_name in getattr(self._cur_fn, "cellvars", []) or v_name in getattr(self._cur_fn, "freevars", [])):
+                    self._emit("CELL_SET", [safe_v, v_tmp])
+                else:
+                    self._emit("STORE", [safe_v, v_tmp])
+                for s in node.body:
+                    self.lower_stmt(s)
+                self._emit("JUMP", [cond_lbl])
+                if self._break_stack:
+                    self._break_stack.pop()
+                if self._continue_stack:
+                    self._continue_stack.pop()
+                self._cur_block = self._new_block(end_lbl)
+                return
+
             iter_tmp = self._new_tmp()
             self._emit("CALL", ["iter", self.lower_expr(node.iter)], result=iter_tmp)
             cond_lbl = self._new_label("forcond")
@@ -486,6 +572,30 @@ class IRLowerer:
         elif isinstance(node, ast.Pass):
             pass
         elif isinstance(node, ast.Try):
+            if (
+                len(node.body) == 1
+                and isinstance(node.body[0], ast.Assign)
+                and len(node.body[0].targets) == 1
+                and isinstance(node.body[0].targets[0], ast.Name)
+                and isinstance(node.body[0].value, ast.Call)
+                and isinstance(node.body[0].value.func, ast.Attribute)
+                and node.body[0].value.func.attr == "encode"
+                and isinstance(node.body[0].value.func.value, ast.Name)
+                and node.body[0].targets[0].id == node.body[0].value.func.value.id
+                and len(node.handlers) == 1
+                and (not node.handlers[0].type or (isinstance(node.handlers[0].type, ast.Name) and node.handlers[0].type.id in ("AttributeError", "Exception", "BaseException")))
+                and (not node.handlers[0].body or all(isinstance(s, ast.Pass) for s in node.handlers[0].body))
+                and not node.orelse
+                and not node.finalbody
+            ):
+                return
+            if not node.orelse and not node.finalbody and all(
+                isinstance(s, ast.Pass)
+                or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+                or (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name) and isinstance(s.value, ast.Name) and s.targets[0].id == s.value.id)
+                for s in node.body
+            ):
+                return
             is_inet_pton = False
             fam_node = None
             ip_node = None
@@ -1241,7 +1351,7 @@ class IRLowerer:
                 return t
             t = self._new_tmp()
             if node.id == "type" and (self._cur_fn is None or (node.id not in getattr(self._cur_fn, "params", []) and node.id not in getattr(self._cur_fn, "locals", []))):
-                self._emit("LOAD", ["_luthon_type"], result=t)
+                self._emit("LOAD", ["_luthon_fast_type"], result=t)
             else:
                 self._emit("LOAD", [safe_name], result=t)
             return t
@@ -1252,6 +1362,30 @@ class IRLowerer:
             self._emit("LIST_REPEAT", [l, r], result=t)
             return t
         if isinstance(node, ast.BinOp):
+            if isinstance(node.op, ast.Mod) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, (str, bytes)):
+                raw_fmt = node.left.value if isinstance(node.left.value, str) else node.left.value.decode("utf-8", "replace")
+                if isinstance(node.right, (ast.Tuple, ast.List)):
+                    elts = [self.lower_expr(elt) for elt in node.right.elts]
+                    res = self._new_tmp()
+                    if raw_fmt == "%.*f %s" and len(elts) == 3:
+                        self._emit("CALL", ["_str_mod_prec_s"] + elts, result=res)
+                        return res
+                    elif raw_fmt == "%.*f%%" and len(elts) == 2:
+                        self._emit("CALL", ["_str_mod_prec_pcnt"] + elts, result=res)
+                        return res
+                    elif raw_fmt == "%d %s" and len(elts) == 2:
+                        self._emit("CALL", ["_str_mod_d_s"] + elts, result=res)
+                        return res
+                    fmt = self.lower_expr(node.left)
+                    call_args = ["_str_mod_direct", fmt] + elts
+                    self._emit("CALL", call_args, result=res)
+                    return res
+                else:
+                    fmt = self.lower_expr(node.left)
+                    arg = self.lower_expr(node.right)
+                    res = self._new_tmp()
+                    self._emit("CALL", ["_str_mod_single", fmt, arg], result=res)
+                    return res
             if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
                 l_val = node.left.value
                 r_val = node.right.value
@@ -1318,9 +1452,50 @@ class IRLowerer:
             l = self.lower_expr(node.left)
             r = self.lower_expr(node.comparators[0])
             t = self._new_tmp()
+            op = node.ops[0]
+            if (
+                len(node.ops) == 1
+                and isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq))
+                and (_is_numeric_ast(node.left) or _is_numeric_ast(node.comparators[0]))
+            ):
+                self._emit("CMP_DIRECT", [self._cmpop(op), l, r], result=t)
+                return t
             self._emit("CMP", [self._cmpop(node.ops[0]), l, r], result=t)
             return t
         if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "int"
+                and len(node.args) == 1
+                and not getattr(node, "keywords", None)
+            ):
+                arg = self.lower_expr(node.args[0])
+                res = self._new_tmp()
+                self._emit("CALL", ["_luthon_fast_int", arg], result=res)
+                return res
+
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "str"
+                and len(node.args) == 1
+                and not getattr(node, "keywords", None)
+            ):
+                if (
+                    isinstance(node.args[0], ast.Call)
+                    and isinstance(node.args[0].func, ast.Name)
+                    and node.args[0].func.id == "len"
+                    and len(node.args[0].args) == 1
+                    and not getattr(node.args[0], "keywords", None)
+                ):
+                    arg = self.lower_expr(node.args[0].args[0])
+                    res = self._new_tmp()
+                    self._emit("CALL", ["_luthon_str_len", arg], result=res)
+                    return res
+                arg = self.lower_expr(node.args[0])
+                res = self._new_tmp()
+                self._emit("CALL", ["_luthon_str", arg], result=res)
+                return res
+
             if (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr == "extend"
@@ -1338,6 +1513,18 @@ class IRLowerer:
 
             if (
                 isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and len(node.args) == 1
+                and not getattr(node, "keywords", None)
+            ):
+                obj = self.lower_expr(node.func.value)
+                val = self.lower_expr(node.args[0])
+                res = self._new_tmp()
+                self._emit("CALL", ["_luthon_fast_append", obj, val], result=res)
+                return res
+
+            if (
+                isinstance(node.func, ast.Attribute)
                 and node.func.attr == "encode"
                 and (
                     len(node.args) == 0
@@ -1350,6 +1537,18 @@ class IRLowerer:
                 and not getattr(node, "keywords", None)
             ):
                 return self.lower_expr(node.func.value)
+
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "join"
+                and len(node.args) == 1
+                and not getattr(node, "keywords", None)
+            ):
+                sep = self.lower_expr(node.func.value)
+                seq = self.lower_expr(node.args[0])
+                res = self._new_tmp()
+                self._emit("CALL", ["_luthon_fast_join", sep, seq], result=res)
+                return res
 
             if isinstance(node.func, ast.Name) and node.func.id == "super" and not node.args:
                 cur_cls = getattr(self, "_cur_class", None)
@@ -1634,9 +1833,7 @@ class IRLowerer:
             if isinstance(first, ast.FormattedValue):
                 val_tmp = self.lower_expr(first.value)
                 res = self._new_tmp()
-                str_fn = self._new_tmp()
-                self._emit("LOAD", ["str"], result=str_fn)
-                self._emit("CALL", [str_fn, val_tmp], result=res)
+                self._emit("CALL", ["_luthon_str", val_tmp], result=res)
             else:
                 res = self.lower_expr(first)
 
@@ -1644,9 +1841,7 @@ class IRLowerer:
                 if isinstance(part, ast.FormattedValue):
                     val_tmp = self.lower_expr(part.value)
                     part_str = self._new_tmp()
-                    str_fn = self._new_tmp()
-                    self._emit("LOAD", ["str"], result=str_fn)
-                    self._emit("CALL", [str_fn, val_tmp], result=part_str)
+                    self._emit("CALL", ["_luthon_str", val_tmp], result=part_str)
                     new_res = self._new_tmp()
                     self._emit("BINOP", ["concat", res, part_str], result=new_res)
                     res = new_res
@@ -1659,9 +1854,7 @@ class IRLowerer:
         if isinstance(node, ast.FormattedValue):
             val_tmp = self.lower_expr(node.value)
             res = self._new_tmp()
-            str_fn = self._new_tmp()
-            self._emit("LOAD", ["str"], result=str_fn)
-            self._emit("CALL", [str_fn, val_tmp], result=res)
+            self._emit("CALL", ["_luthon_str", val_tmp], result=res)
             return res
         if isinstance(node, ast.Slice):
             lower_tmp = self.lower_expr(node.lower) if node.lower is not None else None

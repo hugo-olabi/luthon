@@ -79,6 +79,22 @@ local function _safe_var(name)
   return name
 end
 
+local function _unquote(s)
+  if type(s) == "string" then
+    return s:gsub('^["\']', ''):gsub('["\']$', '')
+  end
+  return s
+end
+
+local function _is_numeric_node(n)
+  if not n then return false end
+  local t = n._type
+  if t == "Constant" and type(n.value) == "number" then return true end
+  if t == "UnaryOp" and (n.op == "UAdd" or n.op == "USub" or n.op == "+" or n.op == "-") and _is_numeric_node(n.operand) then return true end
+  if t == "BinOp" and _is_numeric_node(n.left) and _is_numeric_node(n.right) then return true end
+  return false
+end
+
 local function _has_yield(n, is_root, seen)
   if not n or type(n) ~= "table" then return false end
   seen = seen or {}
@@ -303,6 +319,7 @@ end
 function IRLowerer:_lower_stmt_impl(node)
   local t = node._type
   if t == "Expr" then
+    if node.value and node.value._type == "Constant" then return end
     self:lower_expr(node.value)
   elseif t == "Assign" then
     local tgts = node.targets or {}
@@ -434,6 +451,59 @@ function IRLowerer:_lower_stmt_impl(node)
     if #self._continue_stack > 0 then table.remove(self._continue_stack) end
     self._cur_block = self:_new_block(end_lbl)
   elseif t == "For" then
+    local is_sorted_items = false
+    local sorted_dict_node = nil
+    if (node.target._type == "Tuple" or node.target._type == "List")
+       and node.target.elts and #node.target.elts == 2
+       and node.target.elts[1]._type == "Name" and node.target.elts[2]._type == "Name"
+       and node.iter and node.iter._type == "Call"
+       and node.iter.func and node.iter.func._type == "Name" and node.iter.func.id == "sorted"
+       and node.iter.args and #node.iter.args == 1
+       and (not node.iter.keywords or #node.iter.keywords == 0) then
+      local inner = node.iter.args[1]
+      if inner._type == "Call" and inner.func and inner.func._type == "Attribute" and inner.func.attr == "items"
+         and (not inner.args or #inner.args == 0) and (not inner.keywords or #inner.keywords == 0) then
+        is_sorted_items = true
+        sorted_dict_node = inner.func.value
+      end
+    end
+
+    if is_sorted_items then
+      local dict_tmp = self:lower_expr(sorted_dict_node)
+      local keys_tmp = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_sorted_dict_keys", dict_tmp}, keys_tmp)
+      local idx_tmp = self:_new_tmp()
+      self:_emit("CONST", {0}, idx_tmp)
+      local len_tmp = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_raw_len", keys_tmp}, len_tmp)
+      local cond_lbl = self:_new_label("forcond")
+      local body_lbl = self:_new_label("forbody")
+      local end_lbl = self:_new_label("forend")
+      table.insert(self._break_stack, end_lbl)
+      table.insert(self._continue_stack, cond_lbl)
+      self:_emit("JUMP", {cond_lbl})
+      self._cur_block = self:_new_block(cond_lbl)
+      local one_tmp = self:_new_tmp()
+      self:_emit("CONST", {1}, one_tmp)
+      self:_emit("BINOP", {"add", idx_tmp, one_tmp}, idx_tmp)
+      local cmp_tmp = self:_new_tmp()
+      self:_emit("CMP_DIRECT", {"gt", idx_tmp, len_tmp}, cmp_tmp)
+      self:_emit("BRANCH", {cmp_tmp, end_lbl, body_lbl})
+      self._cur_block = self:_new_block(body_lbl)
+      local k_tmp = self:_new_tmp()
+      self:_emit("SUBSCR_FAST_KEY", {keys_tmp, idx_tmp}, k_tmp)
+      self:_emit("STORE", {_safe_var(node.target.elts[1].id), k_tmp})
+      local v_tmp = self:_new_tmp()
+      self:_emit("SUBSCR_FAST_KEY", {dict_tmp, k_tmp}, v_tmp)
+      self:_emit("STORE", {_safe_var(node.target.elts[2].id), v_tmp})
+      for _, s in ipairs(node.body or {}) do self:lower_stmt(s) end
+      self:_emit("JUMP", {cond_lbl})
+      if #self._break_stack > 0 then table.remove(self._break_stack) end
+      if #self._continue_stack > 0 then table.remove(self._continue_stack) end
+      self._cur_block = self:_new_block(end_lbl)
+      return
+    end
+
     local iter_tmp = self:_new_tmp()
     self:_emit("CALL", {"iter", self:lower_expr(node.iter)}, iter_tmp)
     local cond_lbl = self:_new_label("forcond")
@@ -656,6 +726,39 @@ function IRLowerer:_lower_stmt_impl(node)
     local handlers = node.handlers or {}
     local orelse = node.orelse or {}
     local finalbody = node.finalbody or {}
+
+    -- Check for try: k = k.encode(...) except AttributeError: pass
+    if node.body and #node.body == 1
+       and node.body[1]._type == "Assign"
+       and node.body[1].targets and #node.body[1].targets == 1
+       and node.body[1].targets[1]._type == "Name"
+       and node.body[1].value and node.body[1].value._type == "Call"
+       and node.body[1].value.func and node.body[1].value.func._type == "Attribute" and node.body[1].value.func.attr == "encode"
+       and node.body[1].value.func.value and node.body[1].value.func.value._type == "Name"
+       and node.body[1].targets[1].id == node.body[1].value.func.value.id
+       and handlers and #handlers == 1
+       and (not handlers[1].type or (handlers[1].type._type == "Name" and (handlers[1].type.id == "AttributeError" or handlers[1].type.id == "Exception" or handlers[1].type.id == "BaseException")))
+       and (not orelse or #orelse == 0)
+       and (not finalbody or #finalbody == 0) then
+      local all_pass = true
+      for _, s in ipairs(handlers[1].body or {}) do
+        if s._type ~= "Pass" then all_pass = false; break end
+      end
+      if all_pass then return end
+    end
+    if (#orelse == 0) and (#finalbody == 0) then
+      local all_noop = true
+      for _, s in ipairs(node.body or {}) do
+        if s._type == "Pass" or (s._type == "Expr" and s.value and s.value._type == "Constant") or
+           (s._type == "Assign" and s.targets and #s.targets == 1 and s.targets[1]._type == "Name" and s.value and s.value._type == "Name" and s.targets[1].id == s.value.id) then
+          -- noop
+        else
+          all_noop = false
+          break
+        end
+      end
+      if all_noop then return end
+    end
 
     local is_inet_pton = false
     local fam_node = nil
@@ -1357,7 +1460,7 @@ function IRLowerer:_lower_expr_impl(node)
     local res = self:_new_tmp()
     local name = safe_name
     if node.id == "type" and (not self._cur_fn or ((not self._cur_fn.params or not self._cur_fn.params[node.id]) and (not self._cur_fn.locals or not self._cur_fn.locals[node.id]))) then
-      name = "_luthon_type"
+      name = "_luthon_fast_type"
     end
     self:_emit("LOAD", {name}, res)
     return res
@@ -1368,6 +1471,44 @@ function IRLowerer:_lower_expr_impl(node)
     self:_emit("LIST_REPEAT", {l, r}, res)
     return res
   elseif t == "BinOp" then
+    local binop_str = node.op and (type(node.op) == "string" and node.op or node.op._type) or ""
+    if (binop_str == "Mod" or binop_str == "%") and node.left and node.left._type == "Constant" and type(node.left.value) == "string" then
+      local raw_fmt = _unquote(node.left.value)
+      local elts = (node.right and (node.right._type == "Tuple" or node.right._type == "List")) and (node.right.elts or {}) or nil
+      if elts then
+        local res = self:_new_tmp()
+        if raw_fmt == "%.*f %s" and #elts == 3 then
+          local p = self:lower_expr(elts[1])
+          local val = self:lower_expr(elts[2])
+          local unit = self:lower_expr(elts[3])
+          self:_emit("CALL", {"_str_mod_prec_s", p, val, unit}, res)
+          return res
+        elseif raw_fmt == "%.*f%%" and #elts == 2 then
+          local p = self:lower_expr(elts[1])
+          local val = self:lower_expr(elts[2])
+          self:_emit("CALL", {"_str_mod_prec_pcnt", p, val}, res)
+          return res
+        elseif raw_fmt == "%d %s" and #elts == 2 then
+          local d = self:lower_expr(elts[1])
+          local s = self:lower_expr(elts[2])
+          self:_emit("CALL", {"_str_mod_d_s", d, s}, res)
+          return res
+        end
+        local fmt = self:lower_expr(node.left)
+        local call_args = {"_str_mod_direct", fmt}
+        for _, elt in ipairs(elts) do
+          table.insert(call_args, self:lower_expr(elt))
+        end
+        self:_emit("CALL", call_args, res)
+        return res
+      else
+        local fmt = self:lower_expr(node.left)
+        local arg = self:lower_expr(node.right)
+        local res = self:_new_tmp()
+        self:_emit("CALL", {"_str_mod_single", fmt, arg}, res)
+        return res
+      end
+    end
     if node.left and node.left._type == "Constant" and node.right and node.right._type == "Constant" then
       local lv = node.left.value
       local rv = node.right.value
@@ -1451,7 +1592,9 @@ function IRLowerer:_lower_expr_impl(node)
             end
             local const_vals = {l}
             for _, elt in ipairs(comp.elts) do
-              table.insert(const_vals, elt.value)
+              local v = elt.value
+              if type(v) == "string" then v = _unquote(v) end
+              table.insert(const_vals, v)
             end
             local op_name = is_in and "IN_UNROLL" or "NOT_IN_UNROLL"
             self:_emit(op_name, const_vals, res)
@@ -1463,6 +1606,17 @@ function IRLowerer:_lower_expr_impl(node)
     local l = self:lower_expr(node.left)
     local ops = node.ops or {}
     local comparators = node.comparators or {}
+    if #ops == 1 and #comparators == 1 then
+      local left_num = _is_numeric_node(node.left)
+      local right_num = _is_numeric_node(comparators[1])
+      local op_name = self:_cmpop(ops[1])
+      if (left_num or right_num) and (op_name == "lt" or op_name == "le" or op_name == "gt" or op_name == "ge" or op_name == "eq" or op_name == "ne" or op_name == "<" or op_name == "<=" or op_name == ">" or op_name == ">=" or op_name == "==" or op_name == "~=" or op_name == "!=") then
+        local r = self:lower_expr(comparators[1])
+        local cmp_res = self:_new_tmp()
+        self:_emit("CMP_DIRECT", {op_name, l, r}, cmp_res)
+        return cmp_res
+      end
+    end
     local result = self:_new_tmp()
     local current = l
     for i, op in ipairs(ops) do
@@ -1482,6 +1636,32 @@ function IRLowerer:_lower_expr_impl(node)
     end
     return result
   elseif t == "Call" then
+    if node.func and node.func._type == "Name" and node.func.id == "int"
+       and node.args and #node.args == 1
+       and (not node.keywords or #node.keywords == 0) then
+      local arg = self:lower_expr(node.args[1])
+      local res = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_fast_int", arg}, res)
+      return res
+    end
+
+    if node.func and node.func._type == "Name" and node.func.id == "str"
+       and node.args and #node.args == 1
+       and (not node.keywords or #node.keywords == 0) then
+      if node.args[1]._type == "Call" and node.args[1].func and node.args[1].func._type == "Name" and node.args[1].func.id == "len"
+         and node.args[1].args and #node.args[1].args == 1
+         and (not node.args[1].keywords or #node.args[1].keywords == 0) then
+        local arg = self:lower_expr(node.args[1].args[1])
+        local res = self:_new_tmp()
+        self:_emit("CALL", {"_luthon_str_len", arg}, res)
+        return res
+      end
+      local arg = self:lower_expr(node.args[1])
+      local res = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_str", arg}, res)
+      return res
+    end
+
     if node.func and node.func._type == "Attribute" and node.func.attr == "extend"
        and node.args and #node.args == 1
        and (node.args[1]._type == "Tuple" or node.args[1]._type == "List")
@@ -1497,10 +1677,31 @@ function IRLowerer:_lower_expr_impl(node)
       return res
     end
 
+    if node.func and node.func._type == "Attribute" and node.func.attr == "append"
+       and node.args and #node.args == 1
+       and (not node.keywords or #node.keywords == 0) then
+      local obj = self:lower_expr(node.func.value)
+      local val = self:lower_expr(node.args[1])
+      local res = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_fast_append", obj, val}, res)
+      return res
+    end
+
+    local enc_val = (node.args and #node.args == 1 and node.args[1]._type == "Constant") and _unquote(node.args[1].value) or nil
     if node.func and node.func._type == "Attribute" and node.func.attr == "encode"
-       and ((not node.args or #node.args == 0) or (#node.args == 1 and node.args[1]._type == "Constant" and (node.args[1].value == "utf8" or node.args[1].value == "utf-8" or node.args[1].value == "ascii" or node.args[1].value == "latin1" or node.args[1].value == "latin-1")))
+       and ((not node.args or #node.args == 0) or (enc_val and (enc_val == "utf8" or enc_val == "utf-8" or enc_val == "ascii" or enc_val == "latin1" or enc_val == "latin-1")))
        and (not node.keywords or #node.keywords == 0) then
       return self:lower_expr(node.func.value)
+    end
+
+    if node.func and node.func._type == "Attribute" and node.func.attr == "join"
+       and node.args and #node.args == 1
+       and (not node.keywords or #node.keywords == 0) then
+      local sep = self:lower_expr(node.func.value)
+      local seq = self:lower_expr(node.args[1])
+      local res = self:_new_tmp()
+      self:_emit("CALL", {"_luthon_fast_join", sep, seq}, res)
+      return res
     end
 
     if node.func._type == "Name" and node.func.id == "super" and (not node.args or #node.args == 0) then
@@ -1818,7 +2019,7 @@ function IRLowerer:_lower_expr_impl(node)
     local res = self:lower_expr(values[1])
     if values[1]._type == "FormattedValue" then
       local tmp = self:_new_tmp()
-      self:_emit("CALL", {"tostring", res}, tmp)
+      self:_emit("CALL", {"_luthon_str", res}, tmp)
       res = tmp
     end
 
@@ -1827,7 +2028,7 @@ function IRLowerer:_lower_expr_impl(node)
       local val = self:lower_expr(values[i])
       if values[i]._type == "FormattedValue" then
         local tmp = self:_new_tmp()
-        self:_emit("CALL", {"tostring", val}, tmp)
+        self:_emit("CALL", {"_luthon_str", val}, tmp)
         val = tmp
       end
       local new_res = self:_new_tmp()

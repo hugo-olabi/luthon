@@ -319,6 +319,8 @@ local function _emit(ins)
     return args[1] .. "[" .. args[2] .. "] = " .. args[3]
   elseif o == "LIST_APPEND" then
     return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
+  elseif o == "SUBSCR_FAST_KEY" then
+    return ins.result .. " = " .. args[1] .. "[" .. args[2] .. "]"
   elseif o == "NEXT" then
     return ins.result .. " = " .. args[1] .. "()"
   elseif o == "SELECT" then

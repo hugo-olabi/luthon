@@ -229,6 +229,8 @@ end"""
         return ins.result + " = list_repeat(" + ins.args[0] + ", " + ins.args[1] + ")"
     if o == "LIST_APPEND":
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
+    if o == "SUBSCR_FAST_KEY":
+        return ins.result + " = " + ins.args[0] + "[" + ins.args[1] + "]"
     if o == "DICT_COUNTER_INC":
         d_name, k_name, step_val = ins.args[0], ins.args[1], ins.args[2]
         return f"{d_name}[{k_name}] = ({d_name}[{k_name}] or 0) + {step_val}"
