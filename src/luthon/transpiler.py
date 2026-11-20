@@ -616,10 +616,19 @@ def transpile(source: str) -> str:
 def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, filename: str = "", package: str = "", dump_vectorization: bool = False):
     """Transpile via the IR pipeline (semantic -> IR -> Lua codegen)."""
     import ast
+    from pathlib import Path
     from .semantic import analyze
     from .ir import IRLowerer
     from .codegen import generate, generate_with_sourcemap
     from .stdlib import STDLIB_LUA
+    from .debug import start_diary, stop_diary, get_active_diary
+
+    diary_created = False
+    if get_active_diary() is None:
+        mod_name = package or (Path(filename).stem if filename else "module")
+        start_diary(mod_name, source_file=filename)
+        diary_created = True
+
     tree = ast.parse(source)
     scope = analyze(tree)
     ir = IRLowerer(package=package)
@@ -680,5 +689,11 @@ def transpile_ir(source: str, optimize: bool = False, sourcemap: bool = False, f
         file_prefix += f'__package__ = __package__ or "{package}"\n'
     if sourcemap:
         lua, sm = generate_with_sourcemap(module, filename=filename)
-        return STDLIB_LUA + chr(10) + file_prefix + lua + chr(10) + entry_call + chr(10) + module_export, sm
-    return STDLIB_LUA + chr(10) + file_prefix + generate(module) + chr(10) + entry_call + chr(10) + module_export
+        res_lua = STDLIB_LUA + chr(10) + file_prefix + lua + chr(10) + entry_call + chr(10) + module_export
+        if diary_created:
+            stop_diary(flush=True)
+        return res_lua, sm
+    res_lua = STDLIB_LUA + chr(10) + file_prefix + generate(module) + chr(10) + entry_call + chr(10) + module_export
+    if diary_created:
+        stop_diary(flush=True)
+    return res_lua

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .luthon_cache/
+.luthon-debug/
 bench/
 test_file.txt
 *.lua

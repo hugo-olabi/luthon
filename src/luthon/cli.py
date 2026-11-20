@@ -337,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--cache-dir", default=None, help="Cache directory")
     r.add_argument("--pure", action="store_true", default=False, help="Disable native Lua shims; use only Luthon stdlib native and C-API proxy / binary reflection")
     r.add_argument("--no-nyi", action="store_true", default=False, help="Disable generation of .luthon-nyi fallback report")
+    r.add_argument("--debug", action="store_true", default=False, help="Generate lowering decision diary in .luthon-debug/")
 
     t = sub.add_parser("transpile", help="Transpile a Python file to Lua")
     t.add_argument("input", help="Input .py file")
@@ -349,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--no-cache", action="store_true", help="Disable compilation cache")
     t.add_argument("--cache-dir", default=None, help="Cache directory")
     t.add_argument("--pure", action="store_true", default=False, help="Emit pure runtime mode (disables native Lua shims)")
+    t.add_argument("--debug", action="store_true", default=False, help="Generate lowering decision diary in .luthon-debug/")
 
     a = sub.add_parser("analyze", help="Run semantic analysis on a Python file")
     a.add_argument("input", help="Input .py file")
@@ -376,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     ref.add_argument("--name", default=None, help="Override module name")
 
     args, extra = parser.parse_known_args(raw_argv)
+
+    if getattr(args, "debug", False):
+        os.environ["LUTHON_DEBUG"] = "1"
 
     if args.command == "run":
         if getattr(args, "no_nyi", False):
