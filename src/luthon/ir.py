@@ -39,6 +39,7 @@ class Function:
     is_nested: bool = False
     param_annotations: dict = field(default_factory=dict)
     param_types: dict = field(default_factory=dict)
+    param_defaults: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -156,14 +157,14 @@ class IRLowerer:
             if not has_starred:
                 for i, e in enumerate(tgt.elts):
                     elem_tmp = self._new_tmp()
-                    self._emit("SUBSCR_DIRECT", [val_tmp, str(i)], result=elem_tmp)
+                    self._emit("SUBSCR_FAST_INDEX", [val_tmp, str(i)], result=elem_tmp)
                     self._lower_target(e, elem_tmp)
             else:
                 star_idx = next(i for i, e in enumerate(tgt.elts) if isinstance(e, ast.Starred))
                 num_trail = len(tgt.elts) - 1 - star_idx
                 for i in range(star_idx):
                     elem_tmp = self._new_tmp()
-                    self._emit("SUBSCR_DIRECT", [val_tmp, str(i)], result=elem_tmp)
+                    self._emit("SUBSCR_FAST_INDEX", [val_tmp, str(i)], result=elem_tmp)
                     self._lower_target(tgt.elts[i], elem_tmp)
                 for j in range(1, num_trail + 1):
                     idx_tmp = self._new_tmp()
@@ -465,12 +466,16 @@ class IRLowerer:
             # Unpack default parameter values
             args_list = node.args.args
             defaults = node.args.defaults
+            param_defaults = {}
             if defaults:
                 offset = len(args_list) - len(defaults)
                 for i, default in enumerate(defaults):
                     param_name = _safe_var(args_list[offset + i].arg)
                     def_tmp = self.lower_expr(default)
                     self._emit("DEFAULT_ARG", [param_name, def_tmp])
+                    if isinstance(default, ast.Constant):
+                        param_defaults[param_name] = default.value
+            fn.param_defaults = param_defaults
 
             for s in node.body:
                 self.lower_stmt(s)

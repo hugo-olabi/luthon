@@ -112,6 +112,7 @@ local function _emit(ins)
     local raw_op = args[1] or ""
     local op_name = raw_op:lower()
     local is_typed_num = raw_op:find("^int%.__typed_") or raw_op:find("^float%.__typed_")
+    local is_typed_str = raw_op:find("^str%.__typed_")
     if is_typed_num and (op_name == "int.__typed_add__" or op_name == "float.__typed_add__" or op_name == "add" or op_name == "+") then
       return ins.result .. " = (" .. l .. " + " .. r .. ")"
     elseif is_typed_num and (op_name == "int.__typed_sub__" or op_name == "float.__typed_sub__" or op_name == "sub" or op_name == "-") then
@@ -120,6 +121,10 @@ local function _emit(ins)
       return ins.result .. " = (" .. l .. " * " .. r .. ")"
     elseif is_typed_num and (op_name == "int.__typed_mod__" or op_name == "float.__typed_mod__" or op_name == "mod" or op_name == "%") then
       return ins.result .. " = (" .. l .. " % " .. r .. ")"
+    elseif is_typed_str and (op_name == "str.__typed_add__" or op_name == "add" or op_name == "+" or op_name == "concat") then
+      return ins.result .. " = (" .. l .. " .. " .. r .. ")"
+    elseif op_name == "concat" then
+      return ins.result .. " = (" .. l .. " .. " .. r .. ")"
     elseif op_name == "floordiv" then
       return ins.result .. " = math.floor(" .. l .. " / " .. r .. ")"
     elseif op_name == "band" then

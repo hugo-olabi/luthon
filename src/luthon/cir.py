@@ -156,14 +156,22 @@ class TypeInferrer:
         self._attr_sources: Dict[str, Tuple[str, str]] = {}
         # Temporary name -> original loaded variable name
         self._load_sources: Dict[str, str] = {}
+        self._call_table_sources: Dict[str, str] = {}
         for block in self.fn.blocks:
             for ins in block.instrs:
                 if ins.op == "LOAD" and ins.args and ins.result:
                     self._load_sources[str(ins.result)] = str(ins.args[0])
+                elif ins.op == "GET_ATTR" and len(ins.args) >= 2 and ins.result:
+                    self._attr_sources[str(ins.result)] = (str(ins.args[0]), str(ins.args[1]))
+                elif ins.op in ("SUBSCR", "SUBSCR_FAST_KEY", "GET_ITEM") and len(ins.args) >= 1 and ins.result:
+                    src_tbl = str(ins.args[0])
+                    resolved_tbl = self._load_sources.get(src_tbl, src_tbl)
+                    self._call_table_sources[str(ins.result)] = resolved_tbl
 
         diary = get_active_diary()
-        # Initial seeding: explicit param_types or function signature type annotations
+        # Initial seeding: explicit param_types, function signature type annotations, or default argument values
         fn_annots = getattr(fn, "param_annotations", {}) or {}
+        fn_defaults = getattr(fn, "param_defaults", {}) or {}
         for p in fn.params:
             if p in self.param_types:
                 self.type_env[p] = {self.param_types[p]}
@@ -174,6 +182,27 @@ class TypeInferrer:
                 self.type_env[p] = {ann_type}
                 if diary:
                     diary.record_type(fn.name, p, str(ann_type), is_concrete=(ann_type != ANY_TYPE), reason="Function signature type annotation")
+            elif p in fn_defaults:
+                def_val = fn_defaults[p]
+                if isinstance(def_val, bool):
+                    def_t = BOOL_TYPE
+                elif isinstance(def_val, int):
+                    def_t = INT_TYPE
+                elif isinstance(def_val, float):
+                    def_t = FLOAT_TYPE
+                elif isinstance(def_val, str):
+                    def_t = STR_TYPE
+                else:
+                    def_t = ANY_TYPE
+                if def_t != ANY_TYPE:
+                    self.type_env[p] = {def_t}
+                    if diary:
+                        diary.record_type(fn.name, p, str(def_t), is_concrete=True, reason=f"Parameter default value prior ({repr(def_val)})")
+                else:
+                    deduced = self._deduce_param_type_from_usage(p)
+                    self.type_env[p] = {deduced}
+                    if diary:
+                        diary.record_type(fn.name, p, str(deduced), is_concrete=(deduced != ANY_TYPE), reason="Deduced from parameter usage in arithmetic/calls")
             else:
                 deduced = self._deduce_param_type_from_usage(p)
                 self.type_env[p] = {deduced}
@@ -183,12 +212,15 @@ class TypeInferrer:
     def _deduce_param_type_from_usage(self, param_name: str) -> CIRType:
         var_tmps: Dict[str, str] = {}
         const_tmps: Dict[str, Any] = {}
+        attr_tmps: Dict[str, Tuple[str, str]] = {}
         for block in self.fn.blocks:
             for ins in block.instrs:
                 if ins.op == "LOAD" and ins.args and ins.result:
                     var_tmps[str(ins.result)] = str(ins.args[0])
                 elif ins.op == "CONST" and ins.args and ins.result:
                     const_tmps[str(ins.result)] = ins.args[0]
+                elif ins.op == "GET_ATTR" and len(ins.args) >= 2 and ins.result:
+                    attr_tmps[str(ins.result)] = (str(ins.args[0]), str(ins.args[1]))
 
         for block in self.fn.blocks:
             for ins in block.instrs:
@@ -216,6 +248,16 @@ class TypeInferrer:
                         return FLOAT_TYPE
                 elif op == "CALL" and args:
                     callee = str(args[0])
+                    qual = None
+                    if callee in attr_tmps:
+                        r, a = attr_tmps[callee]
+                        qual = f"{var_tmps.get(r, r)}.{a}"
+                    elif callee in var_tmps:
+                        qual = var_tmps[callee]
+                    if qual in ("math.sqrt", "math.log", "math.log10", "math.log2", "math.exp", "math.sin", "math.cos", "math.tan", "math.abs", "math.fabs"):
+                        a1_var = var_tmps.get(str(args[1]), str(args[1])) if len(args) > 1 else ""
+                        if a1_var == param_name:
+                            return FLOAT_TYPE
                     a1_var = var_tmps.get(str(args[1]), str(args[1])) if len(args) > 1 else ""
                     if callee in ("_luthon_slice", "SLICE_STR") and len(args) >= 4:
                         a2_var = var_tmps.get(str(args[2]), str(args[2]))
@@ -361,6 +403,8 @@ class TypeInferrer:
                 return {INT_TYPE}
             if binop in ("band", "bor", "bxor", "lshift", "rshift", "mod", "%"):
                 return {INT_TYPE}
+            if binop == "concat" or (left_t == STR_TYPE and right_t == STR_TYPE and binop in ("add", "+")):
+                return {STR_TYPE}
 
             if left_t == INT_TYPE and right_t == INT_TYPE:
                 return {INT_TYPE}
@@ -472,24 +516,39 @@ class TypeInferrer:
             if ins.args:
                 callee = str(ins.args[0])
                 resolved_callee = self._load_sources.get(callee, callee)
-                c_names = (callee, resolved_callee)
+                qual_callee = None
+                if callee in self._attr_sources:
+                    r_tmp, a_name = self._attr_sources[callee]
+                    r_mod = self._load_sources.get(r_tmp, r_tmp)
+                    qual_callee = f"{r_mod}.{a_name}"
+                c_names = (callee, resolved_callee, qual_callee) if qual_callee else (callee, resolved_callee)
                 for c in c_names:
                     if c in self.fn_returns:
                         return {self.fn_returns[c]}
+                if hasattr(self, "_call_table_sources") and callee in self._call_table_sources:
+                    tbl = self._call_table_sources[callee]
+                    tbl_rets = getattr(self.fn, "_dispatch_table_returns", {}) or {}
+                    if tbl in tbl_rets:
+                        return {tbl_rets[tbl]}
                 if any(c in ("is_ipv4", "is_ipv6", "is_ip", "is_url", "is_magnet", "_socket_mod.inet_pton_bool") for c in c_names):
                     return {BOOL_TYPE}
                 if any(c == "range" for c in c_names):
                     return {ListType(INT_TYPE)}
                 if any(c == "iter" for c in c_names) and len(ins.args) > 1:
                     return {self._get_type(ins.args[1])}
-                if any(c in ("int", "_luthon_fast_int", "len", "_luthon_raw_len") for c in c_names):
+                if any(c in ("int", "_luthon_fast_int", "len", "_luthon_raw_len", "math.floor", "math.ceil", "math.trunc", "ord", "hash") for c in c_names):
                     return {INT_TYPE}
-                if any(c in ("str", "_luthon_str", "_luthon_str_len") for c in c_names):
+                if any(c in ("str", "_luthon_str", "_luthon_str_len", "chr", "repr") for c in c_names):
                     return {STR_TYPE}
-                if any(c == "float" for c in c_names):
+                if any(c in ("float", "math.sqrt", "math.log", "math.log10", "math.log2", "math.exp", "math.sin", "math.cos", "math.tan", "math.asin", "math.acos", "math.atan", "math.atan2", "math.pow", "math.fabs", "math.abs", "math.hypot") for c in c_names):
                     return {FLOAT_TYPE}
+                if any(c in ("platform.system", "platform.release", "platform.machine", "platform.version", "platform.platform", "platform.architecture") for c in c_names):
+                    return {STR_TYPE}
                 if any(c in ("bool", "_luthon_truthy") for c in c_names):
                     return {BOOL_TYPE}
+                if any(c == "abs" for c in c_names) and len(ins.args) > 1:
+                    at = self._get_type(ins.args[1])
+                    return {at} if at in (INT_TYPE, FLOAT_TYPE) else {FLOAT_TYPE}
                 if any(c in ("_luthon_slice", "SLICE_STR") for c in c_names):
                     if len(ins.args) > 1 and self._get_type(ins.args[1]) == STR_TYPE:
                         return {STR_TYPE}
@@ -499,8 +558,10 @@ class TypeInferrer:
                     if recv_t == STR_TYPE:
                         if attr_name in ("index", "find", "rfind", "count"):
                             return {INT_TYPE}
-                        elif attr_name in ("strip", "lstrip", "rstrip", "replace", "lower", "upper", "decode", "encode"):
+                        elif attr_name in ("strip", "lstrip", "rstrip", "replace", "lower", "upper", "decode", "encode", "join", "format", "center", "ljust", "rjust", "zfill"):
                             return {STR_TYPE}
+                        elif attr_name in ("partition", "rpartition"):
+                            return {TupleType((STR_TYPE, STR_TYPE, STR_TYPE))}
                         elif attr_name in ("startswith", "endswith", "isdigit", "isalpha", "isalnum"):
                             return {BOOL_TYPE}
                         elif attr_name in ("split", "splitlines"):
@@ -510,6 +571,15 @@ class TypeInferrer:
                             return {INT_TYPE}
                         elif attr_name == "pop":
                             return {recv_t.item_type}
+                    elif isinstance(recv_t, DictType):
+                        if attr_name == "get":
+                            return {recv_t.value_type}
+                        elif attr_name == "keys":
+                            return {ListType(recv_t.key_type)}
+                        elif attr_name == "values":
+                            return {ListType(recv_t.value_type)}
+                        elif attr_name == "items":
+                            return {ListType(TupleType((recv_t.key_type, recv_t.value_type)))}
             return {ANY_TYPE}
 
         return {ANY_TYPE}
@@ -529,8 +599,8 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
             if ins.op == "BINOP" and len(ins.args) >= 3:
                 binop = str(ins.args[0]).lower()
                 left_arg, right_arg = ins.args[1], ins.args[2]
-                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else ANY_TYPE))
-                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else ANY_TYPE))
+                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (STR_TYPE if isinstance(left_arg, str) else ANY_TYPE)))
+                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (STR_TYPE if isinstance(right_arg, str) else ANY_TYPE)))
 
                 if lt == INT_TYPE and rt == INT_TYPE:
                     method_name = f"int.__typed_{binop}__"
@@ -544,6 +614,12 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                     changed = True
                     if diary:
                         diary.record_decision(fn.name, "ARITHMETIC", binop, f"machine_float_{binop}", is_native=True, reason=f"Operands {left_arg} ({lt}) and {right_arg} ({rt}) are concrete numeric", line=ins.src_line, col=ins.src_col)
+                elif (lt == STR_TYPE and rt == STR_TYPE and binop in ("add", "+")) or binop == "concat":
+                    method_name = "str.__typed_add__"
+                    ins.args[0] = method_name
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "STRING", binop, "native_concat", is_native=True, reason=f"Operands {left_arg} ({lt}) and {right_arg} ({rt}) are concrete strings", line=ins.src_line, col=ins.src_col)
                 else:
                     if diary:
                         diary.record_decision(fn.name, "ARITHMETIC", binop, "_luthon_add", is_native=False, reason=f"Operands {left_arg} ({lt}) and {right_arg} ({rt}) contain gradual/unknown types", line=ins.src_line, col=ins.src_col, suggestion="Annotate parameter types or propagate function returns")
@@ -570,6 +646,20 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                     else:
                         if diary:
                             diary.record_decision(fn.name, "COMPARISON", cmpop, "_luthon_cmp", is_native=False, reason=f"Operands {left_arg} ({lt}) and {right_arg} ({rt}) require generic Python equality/order comparison", line=ins.src_line, col=ins.src_col)
+
+            elif ins.op == "SUBSCR_FAST_INDEX" and len(ins.args) >= 2:
+                cont_arg, idx_arg = ins.args[0], ins.args[1]
+                if diary:
+                    diary.record_decision(
+                        fn.name,
+                        "SUBSCRIPT",
+                        f"{cont_arg}[{idx_arg}]",
+                        "subscr_fast_index",
+                        is_native=True,
+                        reason=f"Positional sequence unpack index {idx_arg}",
+                        line=ins.src_line,
+                        col=ins.src_col,
+                    )
 
             elif ins.op in ("SUBSCR", "SUBSCR_DIRECT") and len(ins.args) >= 2:
                 cont_arg, idx_arg = ins.args[0], ins.args[1]
@@ -1365,11 +1455,54 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
         if len(non_any_ret) == 1:
             fn_returns[fn.name] = next(iter(non_any_ret))
 
+    # 1.6 Dispatch table analysis & parameter type seeding
+    dispatch_table_returns: Dict[str, CIRType] = {}
+    dispatch_func_param_types: Dict[str, Dict[str, CIRType]] = {}
+    if entry_fn:
+        tbl_assigns: Dict[str, List[Tuple[Any, str]]] = {}
+        load_srcs: Dict[str, str] = {}
+        const_srcs: Dict[str, Any] = {}
+        for b in entry_fn.blocks:
+            for ins in b.instrs:
+                if ins.op == "LOAD" and ins.result and ins.args:
+                    load_srcs[str(ins.result)] = str(ins.args[0])
+                elif ins.op == "CONST" and ins.result and ins.args:
+                    const_srcs[str(ins.result)] = ins.args[0]
+                elif ins.op in ("STORE_SUBSCR", "SET_ITEM") and len(ins.args) >= 3:
+                    tbl = load_srcs.get(str(ins.args[0]), str(ins.args[0]))
+                    key = const_srcs.get(str(ins.args[1]), load_srcs.get(str(ins.args[1]), str(ins.args[1])))
+                    val = load_srcs.get(str(ins.args[2]), str(ins.args[2]))
+                    tbl_assigns.setdefault(tbl, []).append((key, val))
+
+        for tbl, assigns in tbl_assigns.items():
+            func_rets = [fn_returns.get(val) for _, val in assigns if val in fn_returns]
+            if func_rets and len(func_rets) == len(assigns):
+                all_2tuples_with_int = all(
+                    isinstance(r, TupleType) and len(r.item_types) == 2 and r.item_types[1] == INT_TYPE
+                    for r in func_rets
+                )
+                if all_2tuples_with_int:
+                    dispatch_table_returns[tbl] = TupleType((ANY_TYPE, INT_TYPE))
+
+            for key, val in assigns:
+                if key == "bool":
+                    dispatch_func_param_types.setdefault(val, {})["x"] = BOOL_TYPE
+                elif key == "int":
+                    dispatch_func_param_types.setdefault(val, {})["x"] = INT_TYPE
+                elif key in ("str", "bytes"):
+                    dispatch_func_param_types.setdefault(val, {})["x"] = STR_TYPE
+                elif key in ("list", "tuple"):
+                    dispatch_func_param_types.setdefault(val, {})["x"] = ListType(ANY_TYPE)
+                elif key == "dict":
+                    dispatch_func_param_types.setdefault(val, {})["x"] = DictType(ANY_TYPE, ANY_TYPE)
+
     # 2. Per-function CIR normalization and pattern fusion
     for fn in module.functions:
         setattr(fn, "_module_types", module_types)
         setattr(fn, "_fn_returns", fn_returns)
-        inferrer = TypeInferrer(fn, module_types=module_types, fn_returns=fn_returns)
+        setattr(fn, "_dispatch_table_returns", dispatch_table_returns)
+        extra_params = dispatch_func_param_types.get(fn.name, {})
+        inferrer = TypeInferrer(fn, param_types=extra_params, module_types=module_types, fn_returns=fn_returns)
         type_map = inferrer.infer()
         normalize_to_typed_cir(fn, type_map)
         fuse_dictionary_counter_patterns(fn)

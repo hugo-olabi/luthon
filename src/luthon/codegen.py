@@ -27,6 +27,7 @@ def _emit(ins):
         r = ins.args[2] if ins.args[2] is not None else "nil"
         orig_op = ins.args[0] or ""
         is_typed_num = orig_op.startswith("int.__typed_") or orig_op.startswith("float.__typed_")
+        is_typed_str = orig_op.startswith("str.__typed_")
         raw_op = orig_op.lower()
         # Clean typed magic method signatures (e.g. int.__typed_add__ -> add)
         if "__typed_" in raw_op:
@@ -39,6 +40,10 @@ def _emit(ins):
             return f"{ins.result} = ({l} * {r})"
         elif is_typed_num and raw_op in ("mod", "%"):
             return f"{ins.result} = ({l} % {r})"
+        elif is_typed_str and raw_op in ("add", "+", "concat"):
+            return f"{ins.result} = ({l} .. {r})"
+        elif raw_op == "concat":
+            return f"{ins.result} = ({l} .. {r})"
         elif raw_op in ("floordiv", "//"):
             return ins.result + " = math.floor(" + l + " / " + r + ")"
         elif raw_op in ("band", "bitand", "&"):
