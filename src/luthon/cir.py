@@ -534,6 +534,13 @@ class TypeInferrer:
                     return {BOOL_TYPE}
                 if any(c == "range" for c in c_names):
                     return {ListType(INT_TYPE)}
+                if any(c in ("array", "array.array") for c in c_names):
+                    typecode = str(ins.args[1]) if len(ins.args) > 1 else ""
+                    if any(tc in typecode for tc in ("d", "f")):
+                        return {ListType(FLOAT_TYPE)}
+                    elif any(tc in typecode for tc in ("i", "l", "b", "h", "q")):
+                        return {ListType(INT_TYPE)}
+                    return {ListType(FLOAT_TYPE)}
                 if any(c == "iter" for c in c_names) and len(ins.args) > 1:
                     return {self._get_type(ins.args[1])}
                 if any(c in ("int", "_luthon_fast_int", "len", "_luthon_raw_len", "math.floor", "math.ceil", "math.trunc", "ord", "hash") for c in c_names):
@@ -1532,12 +1539,96 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
                 elif key == "dict":
                     dispatch_func_param_types.setdefault(val, {})["x"] = DictType(ANY_TYPE, ANY_TYPE)
 
+    # 1.7 Inter-procedural Call-Site Parameter Type Propagation (Horizon 3)
+    func_map = {fn.name: fn for fn in module.functions}
+    call_propagated_params: Dict[str, Dict[str, CIRType]] = {}
+
+    for _ in range(3):
+        call_arg_types: Dict[str, Dict[str, Set[CIRType]]] = {}
+        for caller in module.functions:
+            caller_extra = {
+                **dispatch_func_param_types.get(caller.name, {}),
+                **call_propagated_params.get(caller.name, {}),
+            }
+            inf = TypeInferrer(caller, param_types=caller_extra, module_types=module_types, fn_returns=fn_returns)
+            inf.infer()
+            for b in caller.blocks:
+                for ins in b.instrs:
+                    if ins.op == "CALL" and ins.args:
+                        callee_raw = str(ins.args[0])
+                        if callee_raw == "_luthon_call_kw" and len(ins.args) >= 3:
+                            callee_name = inf._load_sources.get(str(ins.args[1]), str(ins.args[1]))
+                            call_args = ins.args[3:]
+                        elif callee_raw == "_luthon_call_starred":
+                            continue
+                        else:
+                            callee_name = inf._load_sources.get(callee_raw, callee_raw)
+                            call_args = ins.args[1:]
+
+                        if callee_name in func_map:
+                            callee_fn = func_map[callee_name]
+                            for idx, a in enumerate(call_args):
+                                if idx < len(callee_fn.params):
+                                    p_name = callee_fn.params[idx]
+                                    if p_name != "...":
+                                        at = inf._get_type(a)
+                                        call_arg_types.setdefault(callee_name, {}).setdefault(p_name, set()).add(at)
+
+                        init_name = f"{callee_name}.__init__"
+                        if init_name in func_map:
+                            callee_fn = func_map[init_name]
+                            for idx, a in enumerate(call_args):
+                                p_idx = idx + 1
+                                if p_idx < len(callee_fn.params):
+                                    p_name = callee_fn.params[p_idx]
+                                    if p_name != "...":
+                                        at = inf._get_type(a)
+                                        call_arg_types.setdefault(init_name, {}).setdefault(p_name, set()).add(at)
+
+        new_propagated = False
+        for cname, pmap in call_arg_types.items():
+            for pname, tset in pmap.items():
+                if ANY_TYPE in tset or BOTTOM_TYPE in tset:
+                    continue
+                if len(tset) == 1:
+                    concrete_t = next(iter(tset))
+                    if call_propagated_params.get(cname, {}).get(pname) != concrete_t:
+                        call_propagated_params.setdefault(cname, {})[pname] = concrete_t
+                        new_propagated = True
+                elif tset <= {INT_TYPE, FLOAT_TYPE}:
+                    if call_propagated_params.get(cname, {}).get(pname) != FLOAT_TYPE:
+                        call_propagated_params.setdefault(cname, {})[pname] = FLOAT_TYPE
+                        new_propagated = True
+
+        for fn in module.functions:
+            fn_extra = {
+                **dispatch_func_param_types.get(fn.name, {}),
+                **call_propagated_params.get(fn.name, {}),
+            }
+            inf = TypeInferrer(fn, param_types=fn_extra, module_types=module_types, fn_returns=fn_returns)
+            inf.infer()
+            ret_types = set()
+            for b in fn.blocks:
+                for ins in b.instrs:
+                    if ins.op in ("RETURN", "TRY_RETURN") and ins.args:
+                        ret_t = inf._get_type(ins.args[0])
+                        ret_types.add(ret_t)
+            non_any_ret = {t for t in ret_types if t != ANY_TYPE and t != BOTTOM_TYPE}
+            if len(non_any_ret) == 1:
+                fn_returns[fn.name] = next(iter(non_any_ret))
+
+        if not new_propagated:
+            break
+
     # 2. Per-function CIR normalization and pattern fusion
     for fn in module.functions:
         setattr(fn, "_module_types", module_types)
         setattr(fn, "_fn_returns", fn_returns)
         setattr(fn, "_dispatch_table_returns", dispatch_table_returns)
-        extra_params = dispatch_func_param_types.get(fn.name, {})
+        extra_params = {
+            **dispatch_func_param_types.get(fn.name, {}),
+            **call_propagated_params.get(fn.name, {}),
+        }
         inferrer = TypeInferrer(fn, param_types=extra_params, module_types=module_types, fn_returns=fn_returns)
         type_map = inferrer.infer()
         normalize_to_typed_cir(fn, type_map)

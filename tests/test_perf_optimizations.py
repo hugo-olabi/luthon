@@ -613,6 +613,30 @@ print(sum_indexed_list([10, 20, 30, 40], [0, 2, 3]))
     assert "+ 1]" in body
 
 
+def test_interprocedural_callsite_parameter_type_propagation():
+    code = """
+def compute_formula(a, b):
+    return (a + b) * (a - b)
+
+def run():
+    x = 10
+    y = 5
+    return compute_formula(x, y)
+
+print(f"RES:{run()}")
+"""
+    out = _run_lua(code, optimize=True)
+    assert out == "RES:75"
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function compute_formula")[1].split("local function _luthon_module_entry")[0]
+    assert "_luthon_add" not in body
+    assert "+" in body
+    assert "-" in body
+    assert "*" in body
+
+
+
 
 
 
