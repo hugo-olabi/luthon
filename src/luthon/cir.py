@@ -751,6 +751,21 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                     changed = True
                     if diary:
                         diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "direct_branch", is_native=True, reason=f"Condition {cond_arg} is guaranteed BOOL_TYPE; omitted _luthon_truthy", line=ins.src_line, col=ins.src_col)
+                elif isinstance(cond_t, (ListType, TupleType)) and len(ins.args) == 3:
+                    ins.args.append("list")
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "direct_branch_container", is_native=True, reason=f"Condition {cond_arg} is {cond_t}; direct length check #t > 0", line=ins.src_line, col=ins.src_col)
+                elif cond_t == STR_TYPE and len(ins.args) == 3:
+                    ins.args.append("str")
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "direct_branch_str", is_native=True, reason=f"Condition {cond_arg} is STR_TYPE; direct length check #s > 0", line=ins.src_line, col=ins.src_col)
+                elif len(ins.args) >= 4 and ins.args[3] in ("bool", "list", "str"):
+                    if diary:
+                        flag = ins.args[3]
+                        dec = "direct_branch" if flag == "bool" else ("direct_branch_container" if flag == "list" else "direct_branch_str")
+                        diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", dec, is_native=True, reason=f"Condition {cond_arg} is {cond_t}; direct branch", line=ins.src_line, col=ins.src_col)
                 else:
                     if diary:
                         diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "_luthon_truthy", is_native=False, reason=f"Condition {cond_arg} has type {cond_t}; requires Python truthiness evaluation", line=ins.src_line, col=ins.src_col)
@@ -763,6 +778,21 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                     changed = True
                     if diary:
                         diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "direct_branch", is_native=True, reason=f"Condition {cond_arg} is guaranteed BOOL_TYPE; omitted _luthon_truthy", line=ins.src_line, col=ins.src_col)
+                elif isinstance(cond_t, (ListType, TupleType)) and len(ins.args) == 2:
+                    ins.args.append("list")
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "direct_branch_container", is_native=True, reason=f"Condition {cond_arg} is {cond_t}; direct length check #t > 0", line=ins.src_line, col=ins.src_col)
+                elif cond_t == STR_TYPE and len(ins.args) == 2:
+                    ins.args.append("str")
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "direct_branch_str", is_native=True, reason=f"Condition {cond_arg} is STR_TYPE; direct length check #s > 0", line=ins.src_line, col=ins.src_col)
+                elif len(ins.args) >= 3 and ins.args[2] in ("bool", "list", "str"):
+                    if diary:
+                        flag = ins.args[2]
+                        dec = "direct_branch" if flag == "bool" else ("direct_branch_container" if flag == "list" else "direct_branch_str")
+                        diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", dec, is_native=True, reason=f"Condition {cond_arg} is {cond_t}; direct branch", line=ins.src_line, col=ins.src_col)
                 else:
                     if diary:
                         diary.record_decision(fn.name, "BRANCH", f"if {cond_arg}", "_luthon_truthy", is_native=False, reason=f"Condition {cond_arg} has type {cond_t}; requires Python truthiness evaluation", line=ins.src_line, col=ins.src_col)

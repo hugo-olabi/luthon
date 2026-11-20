@@ -95,18 +95,27 @@ def _emit(ins):
     if o == "JUMP":
         return "goto " + ins.args[0]
     if o == "BRANCH":
-        if len(ins.args) >= 4 and ins.args[3] == "bool":
+        flag = ins.args[3] if len(ins.args) >= 4 else None
+        if flag == "bool":
             return "if " + ins.args[0] + " then goto " + ins.args[1] + " else goto " + ins.args[2] + " end"
+        elif flag in ("list", "str"):
+            return "if (#" + ins.args[0] + " > 0) then goto " + ins.args[1] + " else goto " + ins.args[2] + " end"
         return "if _luthon_truthy(" + ins.args[0] + ") then goto " + ins.args[1] + " else goto " + ins.args[2] + " end"
     if o == "BRANCH_NONE":
         return "if " + ins.args[0] + " == nil or " + ins.args[0] + " == _G.None then goto " + ins.args[1] + " end"
     if o == "BRANCH_TRUE":
-        if len(ins.args) >= 3 and ins.args[2] == "bool":
+        flag = ins.args[2] if len(ins.args) >= 3 else None
+        if flag == "bool":
             return "if " + ins.args[0] + " then goto " + ins.args[1] + " end"
+        elif flag in ("list", "str"):
+            return "if (#" + ins.args[0] + " > 0) then goto " + ins.args[1] + " end"
         return "if _luthon_truthy(" + ins.args[0] + ") then goto " + ins.args[1] + " end"
     if o == "BRANCH_FALSE":
-        if len(ins.args) >= 3 and ins.args[2] == "bool":
+        flag = ins.args[2] if len(ins.args) >= 3 else None
+        if flag == "bool":
             return "if not " + ins.args[0] + " then goto " + ins.args[1] + " end"
+        elif flag in ("list", "str"):
+            return "if (#" + ins.args[0] + " == 0) then goto " + ins.args[1] + " end"
         return "if not _luthon_truthy(" + ins.args[0] + ") then goto " + ins.args[1] + " end"
     if o == "CMP":
         cmp_op = (ins.args[0] or "")

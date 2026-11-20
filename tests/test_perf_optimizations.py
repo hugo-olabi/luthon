@@ -5,8 +5,8 @@ import pytest
 from luthon.transpiler import transpile_ir
 
 
-def _run_lua(code: str) -> str:
-    lua = transpile_ir(code)
+def _run_lua(code: str, optimize: bool = False) -> str:
+    lua = transpile_ir(code, optimize=optimize)
     proc = subprocess.run(["luajit", "-"], input=lua, capture_output=True, text=True)
     assert proc.returncode == 0, f"Lua execution failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}\nLUA CODE:\n{lua}"
     return proc.stdout.strip()
@@ -567,6 +567,31 @@ print(f"R1:{run(True)} R2:{run(False)}")
     lua = transpile_ir(code, optimize=True)
     body = lua.split("function encode_bool_val")[1].split("end")[0]
     assert "_luthon_truthy" not in body
+
+
+def test_container_and_string_truthiness_specialization():
+    code = """
+def check_truthiness(items: list, text: str):
+    r1 = "EMPTY_LIST"
+    if items:
+        r1 = "HAS_LIST"
+    r2 = "EMPTY_STR"
+    if text:
+        r2 = "HAS_STR"
+    return f"{r1}|{r2}"
+
+print(check_truthiness([], ""))
+print(check_truthiness([1, 2], "hello"))
+"""
+    out = _run_lua(code, optimize=True)
+    assert "EMPTY_LIST|EMPTY_STR" in out
+    assert "HAS_LIST|HAS_STR" in out
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function check_truthiness")[1].split("local function _luthon_module_entry")[0]
+    assert "_luthon_truthy" not in body
+    assert "#" in body
+
 
 
 

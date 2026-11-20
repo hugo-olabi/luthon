@@ -190,6 +190,8 @@ local function _emit(ins)
   elseif o == "BRANCH" then
     if #args >= 4 and args[4] == "bool" then
       return "if " .. args[1] .. " then goto " .. args[2] .. " else goto " .. args[3] .. " end"
+    elseif #args >= 4 and (args[4] == "list" or args[4] == "str") then
+      return "if (#" .. args[1] .. " > 0) then goto " .. args[2] .. " else goto " .. args[3] .. " end"
     end
     return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " else goto " .. args[3] .. " end"
   elseif o == "BRANCH_NONE" then
@@ -197,11 +199,15 @@ local function _emit(ins)
   elseif o == "BRANCH_TRUE" then
     if #args >= 3 and args[3] == "bool" then
       return "if " .. args[1] .. " then goto " .. args[2] .. " end"
+    elseif #args >= 3 and (args[3] == "list" or args[3] == "str") then
+      return "if (#" .. args[1] .. " > 0) then goto " .. args[2] .. " end"
     end
     return "if _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "BRANCH_FALSE" then
     if #args >= 3 and args[3] == "bool" then
       return "if not " .. args[1] .. " then goto " .. args[2] .. " end"
+    elseif #args >= 3 and (args[3] == "list" or args[3] == "str") then
+      return "if (#" .. args[1] .. " == 0) then goto " .. args[2] .. " end"
     end
     return "if not _luthon_truthy(" .. args[1] .. ") then goto " .. args[2] .. " end"
   elseif o == "IN_UNROLL" or o == "NOT_IN_UNROLL" then
