@@ -68,6 +68,18 @@ class TupleType(CIRType):
         return f"tuple[{types_str}]"
 
 
+@dataclass(frozen=True)
+class InstanceType(CIRType):
+    class_name: str = ""
+
+    def __init__(self, class_name: str = ""):
+        object.__setattr__(self, "name", f"Instance[{class_name}]")
+        object.__setattr__(self, "class_name", class_name)
+
+    def __str__(self) -> str:
+        return f"Instance[{self.class_name}]"
+
+
 INT_TYPE = CIRType("int")
 FLOAT_TYPE = CIRType("float")
 BOOL_TYPE = CIRType("bool")
@@ -99,7 +111,7 @@ def parse_type_annotation(node: Any) -> CIRType:
             return DictType(ANY_TYPE, ANY_TYPE)
         if name == "tuple":
             return TupleType(())
-        return ANY_TYPE
+        return InstanceType(node.id) if node.id and node.id[0].isupper() else ANY_TYPE
 
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         try:
@@ -145,11 +157,13 @@ class TypeInferrer:
         param_types: Optional[Dict[str, CIRType]] = None,
         module_types: Optional[Dict[str, CIRType]] = None,
         fn_returns: Optional[Dict[str, CIRType]] = None,
+        class_field_types: Optional[Dict[str, Dict[str, CIRType]]] = None,
     ):
         self.fn = fn
         self.param_types = param_types or {}
         self.module_types = module_types or getattr(fn, "_module_types", {}) or {}
         self.fn_returns = fn_returns or getattr(fn, "_fn_returns", {}) or {}
+        self.class_field_types = class_field_types or getattr(fn, "_class_field_types", {}) or {}
         # Variable name -> Set of possible CIRTypes
         self.type_env: Dict[str, Set[CIRType]] = {}
         # Temporary name -> (receiver_arg, attr_name) for method calls
@@ -482,6 +496,12 @@ class TypeInferrer:
         elif op == "GET_ATTR":
             if len(ins.args) >= 2 and ins.result:
                 self._attr_sources[str(ins.result)] = (str(ins.args[0]), str(ins.args[1]))
+                recv_t = self._get_type(ins.args[0])
+                attr_name = str(ins.args[1])
+                if isinstance(recv_t, InstanceType):
+                    cfields = self.class_field_types.get(recv_t.class_name, {})
+                    if attr_name in cfields:
+                        return {cfields[attr_name]}
             return {ANY_TYPE}
 
         elif op in ("SUBSCR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX"):
@@ -525,6 +545,8 @@ class TypeInferrer:
                 for c in c_names:
                     if c in self.fn_returns:
                         return {self.fn_returns[c]}
+                    if c in self.class_field_types or f"{c}.__init__" in getattr(self.fn, "_all_fn_names", set()):
+                        return {InstanceType(c)}
                 if hasattr(self, "_call_table_sources") and callee in self._call_table_sources:
                     tbl = self._call_table_sources[callee]
                     tbl_rets = getattr(self.fn, "_dispatch_table_returns", {}) or {}
@@ -738,6 +760,24 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                     changed = True
                     if diary:
                         diary.record_decision(fn.name, "MUTATION", f"{cont_arg}[{idx_arg}] = ...", "store_subscr_direct", is_native=False, reason=f"Container {cont_arg} ({cont_t}) mutation with index {idx_arg}", line=ins.src_line, col=ins.src_col)
+
+            elif ins.op == "GET_ATTR" and len(ins.args) >= 2:
+                recv_arg = ins.args[0]
+                attr_arg = ins.args[1]
+                recv_t = type_map.get(str(recv_arg), ANY_TYPE)
+                if isinstance(recv_t, InstanceType) and diary:
+                    cfields = getattr(fn, "_class_field_types", {}).get(recv_t.class_name, {})
+                    if str(attr_arg) in cfields:
+                        diary.record_decision(
+                            fn.name,
+                            "ATTRIBUTE",
+                            f"{recv_arg}.{attr_arg}",
+                            "direct_field_access",
+                            is_native=True,
+                            reason=f"Instance {recv_arg} ({recv_t}) field {attr_arg} resolved to {cfields[str(attr_arg)]}",
+                            line=ins.src_line,
+                            col=ins.src_col,
+                        )
 
             elif ins.op == "CALL" and ins.args and ins.args[0] == "_luthon_slice":
                 if len(ins.args) >= 4:
@@ -1539,18 +1579,55 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
                 elif key == "dict":
                     dispatch_func_param_types.setdefault(val, {})["x"] = DictType(ANY_TYPE, ANY_TYPE)
 
-    # 1.7 Inter-procedural Call-Site Parameter Type Propagation (Horizon 3)
+    # 1.7 Inter-procedural Call-Site Parameter Type Propagation & Class Field Type Tracking (Horizon 3 & 4)
     func_map = {fn.name: fn for fn in module.functions}
+    all_fn_names = set(func_map.keys())
     call_propagated_params: Dict[str, Dict[str, CIRType]] = {}
+    class_field_types: Dict[str, Dict[str, CIRType]] = {}
 
     for _ in range(3):
+        # Extract class field types from __init__
+        for fn in module.functions:
+            setattr(fn, "_all_fn_names", all_fn_names)
+            if "." in fn.name and fn.name.endswith(".__init__"):
+                cls_name = fn.name.rsplit(".__init__", 1)[0]
+                extra_p = {
+                    **dispatch_func_param_types.get(fn.name, {}),
+                    **call_propagated_params.get(fn.name, {}),
+                }
+                inf = TypeInferrer(
+                    fn,
+                    param_types=extra_p,
+                    module_types=module_types,
+                    fn_returns=fn_returns,
+                    class_field_types=class_field_types,
+                )
+                inf.infer()
+                self_param = fn.params[0] if fn.params else "self"
+                for b in fn.blocks:
+                    for ins in b.instrs:
+                        if ins.op == "SET_ATTR" and len(ins.args) >= 3:
+                            obj_target = inf._load_sources.get(str(ins.args[0]), str(ins.args[0]))
+                            if obj_target == self_param or str(ins.args[0]) == self_param:
+                                attr_name = str(ins.args[1])
+                                val_t = inf._get_type(ins.args[2])
+                                if val_t not in (ANY_TYPE, BOTTOM_TYPE):
+                                    class_field_types.setdefault(cls_name, {})[attr_name] = val_t
+
         call_arg_types: Dict[str, Dict[str, Set[CIRType]]] = {}
         for caller in module.functions:
+            setattr(caller, "_all_fn_names", all_fn_names)
             caller_extra = {
                 **dispatch_func_param_types.get(caller.name, {}),
                 **call_propagated_params.get(caller.name, {}),
             }
-            inf = TypeInferrer(caller, param_types=caller_extra, module_types=module_types, fn_returns=fn_returns)
+            inf = TypeInferrer(
+                caller,
+                param_types=caller_extra,
+                module_types=module_types,
+                fn_returns=fn_returns,
+                class_field_types=class_field_types,
+            )
             inf.infer()
             for b in caller.blocks:
                 for ins in b.instrs:
@@ -1605,7 +1682,13 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
                 **dispatch_func_param_types.get(fn.name, {}),
                 **call_propagated_params.get(fn.name, {}),
             }
-            inf = TypeInferrer(fn, param_types=fn_extra, module_types=module_types, fn_returns=fn_returns)
+            inf = TypeInferrer(
+                fn,
+                param_types=fn_extra,
+                module_types=module_types,
+                fn_returns=fn_returns,
+                class_field_types=class_field_types,
+            )
             inf.infer()
             ret_types = set()
             for b in fn.blocks:
@@ -1625,11 +1708,19 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
         setattr(fn, "_module_types", module_types)
         setattr(fn, "_fn_returns", fn_returns)
         setattr(fn, "_dispatch_table_returns", dispatch_table_returns)
+        setattr(fn, "_class_field_types", class_field_types)
+        setattr(fn, "_all_fn_names", all_fn_names)
         extra_params = {
             **dispatch_func_param_types.get(fn.name, {}),
             **call_propagated_params.get(fn.name, {}),
         }
-        inferrer = TypeInferrer(fn, param_types=extra_params, module_types=module_types, fn_returns=fn_returns)
+        inferrer = TypeInferrer(
+            fn,
+            param_types=extra_params,
+            module_types=module_types,
+            fn_returns=fn_returns,
+            class_field_types=class_field_types,
+        )
         type_map = inferrer.infer()
         normalize_to_typed_cir(fn, type_map)
         fuse_dictionary_counter_patterns(fn)

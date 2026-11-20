@@ -636,6 +636,35 @@ print(f"RES:{run()}")
     assert "*" in body
 
 
+def test_class_field_type_tracking_and_native_arithmetic():
+    code = """
+class Body:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+def distance():
+    b1 = Body(1.0, 2.0, 3.0)
+    b2 = Body(4.0, 6.0, 8.0)
+    dx = b1.x - b2.x
+    dy = b1.y - b2.y
+    dz = b1.z - b2.z
+    return dx * dx + dy * dy + dz * dz
+
+print(f"DIST:{distance()}")
+"""
+    out = _run_lua(code, optimize=True)
+    assert "DIST:50" in out
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function distance")[1].split("local function _luthon_module_entry")[0]
+    assert "_luthon_add" not in body
+    assert "-" in body
+    assert "+" in body
+
+
+
 
 
 
