@@ -555,10 +555,6 @@ local function _wrap_pybridge_method(raw_val, t)
 end
 
 function _luthon_subscr_fast(t, idx)
-  local mt = getmetatable(t)
-  if mt and (mt.__tuple__ or mt.__list__) then
-    return t[idx + 1]
-  end
   if type(t) == "table" and not rawget(t, "_py") and not rawget(t, "_buf") then
     return t[idx + 1]
   end
