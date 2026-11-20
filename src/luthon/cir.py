@@ -152,7 +152,66 @@ class TypeInferrer:
                 ann_type = parse_type_annotation(fn_annots[p])
                 self.type_env[p] = {ann_type}
             else:
-                self.type_env[p] = {ANY_TYPE}
+                deduced = self._deduce_param_type_from_usage(p)
+                self.type_env[p] = {deduced}
+
+    def _deduce_param_type_from_usage(self, param_name: str) -> CIRType:
+        var_tmps: Dict[str, str] = {}
+        const_tmps: Dict[str, Any] = {}
+        for block in self.fn.blocks:
+            for ins in block.instrs:
+                if ins.op == "LOAD" and ins.args and ins.result:
+                    var_tmps[str(ins.result)] = str(ins.args[0])
+                elif ins.op == "CONST" and ins.args and ins.result:
+                    const_tmps[str(ins.result)] = ins.args[0]
+
+        for block in self.fn.blocks:
+            for ins in block.instrs:
+                op = ins.op
+                args = ins.args or []
+                if op in ("BINOP", "BINOP_DIRECT") and len(args) >= 3:
+                    binop = str(args[0]).lower()
+                    if binop in ("add", "+", "sub", "-", "mul", "*", "floordiv", "//", "mod", "%"):
+                        a1_var = var_tmps.get(str(args[1]), str(args[1]))
+                        a2_var = var_tmps.get(str(args[2]), str(args[2]))
+                        a1_val = const_tmps.get(str(args[1]), args[1])
+                        a2_val = const_tmps.get(str(args[2]), args[2])
+                        if (a1_var == param_name and isinstance(a2_val, int)) or (a2_var == param_name and isinstance(a1_val, int)):
+                            return INT_TYPE
+                        if (a1_var == param_name and isinstance(a2_val, float)) or (a2_var == param_name and isinstance(a1_val, float)):
+                            return FLOAT_TYPE
+                elif op in ("CMP", "CMP_DIRECT") and len(args) >= 3:
+                    a1_var = var_tmps.get(str(args[1]), str(args[1]))
+                    a2_var = var_tmps.get(str(args[2]), str(args[2]))
+                    a1_val = const_tmps.get(str(args[1]), args[1])
+                    a2_val = const_tmps.get(str(args[2]), args[2])
+                    if (a1_var == param_name and isinstance(a2_val, int)) or (a2_var == param_name and isinstance(a1_val, int)):
+                        return INT_TYPE
+                    if (a1_var == param_name and isinstance(a2_val, float)) or (a2_var == param_name and isinstance(a1_val, float)):
+                        return FLOAT_TYPE
+                elif op == "CALL" and args:
+                    callee = str(args[0])
+                    a1_var = var_tmps.get(str(args[1]), str(args[1])) if len(args) > 1 else ""
+                    if callee in ("_luthon_slice", "SLICE_STR") and len(args) >= 4:
+                        a2_var = var_tmps.get(str(args[2]), str(args[2]))
+                        a3_var = var_tmps.get(str(args[3]), str(args[3]))
+                        if a1_var == param_name:
+                            return STR_TYPE
+                        if a2_var == param_name or a3_var == param_name:
+                            return INT_TYPE
+                    elif callee == "_luthon_fast_int" and len(args) >= 2 and a1_var == param_name:
+                        return INT_TYPE
+                    elif callee.endswith(".index") and len(args) >= 2:
+                        if a1_var == param_name:
+                            return STR_TYPE
+                        if len(args) >= 4 and var_tmps.get(str(args[3]), str(args[3])) == param_name:
+                            return INT_TYPE
+                    elif callee.endswith(".startswith") or callee.endswith(".endswith") or callee.endswith(".partition") or callee.endswith(".split"):
+                        if a1_var == param_name:
+                            return STR_TYPE
+                    elif callee.endswith(".append") and a1_var == param_name:
+                        return ListType(ANY_TYPE)
+        return ANY_TYPE
 
     def infer(self) -> Dict[str, CIRType]:
         """Runs iterative fixed-point type propagation until convergence."""
@@ -243,16 +302,16 @@ class TypeInferrer:
             self.type_env[var_name] = existing | {val_type}
             return set()
 
-        elif op == "BINOP":
+        elif op in ("BINOP", "BINOP_DIRECT"):
             binop = (ins.args[0] or "").lower()
             left_t = self._get_type(ins.args[1] if len(ins.args) > 1 else None)
             right_t = self._get_type(ins.args[2] if len(ins.args) > 2 else None)
 
-            if binop == "div":
+            if binop in ("div", "/"):
                 return {FLOAT_TYPE}
-            if binop == "floordiv":
+            if binop in ("floordiv", "//"):
                 return {INT_TYPE}
-            if binop in ("band", "bor", "bxor", "lshift", "rshift", "mod"):
+            if binop in ("band", "bor", "bxor", "lshift", "rshift", "mod", "%"):
                 return {INT_TYPE}
 
             if left_t == INT_TYPE and right_t == INT_TYPE:
@@ -261,6 +320,15 @@ class TypeInferrer:
                 return {FLOAT_TYPE}
             elif left_t == STR_TYPE and right_t == STR_TYPE:
                 return {STR_TYPE}
+            return {ANY_TYPE}
+
+        elif op == "SLICE_STR":
+            return {STR_TYPE}
+
+        elif op == "SUBSCR_FAST_KEY":
+            cont_t = self._get_type(ins.args[0] if ins.args else None)
+            if isinstance(cont_t, DictType) and cont_t.value_type:
+                return {cont_t.value_type}
             return {ANY_TYPE}
 
         elif op == "UNOP":
@@ -383,10 +451,13 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                 lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (BOOL_TYPE if isinstance(left_arg, bool) else (STR_TYPE if isinstance(left_arg, str) else ANY_TYPE))))
                 rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (BOOL_TYPE if isinstance(right_arg, bool) else (STR_TYPE if isinstance(right_arg, str) else ANY_TYPE))))
 
-                # Numeric and boolean scalar comparisons can be directly evaluated in Lua
+                # Numeric, boolean, and string scalar comparisons can be directly evaluated in Lua
                 # without traversing Python metatable chains or calling _luthon_cmp
                 if cmpop in ("eq", "ne", "lt", "le", "gt", "ge", "==", "~=", "!=", "<", "<=", ">", ">="):
                     if {lt, rt} <= {INT_TYPE, FLOAT_TYPE} or (lt == BOOL_TYPE and rt == BOOL_TYPE):
+                        ins.op = "CMP_DIRECT"
+                        changed = True
+                    elif lt == STR_TYPE and rt == STR_TYPE and cmpop in ("eq", "ne", "==", "~=", "!="):
                         ins.op = "CMP_DIRECT"
                         changed = True
 
@@ -398,6 +469,9 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                 if (isinstance(idx_arg, int) and idx_arg >= 0) or (isinstance(cont_t, (ListType, TupleType)) and it == INT_TYPE):
                     ins.op = "SUBSCR_DIRECT"
                     changed = True
+                elif isinstance(cont_t, DictType):
+                    ins.op = "SUBSCR_FAST_KEY"
+                    changed = True
 
             elif ins.op == "STORE_SUBSCR" and len(ins.args) >= 3:
                 cont_arg, idx_arg = ins.args[0], ins.args[1]
@@ -406,6 +480,21 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                 if (isinstance(idx_arg, int) and idx_arg >= 0) or (isinstance(cont_t, ListType) and it == INT_TYPE):
                     ins.op = "STORE_SUBSCR_DIRECT"
                     changed = True
+                elif isinstance(cont_t, DictType):
+                    ins.op = "DICT_SET"
+                    changed = True
+
+            elif ins.op == "CALL" and ins.args and ins.args[0] == "_luthon_slice":
+                if len(ins.args) >= 4:
+                    obj_arg = ins.args[1]
+                    lower_arg = ins.args[2]
+                    upper_arg = ins.args[3]
+                    step_arg = ins.args[4] if len(ins.args) > 4 else "nil"
+                    obj_t = type_map.get(str(obj_arg), ANY_TYPE)
+                    if obj_t == STR_TYPE and step_arg in ("nil", None, 1):
+                        ins.op = "SLICE_STR"
+                        ins.args = [obj_arg, lower_arg, upper_arg]
+                        changed = True
 
     return changed
 

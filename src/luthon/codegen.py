@@ -17,14 +17,29 @@ def _emit(ins):
         return ins.result + " = " + ins.args[0]
     if o == "STORE":
         return ins.args[0] + " = " + ins.args[1]
+    if o == "BINOP_DIRECT":
+        l = ins.args[1] if ins.args[1] is not None else "nil"
+        r = ins.args[2] if ins.args[2] is not None else "nil"
+        op_sym = _op(ins.args[0])
+        return f"{ins.result} = ({l} {op_sym} {r})"
     if o == "BINOP":
         l = ins.args[1] if ins.args[1] is not None else "nil"
         r = ins.args[2] if ins.args[2] is not None else "nil"
-        raw_op = (ins.args[0] or "").lower()
+        orig_op = ins.args[0] or ""
+        is_typed_num = orig_op.startswith("int.__typed_") or orig_op.startswith("float.__typed_")
+        raw_op = orig_op.lower()
         # Clean typed magic method signatures (e.g. int.__typed_add__ -> add)
         if "__typed_" in raw_op:
             raw_op = raw_op.split("__typed_")[1].rstrip("_")
-        if raw_op in ("floordiv", "//"):
+        if is_typed_num and raw_op in ("add", "+"):
+            return f"{ins.result} = ({l} + {r})"
+        elif is_typed_num and raw_op in ("sub", "-"):
+            return f"{ins.result} = ({l} - {r})"
+        elif is_typed_num and raw_op in ("mul", "*"):
+            return f"{ins.result} = ({l} * {r})"
+        elif is_typed_num and raw_op in ("mod", "%"):
+            return f"{ins.result} = ({l} % {r})"
+        elif raw_op in ("floordiv", "//"):
             return ins.result + " = math.floor(" + l + " / " + r + ")"
         elif raw_op in ("band", "bitand", "&"):
             return ins.result + " = bit.band(" + l + ", " + r + ")"
@@ -231,6 +246,11 @@ end"""
         return ins.args[0] + "[#" + ins.args[0] + "+1] = " + ins.args[1]
     if o == "SUBSCR_FAST_KEY":
         return ins.result + " = " + ins.args[0] + "[" + ins.args[1] + "]"
+    if o == "SLICE_STR":
+        s, l, u = ins.args[0], ins.args[1], ins.args[2]
+        l_expr = "1" if l in ("nil", None) else f"({l} + 1)"
+        u_expr = "" if u in ("nil", None) else f", {u}"
+        return f"{ins.result} = string.sub({s}, {l_expr}{u_expr})"
     if o == "DICT_COUNTER_INC":
         d_name, k_name, step_val = ins.args[0], ins.args[1], ins.args[2]
         return f"{d_name}[{k_name}] = ({d_name}[{k_name}] or 0) + {step_val}"

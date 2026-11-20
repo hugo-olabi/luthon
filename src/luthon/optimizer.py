@@ -51,7 +51,7 @@ def _is_tmp(s: Any) -> bool:
     return False
 
 # Operations with no side effects whose results can be dropped if unused
-_PURE_OPS = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR"}
+_PURE_OPS = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR", "SLICE_STR", "SUBSCR_FAST_KEY"}
 
 
 def constant_fold_function(fn: Function) -> bool:

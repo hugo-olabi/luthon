@@ -101,12 +101,26 @@ local function _emit(ins)
     return ins.result .. " = " .. args[1] .. "[" .. args[2] .. "]"
   elseif o == "SET_ITEM" then
     return args[1] .. "[" .. args[2] .. "] = " .. args[3]
+  elseif o == "BINOP_DIRECT" then
+    local l = args[2] or "nil"
+    local r = args[3] or "nil"
+    local mapped = _lua_op(args[1] or "+")
+    return ins.result .. " = (" .. l .. " " .. mapped .. " " .. r .. ")"
   elseif o == "BINOP" then
     local l = args[2] or "nil"
     local r = args[3] or "nil"
     local raw_op = args[1] or ""
     local op_name = raw_op:lower()
-    if op_name == "floordiv" then
+    local is_typed_num = raw_op:find("^int%.__typed_") or raw_op:find("^float%.__typed_")
+    if is_typed_num and (op_name == "int.__typed_add__" or op_name == "float.__typed_add__" or op_name == "add" or op_name == "+") then
+      return ins.result .. " = (" .. l .. " + " .. r .. ")"
+    elseif is_typed_num and (op_name == "int.__typed_sub__" or op_name == "float.__typed_sub__" or op_name == "sub" or op_name == "-") then
+      return ins.result .. " = (" .. l .. " - " .. r .. ")"
+    elseif is_typed_num and (op_name == "int.__typed_mul__" or op_name == "float.__typed_mul__" or op_name == "mul" or op_name == "*") then
+      return ins.result .. " = (" .. l .. " * " .. r .. ")"
+    elseif is_typed_num and (op_name == "int.__typed_mod__" or op_name == "float.__typed_mod__" or op_name == "mod" or op_name == "%") then
+      return ins.result .. " = (" .. l .. " % " .. r .. ")"
+    elseif op_name == "floordiv" then
       return ins.result .. " = math.floor(" .. l .. " / " .. r .. ")"
     elseif op_name == "band" then
       return ins.result .. " = bit.band(" .. l .. ", " .. r .. ")"
@@ -321,6 +335,11 @@ local function _emit(ins)
     return args[1] .. "[#" .. args[1] .. "+1] = " .. args[2]
   elseif o == "SUBSCR_FAST_KEY" then
     return ins.result .. " = " .. args[1] .. "[" .. args[2] .. "]"
+  elseif o == "SLICE_STR" then
+    local s, l, u = args[1], args[2], args[3]
+    local l_expr = (l == "nil" or l == nil) and "1" or ("(" .. l .. " + 1)")
+    local u_expr = (u == "nil" or u == nil) and "" or (", " .. u)
+    return ins.result .. " = string.sub(" .. s .. ", " .. l_expr .. u_expr .. ")"
   elseif o == "NEXT" then
     return ins.result .. " = " .. args[1] .. "()"
   elseif o == "SELECT" then
