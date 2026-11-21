@@ -787,13 +787,42 @@ def test_isolated_bencode_benchmarks_runner(tmp_path):
     assert res_rt.steady_speedup > 0
 
 
+def test_bytes_constant_comparison_specialization():
+    code = """
+DELIM = b'e'
+
+def check_byte(b: bytes):
+    if b != DELIM:
+        return 1
+    return 0
+
+print(f"R1:{check_byte(b'a')} R2:{check_byte(b'e')}")
+"""
+    out = _run_lua(code)
+    assert "R1:1 R2:0" in out
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function check_byte")[1].split("end")[0]
+    assert "_luthon_cmp" not in body
+    assert "~=" in body or "==" in body
 
 
+def test_pure_try_block_module_level_hoisting():
+    code = """
+def parse_int_safe(val):
+    try:
+        r = int(val)
+    except ValueError:
+        r = -1
+    return r
 
-
-
-
-
-
-
+print(f"P1:{parse_int_safe('123')} P2:{parse_int_safe('abc')}")
+"""
+    out = _run_lua(code)
+    assert "P1:123 P2:-1" in out
+    lua = transpile_ir(code, optimize=True)
+    # Check that a hoisted static function was emitted before parse_int_safe
+    assert "function _try_closure_parse_int_safe_1(" in lua
+    body = lua.split("function parse_int_safe")[1].split("end")[0]
+    assert "pcall(_try_closure_parse_int_safe_1" in body
+    assert "pcall(function()" not in body
 
