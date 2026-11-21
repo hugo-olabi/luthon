@@ -732,6 +732,62 @@ print(evaluate(1, 2, 3, 4))
     assert lines[2] == "4|1"
 
 
+def test_binary_bytes_literal_lowering():
+    """Verify that binary bytes literals preserve exact byte contents and lengths in emitted Lua."""
+    raw = b">p\xefl\xfa]\x95K\x1b^\xc2\\;;e\xb7"
+    code = f"""
+raw_val = {repr(raw)}
+print(len(raw_val))
+print(raw_val == {repr(raw)})
+"""
+    out = _run_lua(code, optimize=True)
+    lines = out.splitlines()
+    assert lines[0] == str(len(raw))
+    assert lines[1].lower() == "true"
+
+
+def test_isolated_bencode_benchmarks_runner(tmp_path):
+    """Verify isolated decode and encode workloads with deep structural and checksum verification."""
+    from luthon.benchmarks import (
+        BenchmarkRunner,
+        production_bencode_decode_workload,
+        production_bencode_encode_workload,
+        production_bencode_roundtrip_workload,
+    )
+    from pathlib import Path
+
+    target_root = Path("/home/hg/Downloads/deluge-2.2.0/deluge-2.2.0")
+    if not target_root.is_dir():
+        pytest.skip("Target root not available")
+
+    runner = BenchmarkRunner(work_dir=tmp_path)
+
+    # 1. Test isolated decode
+    wl_decode, name_decode = production_bencode_decode_workload(
+        target_root, "synthetic", repetitions=20, in_process_warmups=2
+    )
+    res_decode = runner.run_benchmark(name_decode, wl_decode, iterations=2, warmups=0)
+    assert res_decode.verified
+    assert res_decode.steady_speedup > 0
+
+    # 2. Test isolated encode
+    wl_encode, name_encode = production_bencode_encode_workload(
+        target_root, "synthetic", repetitions=20, in_process_warmups=2
+    )
+    res_encode = runner.run_benchmark(name_encode, wl_encode, iterations=2, warmups=0)
+    assert res_encode.verified
+    assert res_encode.steady_speedup > 0
+
+    # 3. Test roundtrip
+    wl_rt, name_rt = production_bencode_roundtrip_workload(
+        target_root, "synthetic", repetitions=20, in_process_warmups=2
+    )
+    res_rt = runner.run_benchmark(name_rt, wl_rt, iterations=2, warmups=0)
+    assert res_rt.verified
+    assert res_rt.steady_speedup > 0
+
+
+
 
 
 
