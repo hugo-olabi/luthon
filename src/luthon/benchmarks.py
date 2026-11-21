@@ -3,7 +3,10 @@
 from __future__ import annotations
 import json
 import os
+import argparse
+import statistics
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,12 +26,17 @@ class BenchmarkResult:
 class BenchmarkRunner:
     """Automates running, timing, and comparing PyPerformance workloads across CPython and Luthon (LuaJIT)."""
 
-    def __init__(self, work_dir: Optional[Path] = None):
+    def __init__(self, work_dir: Optional[Path] = None, python_executable: str = sys.executable):
         self.work_dir = work_dir or Path("/tmp/luthon_benchmarks")
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.python_executable = python_executable
         self.results: List[BenchmarkResult] = []
 
-    def run_benchmark(self, name: str, py_source: str, iterations: int = 1) -> BenchmarkResult:
+    def run_benchmark(
+        self, name: str, py_source: str, iterations: int = 7, warmups: int = 1
+    ) -> BenchmarkResult:
+        if iterations < 1 or warmups < 0:
+            raise ValueError("iterations must be positive and warmups cannot be negative")
         py_file = self.work_dir / f"{name}.py"
         lua_file = self.work_dir / f"{name}.lua"
         py_file.write_text(py_source)
@@ -36,36 +44,47 @@ class BenchmarkRunner:
         # 1. Compile to Lua via Luthon IR pipeline with optimizations
         compile_file(py_file, use_ir=True, optimize=True, no_cache=True, output_path=lua_file)
 
-        # 2. Time CPython 3.13 execution
-        cp_times = []
-        cp_stdout = ""
-        for _ in range(iterations):
-            t0 = time.perf_counter()
-            res_cp = subprocess.run(["python3", str(py_file)], capture_output=True, text=True)
-            elapsed = time.perf_counter() - t0
-            assert res_cp.returncode == 0, f"CPython run failed: {res_cp.stderr}"
-            cp_times.append(elapsed)
-            cp_stdout = res_cp.stdout
-
-        # 3. Time Luthon (LuaJIT) execution
-        lua_times = []
-        lua_stdout = ""
+        # Share the same Lua module path in warmups and measured runs.
         env = os.environ.copy()
         pkg_src = str(Path(__file__).parent.parent)
         current_lua_path = env.get("LUA_PATH", ";;")
         extra_paths = f"{pkg_src}/?.lua;{pkg_src}/?/init.lua;{pkg_src}/luthon/lua/?.lua"
         env["LUA_PATH"] = f"{extra_paths};{current_lua_path}" if current_lua_path != ";;" else f"{extra_paths};;"
 
-        for _ in range(iterations):
-            t0 = time.perf_counter()
-            res_lua = subprocess.run(["luajit", str(lua_file)], capture_output=True, text=True, env=env)
-            elapsed = time.perf_counter() - t0
-            assert res_lua.returncode == 0, f"LuaJIT run failed: {res_lua.stderr}"
-            lua_times.append(elapsed)
-            lua_stdout = res_lua.stdout
+        # Warmups reduce one-time filesystem and runtime initialization effects.
+        for _ in range(warmups):
+            for command, command_env in (([self.python_executable, str(py_file)], None), (["luajit", str(lua_file)], env)):
+                result = subprocess.run(command, capture_output=True, text=True, env=command_env)
+                if result.returncode:
+                    raise RuntimeError(f"Warmup failed for {name}: {result.stderr}")
 
-        avg_cp = sum(cp_times) / len(cp_times)
-        avg_lua = sum(lua_times) / len(lua_times)
+        # Time the selected interpreter; alternate order to reduce ordering bias.
+        cp_times = []
+        cp_stdout = ""
+        lua_times = []
+        lua_stdout = ""
+        for i in range(iterations):
+            commands = [
+                ("python", [self.python_executable, str(py_file)], None),
+                ("lua", ["luajit", str(lua_file)], env),
+            ]
+            if i % 2:
+                commands.reverse()
+            for runtime, command, command_env in commands:
+                t0 = time.perf_counter()
+                result = subprocess.run(command, capture_output=True, text=True, env=command_env)
+                elapsed = time.perf_counter() - t0
+                if result.returncode:
+                    raise RuntimeError(f"{runtime} run failed for {name}: {result.stderr}")
+                if runtime == "python":
+                    cp_times.append(elapsed)
+                    cp_stdout = result.stdout
+                else:
+                    lua_times.append(elapsed)
+                    lua_stdout = result.stdout
+
+        avg_cp = statistics.median(cp_times)
+        avg_lua = statistics.median(lua_times)
         speedup = avg_cp / max(1e-9, avg_lua)
 
         # Check functional output equivalence (normalize whitespace and case for booleans)
@@ -86,6 +105,8 @@ class BenchmarkRunner:
     def generate_report(self) -> str:
         """Generates a structured text dashboard of benchmark comparisons."""
         lines = [
+            f"Baseline interpreter: {self.python_executable}",
+            "Times are medians; process startup is included.",
             "=======================================================================",
             "                      Luthon Performance Dashboard                     ",
             "=======================================================================",
@@ -194,4 +215,46 @@ def run():
 
 print("base64_benchmark:", run())
 """
+
+
+def deluge_bencode_workload(deluge_root: Path, repetitions: int = 1000) -> str:
+    """Build a benchmark from Deluge's source without modifying that checkout."""
+    source_path = deluge_root / "deluge" / "bencode.py"
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Deluge bencode module not found: {source_path}")
+    source = source_path.read_text()
+    return source + f'''\n\n_payload = {{b"announce": b"https://tracker.example/announce", b"info": {{b"length": 1048576, b"name": b"luthon-benchmark", b"piece length": 16384, b"pieces": b"x" * 1600}}, b"peers": [{{b"ip": b"127.0.0.1", b"port": 6881}} for _ in range(20)]}}
+_encoded = bencode(_payload)
+_decoded = None
+for _ in range({int(repetitions)}):
+    _decoded = bdecode(_encoded)
+    _encoded = bencode(_decoded)
+print("deluge_bencode:", len(_encoded), len(_decoded[b"peers"]), _decoded[b"info"][b"length"])
+'''
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Compare Luthon/LuaJIT with a chosen CPython on Deluge bencode.")
+    parser.add_argument("--deluge-root", type=Path, required=True, help="Deluge checkout root (read only)")
+    parser.add_argument("--python", default=sys.executable, help="CPython executable used as the baseline")
+    parser.add_argument("--iterations", type=int, default=7, help="Measured process runs; report uses the median")
+    parser.add_argument("--warmups", type=int, default=1, help="Unreported warmup process runs")
+    parser.add_argument("--repetitions", type=int, default=1000, help="Encode/decode cycles inside each process")
+    parser.add_argument("--work-dir", type=Path, default=Path("/tmp/luthon_benchmarks"))
+    args = parser.parse_args()
+
+    version = subprocess.run([args.python, "--version"], capture_output=True, text=True, check=True)
+    print(f"Baseline: {(version.stdout or version.stderr).strip()} ({args.python})")
+    runner = BenchmarkRunner(args.work_dir, python_executable=args.python)
+    result = runner.run_benchmark(
+        "deluge_bencode", deluge_bencode_workload(args.deluge_root, args.repetitions),
+        iterations=args.iterations, warmups=args.warmups,
+    )
+    print(runner.generate_report())
+    if not result.verified:
+        raise SystemExit("Benchmark outputs differ between CPython and Luthon")
+
+
+if __name__ == "__main__":
+    main()
 
