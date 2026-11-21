@@ -88,6 +88,54 @@ def _has_yield(node: ast.AST) -> bool:
     return False
 
 
+def normalize_basic_blocks_function(fn: Function) -> bool:
+    """Ensure all basic blocks satisfy single-entry single-exit invariants:
+    every branch instruction is the final instruction of its block.
+
+    If any conditional branch with fallthrough (BRANCH_TRUE, BRANCH_FALSE)
+    appears in the middle of a block, split the block immediately after the branch,
+    placing subsequent instructions into a new fallthrough block.
+    If a terminal instruction (JUMP, RETURN, BRANCH) appears in the middle of a block,
+    unreachable instructions following it are truncated (unless inside try scopes).
+    """
+    BRANCH_FALLTHROUGH_OPS = {"BRANCH_TRUE", "BRANCH_FALSE"}
+    TERMINAL_OPS = {"JUMP", "RETURN", "BRANCH"}
+    TRY_STRUCTURAL_OPS = {
+        "TRY_BEGIN", "END_TRY", "CATCH_BEGIN", "END_CATCH", "END_ALL_CATCH",
+        "TRY_ELSE", "END_TRY_ELSE", "TRY_CLOSE", "FINALLY_BEGIN", "FINALLY_END",
+        "WITH_BEGIN", "WITH_END",
+    }
+    changed = False
+    i = 0
+    split_cnt = 0
+    while i < len(fn.blocks):
+        b = fn.blocks[i]
+        split_idx = -1
+        is_terminal = False
+        for idx, ins in enumerate(b.instrs):
+            if ins.op in BRANCH_FALLTHROUGH_OPS and idx < len(b.instrs) - 1:
+                split_idx = idx
+                break
+            elif ins.op in TERMINAL_OPS and idx < len(b.instrs) - 1:
+                if not any(instr.op in TRY_STRUCTURAL_OPS for instr in b.instrs):
+                    split_idx = idx
+                    is_terminal = True
+                    break
+
+        if split_idx != -1:
+            changed = True
+            if is_terminal:
+                b.instrs = b.instrs[:split_idx + 1]
+            else:
+                split_cnt += 1
+                new_lbl = f"{b.label}_ft_{split_cnt}"
+                new_block = Block(label=new_lbl, instrs=b.instrs[split_idx + 1:])
+                b.instrs = b.instrs[:split_idx + 1]
+                fn.blocks.insert(i + 1, new_block)
+        i += 1
+    return changed
+
+
 class IRLowerer:
     def __init__(self, package: str = ""):
         self._tmp = 0
@@ -141,6 +189,8 @@ class IRLowerer:
         if scope is not None:
             fn.locals = sorted(scope.locals.keys())
             self.module.globals = sorted(scope.locals.keys())
+        for f in self.module.functions:
+            normalize_basic_blocks_function(f)
         return self.module
 
     def lower_stmt(self, node):
@@ -1252,6 +1302,8 @@ class IRLowerer:
             self._emit("NEXT", [iter_tmp], result=nxt)
             exit_target = end_label if idx == 0 else outer_loop_lbl
             self._emit("BRANCH_NONE", [nxt, exit_target])
+            body_lbl = self._new_label("comp_body")
+            self._cur_block = self._new_block(body_lbl)
             self._lower_target(gen.target, nxt)
             for if_expr in (gen.ifs or []):
                 chk_lbl = self._new_label("comp_if")
@@ -1627,26 +1679,24 @@ class IRLowerer:
             return self._emit_call(target_fn, all_args, kw_table)
         if isinstance(node, ast.BoolOp):
             result = self._new_tmp()
-            left_tmp = self.lower_expr(node.values[0])
             end_lbl = self._new_label("bool_end")
             if isinstance(node.op, ast.And):
-                false_lbl = self._new_label("and_false")
-                self._emit("BRANCH_FALSE", [left_tmp, false_lbl])
-                right_tmp = self.lower_expr(node.values[1])
-                self._emit("STORE", [result, right_tmp])
-                self._emit("JUMP", [end_lbl])
-                self._cur_block = self._new_block(false_lbl)
-                self._emit("STORE", [result, left_tmp])
-                self._cur_block = self._new_block(end_lbl)
+                for i, v in enumerate(node.values):
+                    v_tmp = self.lower_expr(v)
+                    self._emit("STORE", [result, v_tmp])
+                    if i < len(node.values) - 1:
+                        self._emit("BRANCH_FALSE", [v_tmp, end_lbl])
+                        next_lbl = self._new_label("and_eval")
+                        self._cur_block = self._new_block(next_lbl)
             elif isinstance(node.op, ast.Or):
-                true_lbl = self._new_label("or_true")
-                self._emit("BRANCH_TRUE", [left_tmp, true_lbl])
-                right_tmp = self.lower_expr(node.values[1])
-                self._emit("STORE", [result, right_tmp])
-                self._emit("JUMP", [end_lbl])
-                self._cur_block = self._new_block(true_lbl)
-                self._emit("STORE", [result, left_tmp])
-                self._cur_block = self._new_block(end_lbl)
+                for i, v in enumerate(node.values):
+                    v_tmp = self.lower_expr(v)
+                    self._emit("STORE", [result, v_tmp])
+                    if i < len(node.values) - 1:
+                        self._emit("BRANCH_TRUE", [v_tmp, end_lbl])
+                        next_lbl = self._new_label("or_eval")
+                        self._cur_block = self._new_block(next_lbl)
+            self._cur_block = self._new_block(end_lbl)
             return result
         if isinstance(node, ast.IfExp):
             cond = self.lower_expr(node.test)

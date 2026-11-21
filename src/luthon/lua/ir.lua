@@ -234,7 +234,63 @@ function IRLowerer:lower_module(node, scope)
     for k in pairs(scope.locals or {}) do table.insert(self.module.globals, k) end
     table.sort(self.module.globals)
   end
+  for _, f in ipairs(self.module.functions) do
+    self:normalize_basic_blocks(f)
+  end
   return self.module
+end
+
+function IRLowerer:normalize_basic_blocks(fn)
+  local BRANCH_FALLTHROUGH_OPS = {BRANCH_TRUE = true, BRANCH_FALSE = true}
+  local TERMINAL_OPS = {JUMP = true, RETURN = true, BRANCH = true}
+  local STRUCTURAL_OPS = {
+    ["DO"] = true, ["END"] = true,
+    ["TRY_BEGIN"] = true, ["END_TRY"] = true,
+    ["CATCH_BEGIN"] = true, ["END_CATCH"] = true, ["END_ALL_CATCH"] = true,
+    ["TRY_ELSE"] = true, ["END_TRY_ELSE"] = true, ["TRY_CLOSE"] = true,
+    ["FINALLY_BEGIN"] = true, ["FINALLY_END"] = true,
+    ["WITH_BEGIN"] = true, ["WITH_END"] = true,
+  }
+  local i = 1
+  local split_cnt = 0
+  while i <= #fn.blocks do
+    local b = fn.blocks[i]
+    local split_idx = nil
+    local is_terminal = false
+    local has_structural = false
+    for _, ins in ipairs(b.instrs) do
+      if STRUCTURAL_OPS[ins.op] then has_structural = true break end
+    end
+    for idx, ins in ipairs(b.instrs) do
+      if BRANCH_FALLTHROUGH_OPS[ins.op] and idx < #b.instrs then
+        split_idx = idx
+        break
+      elseif TERMINAL_OPS[ins.op] and idx < #b.instrs then
+        if not has_structural then
+          split_idx = idx
+          is_terminal = true
+          break
+        end
+      end
+    end
+    if split_idx then
+      if is_terminal then
+        local trimmed = {}
+        for k = 1, split_idx do trimmed[k] = b.instrs[k] end
+        b.instrs = trimmed
+      else
+        split_cnt = split_cnt + 1
+        local new_lbl = b.label .. "_ft_" .. tostring(split_cnt)
+        local new_block = Block.new(new_lbl)
+        for k = split_idx + 1, #b.instrs do table.insert(new_block.instrs, b.instrs[k]) end
+        local trimmed = {}
+        for k = 1, split_idx do trimmed[k] = b.instrs[k] end
+        b.instrs = trimmed
+        table.insert(fn.blocks, i + 1, new_block)
+      end
+    end
+    i = i + 1
+  end
 end
 
 ------------------------------------------------------------------------------
@@ -1537,32 +1593,29 @@ function IRLowerer:_lower_expr_impl(node)
     local op = node.op
     local op_name = type(op) == "string" and op or op._type  -- "And" or "Or"
     local result = self:_new_tmp()
-    -- Evaluate left operand first
-    local left_tmp = self:lower_expr(node.values[1])
     local end_lbl = self:_new_label("bool_end")
     if op_name == "And" then
-        -- a and b: if not a then goto false_label (result is _t1)
-        local false_lbl = self:_new_label("and_false")
-        self:_emit("BRANCH_FALSE", {left_tmp, false_lbl})
-        -- Evaluate right operand
-        local right_tmp = self:lower_expr(node.values[2])
-        self:_emit("STORE", {result, right_tmp})
-        self:_emit("JUMP", {end_lbl})
-        self._cur_block = self:_new_block(false_lbl)
-        self:_emit("STORE", {result, left_tmp})
-        self._cur_block = self:_new_block(end_lbl)
+      for i, val_node in ipairs(node.values or {}) do
+        local v_tmp = self:lower_expr(val_node)
+        self:_emit("STORE", {result, v_tmp})
+        if i < #node.values then
+          self:_emit("BRANCH_FALSE", {v_tmp, end_lbl})
+          local next_lbl = self:_new_label("and_eval")
+          self._cur_block = self:_new_block(next_lbl)
+        end
+      end
     elseif op_name == "Or" then
-        -- a or b: if a then goto true_label (result is _t1)
-        local true_lbl = self:_new_label("or_true")
-        self:_emit("BRANCH_TRUE", {left_tmp, true_lbl})
-        -- Evaluate right operand
-        local right_tmp = self:lower_expr(node.values[2])
-        self:_emit("STORE", {result, right_tmp})
-        self:_emit("JUMP", {end_lbl})
-        self._cur_block = self:_new_block(true_lbl)
-        self:_emit("STORE", {result, left_tmp})
-        self._cur_block = self:_new_block(end_lbl)
+      for i, val_node in ipairs(node.values or {}) do
+        local v_tmp = self:lower_expr(val_node)
+        self:_emit("STORE", {result, v_tmp})
+        if i < #node.values then
+          self:_emit("BRANCH_TRUE", {v_tmp, end_lbl})
+          local next_lbl = self:_new_label("or_eval")
+          self._cur_block = self:_new_block(next_lbl)
+        end
+      end
     end
+    self._cur_block = self:_new_block(end_lbl)
     return result
   elseif t == "UnaryOp" then
     local v = self:lower_expr(node.operand)

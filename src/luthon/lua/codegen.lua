@@ -631,7 +631,7 @@ function M.generate(module, skip_prelude, sourcemap)
     for _, l in ipairs(locs) do table.insert(allvars, l) end
     for _, t in ipairs(tmps) do table.insert(allvars, t) end
     if #allvars > 0 then
-      local max_declared = math.min(#allvars, 180)
+      local max_declared = math.min(#allvars, 140)
       for chunk_start = 1, max_declared, 80 do
         local chunk = {}
         for i = chunk_start, math.min(chunk_start + 79, max_declared) do

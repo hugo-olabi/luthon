@@ -7,7 +7,7 @@ Performs:
 """
 
 from typing import Any, Dict, List, Set, Tuple, Optional
-from .ir import Module, Function, Block, Instr
+from .ir import Module, Function, Block, Instr, normalize_basic_blocks_function
 
 
 # Pure binary operations that can be folded at compile time
@@ -307,7 +307,7 @@ def compute_cfg(fn: Function) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]
                     if target and target in succs:
                         succs[b.label].add(target)
         last = b.instrs[-1]
-        if last.op not in ("JUMP", "RETURN") and idx + 1 < len(fn.blocks):
+        if last.op not in ("JUMP", "RETURN", "BRANCH", "TRY_BREAK", "TRY_CONTINUE") and idx + 1 < len(fn.blocks):
             succs[b.label].add(fn.blocks[idx + 1].label)
 
     for u, targets in succs.items():
@@ -840,29 +840,7 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
         return False
 
     # 1. Build CFG successor graph
-    succs: Dict[str, Set[str]] = {b.label: set() for b in fn.blocks}
-    for idx, b in enumerate(fn.blocks):
-        if not b.instrs:
-            if idx + 1 < len(fn.blocks):
-                succs[b.label].add(fn.blocks[idx + 1].label)
-            continue
-        last = b.instrs[-1]
-        for ins in b.instrs:
-            if ins.op == "JUMP" and ins.args:
-                succs[b.label].add(ins.args[0])
-            elif ins.op == "BRANCH" and len(ins.args) >= 3:
-                succs[b.label].add(ins.args[1])
-                succs[b.label].add(ins.args[2])
-            elif ins.op == "BRANCH_NONE" and len(ins.args) >= 2:
-                succs[b.label].add(ins.args[1])
-                if idx + 1 < len(fn.blocks):
-                    succs[b.label].add(fn.blocks[idx + 1].label)
-            elif ins.op in ("BRANCH_TRUE", "BRANCH_FALSE") and len(ins.args) >= 2:
-                succs[b.label].add(ins.args[1])
-                if idx + 1 < len(fn.blocks):
-                    succs[b.label].add(fn.blocks[idx + 1].label)
-        if last.op not in ("JUMP", "RETURN") and idx + 1 < len(fn.blocks):
-            succs[b.label].add(fn.blocks[idx + 1].label)
+    succs, _ = compute_cfg(fn)
 
     # 2. Compute per-block def and use sets
     b_def: Dict[str, Set[str]] = {}
@@ -1132,6 +1110,9 @@ def allocate_registers_function(fn: Function, max_local_registers: int = 140) ->
 
 def optimize_function(fn: Function, max_iterations: int = 5) -> None:
     """Run iterative classical optimization passes and register allocation on a Function (Phase 31)."""
+    # 0. Normalize basic block boundaries to ensure single-entry single-exit invariant
+    normalize_basic_blocks_function(fn)
+
     # 1. Loop-Invariant Code Motion (hoist loop-invariant calculations into pre-headers)
     loop_invariant_code_motion_function(fn)
 
@@ -1145,6 +1126,9 @@ def optimize_function(fn: Function, max_iterations: int = 5) -> None:
         c6 = dead_store_elimination_function(fn)
         if not (c1 or c2 or c3 or c4 or c5 or c6):
             break
+
+    # Re-normalize if any passes introduced mid-block branches/jumps
+    normalize_basic_blocks_function(fn)
 
     # 3. Live-range register allocation (LuaJIT 200 local limit guarantee)
     allocate_registers_function(fn)
