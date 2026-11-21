@@ -568,12 +568,7 @@ class TypeInferrer:
                 if any(c == "range" for c in c_names):
                     return {ListType(INT_TYPE)}
                 if any(c in ("array", "array.array") for c in c_names):
-                    typecode = str(ins.args[1]) if len(ins.args) > 1 else ""
-                    if any(tc in typecode for tc in ("d", "f")):
-                        return {ListType(FLOAT_TYPE)}
-                    elif any(tc in typecode for tc in ("i", "l", "b", "h", "q")):
-                        return {ListType(INT_TYPE)}
-                    return {ListType(FLOAT_TYPE)}
+                    return {InstanceType("array")}
                 if any(c == "iter" for c in c_names) and len(ins.args) > 1:
                     return {self._get_type(ins.args[1])}
                 if any(c in ("int", "_luthon_fast_int", "len", "_luthon_raw_len", "math.floor", "math.ceil", "math.trunc", "ord", "hash") for c in c_names):
@@ -1668,16 +1663,27 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
     call_propagated_params: Dict[str, Dict[str, CIRType]] = {}
     class_field_types: Dict[str, Dict[str, CIRType]] = {}
 
+    def _merge_param_types(
+        p1: Optional[Dict[str, CIRType]],
+        p2: Optional[Dict[str, CIRType]],
+    ) -> Dict[str, CIRType]:
+        res: Dict[str, CIRType] = {}
+        if p1:
+            res.update(p1)
+        if p2:
+            res.update(p2)
+        return res
+
     for _ in range(3):
         # Extract class field types from __init__
         for fn in module.functions:
             setattr(fn, "_all_fn_names", all_fn_names)
             if "." in fn.name and fn.name.endswith(".__init__"):
                 cls_name = fn.name.rsplit(".__init__", 1)[0]
-                extra_p = {
-                    **dispatch_func_param_types.get(fn.name, {}),
-                    **call_propagated_params.get(fn.name, {}),
-                }
+                extra_p = _merge_param_types(
+                    dispatch_func_param_types.get(fn.name, {}),
+                    call_propagated_params.get(fn.name, {}),
+                )
                 inf = TypeInferrer(
                     fn,
                     param_types=extra_p,
@@ -1700,10 +1706,10 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
         call_arg_types: Dict[str, Dict[str, Set[CIRType]]] = {}
         for caller in module.functions:
             setattr(caller, "_all_fn_names", all_fn_names)
-            caller_extra = {
-                **dispatch_func_param_types.get(caller.name, {}),
-                **call_propagated_params.get(caller.name, {}),
-            }
+            caller_extra = _merge_param_types(
+                dispatch_func_param_types.get(caller.name, {}),
+                call_propagated_params.get(caller.name, {}),
+            )
             inf = TypeInferrer(
                 caller,
                 param_types=caller_extra,
@@ -1761,10 +1767,10 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
                         new_propagated = True
 
         for fn in module.functions:
-            fn_extra = {
-                **dispatch_func_param_types.get(fn.name, {}),
-                **call_propagated_params.get(fn.name, {}),
-            }
+            fn_extra = _merge_param_types(
+                dispatch_func_param_types.get(fn.name, {}),
+                call_propagated_params.get(fn.name, {}),
+            )
             inf = TypeInferrer(
                 fn,
                 param_types=fn_extra,
@@ -1793,10 +1799,10 @@ def optimize_cir(module: Module, dump_vectorization: bool = False) -> Module:
         setattr(fn, "_dispatch_table_returns", dispatch_table_returns)
         setattr(fn, "_class_field_types", class_field_types)
         setattr(fn, "_all_fn_names", all_fn_names)
-        extra_params = {
-            **dispatch_func_param_types.get(fn.name, {}),
-            **call_propagated_params.get(fn.name, {}),
-        }
+        extra_params = _merge_param_types(
+            dispatch_func_param_types.get(fn.name, {}),
+            call_propagated_params.get(fn.name, {}),
+        )
         inferrer = TypeInferrer(
             fn,
             param_types=extra_params,
