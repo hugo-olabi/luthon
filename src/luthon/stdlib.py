@@ -3746,6 +3746,52 @@ os.path.isdir = os.path.isdir or function(p)
   local ok = os.execute("test -d \"" .. p .. "\"")
   return ok == true or ok == 0
 end
+
+function _luthon_fast_path_exists(p)
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_exists(tostring(p or ""))
+  end
+  return os.path.exists(p)
+end
+
+function _luthon_fast_path_isdir(p)
+  if _luthon_native_lib ~= nil then
+    return _luthon_native_lib.luthon_path_isdir(tostring(p or ""))
+  end
+  return os.path.isdir(p)
+end
+
+function _luthon_fast_path_basename(p)
+  if _luthon_native_lib ~= nil then
+    local ptr = _luthon_native_lib.luthon_path_basename(tostring(p or ""))
+    if ptr ~= nil then return ffi.string(ptr) end
+  end
+  return os.path.basename(p)
+end
+
+function _luthon_fast_path_dirname(p)
+  if _luthon_native_lib ~= nil then
+    local written = _luthon_native_lib.luthon_path_dirname(tostring(p or ""), _PATH_BUF, 1024)
+    return ffi.string(_PATH_BUF, written)
+  end
+  return os.path.dirname(p)
+end
+
+function _luthon_fast_path_join2(p1, p2)
+  if _luthon_native_lib ~= nil then
+    local written = _luthon_native_lib.luthon_path_join(tostring(p1 or ""), tostring(p2 or ""), _PATH_BUF, 1024)
+    return ffi.string(_PATH_BUF, written)
+  end
+  return os.path.join(p1, p2)
+end
+
+function _luthon_fast_path_getsize(p)
+  if _luthon_native_lib ~= nil and _luthon_native_lib.luthon_path_getsize ~= nil then
+    return tonumber(_luthon_native_lib.luthon_path_getsize(tostring(p or "")))
+  end
+  return os.path.getsize(p)
+end
+
 math.pi = 3.141592653589793
 math.e = 2.718281828459045
 math.sin = math.sin

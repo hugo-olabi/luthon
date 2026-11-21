@@ -504,6 +504,13 @@ class TypeInferrer:
                         return {cfields[attr_name]}
             return {ANY_TYPE}
 
+        elif op in ("PATH_EXISTS", "PATH_ISDIR"):
+            return {BOOL_TYPE}
+        elif op in ("PATH_BASENAME", "PATH_DIRNAME", "PATH_JOIN"):
+            return {STR_TYPE}
+        elif op == "PATH_GETSIZE":
+            return {INT_TYPE}
+
         elif op in ("SUBSCR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX"):
             if len(ins.args) >= 1:
                 cont_t = self._get_type(ins.args[0])
@@ -552,8 +559,12 @@ class TypeInferrer:
                     tbl_rets = getattr(self.fn, "_dispatch_table_returns", {}) or {}
                     if tbl in tbl_rets:
                         return {tbl_rets[tbl]}
-                if any(c in ("is_ipv4", "is_ipv6", "is_ip", "is_url", "is_magnet", "_socket_mod.inet_pton_bool") for c in c_names):
+                if any(c in ("is_ipv4", "is_ipv6", "is_ip", "is_url", "is_magnet", "_socket_mod.inet_pton_bool", "os.path.exists", "path.exists", "os.path.isdir", "path.isdir") for c in c_names):
                     return {BOOL_TYPE}
+                if any(c in ("os.path.basename", "path.basename", "os.path.dirname", "path.dirname", "os.path.join", "path.join") for c in c_names):
+                    return {STR_TYPE}
+                if any(c in ("os.path.getsize", "path.getsize") for c in c_names):
+                    return {INT_TYPE}
                 if any(c == "range" for c in c_names):
                     return {ListType(INT_TYPE)}
                 if any(c in ("array", "array.array") for c in c_names):
@@ -622,6 +633,27 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
     """Replaces generic BINOP, CMP, and SUBSCR instructions with specialized direct typed operations."""
     changed = False
     diary = get_active_diary()
+
+    load_sources: Dict[str, str] = {}
+    attr_sources: Dict[str, Tuple[str, str]] = {}
+    for block in fn.blocks:
+        for ins in block.instrs:
+            if ins.op == "LOAD" and ins.args and ins.result:
+                load_sources[str(ins.result)] = str(ins.args[0])
+            elif ins.op == "GET_ATTR" and len(ins.args) >= 2 and ins.result:
+                attr_sources[str(ins.result)] = (str(ins.args[0]), str(ins.args[1]))
+
+    def resolve_callee(v: str) -> str:
+        visited = set()
+        cur = v
+        while cur in load_sources and cur not in visited:
+            visited.add(cur)
+            cur = load_sources[cur]
+        if cur in attr_sources and cur not in visited:
+            visited.add(cur)
+            recv, attr = attr_sources[cur]
+            return f"{resolve_callee(recv)}.{attr}"
+        return cur
 
     for block in fn.blocks:
         for ins in block.instrs:
@@ -779,22 +811,73 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
                             col=ins.src_col,
                         )
 
-            elif ins.op == "CALL" and ins.args and ins.args[0] == "_luthon_slice":
-                if len(ins.args) >= 4:
-                    obj_arg = ins.args[1]
-                    lower_arg = ins.args[2]
-                    upper_arg = ins.args[3]
-                    step_arg = ins.args[4] if len(ins.args) > 4 else "nil"
-                    obj_t = type_map.get(str(obj_arg), ANY_TYPE)
-                    if obj_t == STR_TYPE and step_arg in ("nil", None, 1, "1"):
-                        ins.op = "SLICE_STR"
-                        ins.args = [obj_arg, lower_arg, upper_arg]
-                        changed = True
-                        if diary:
-                            diary.record_decision(fn.name, "SLICE", f"{obj_arg}[{lower_arg}:{upper_arg}]", "string_sub", is_native=True, reason=f"Object {obj_arg} is STR_TYPE with unit step; direct string.sub", line=ins.src_line, col=ins.src_col)
-                    else:
-                        if diary:
-                            diary.record_decision(fn.name, "SLICE", f"{obj_arg}[{lower_arg}:{upper_arg}]", "_luthon_slice", is_native=False, reason=f"Object {obj_arg} ({obj_t}) requires general slicing with bounds checking", line=ins.src_line, col=ins.src_col)
+            elif ins.op in ("PATH_EXISTS", "PATH_ISDIR", "PATH_BASENAME", "PATH_DIRNAME", "PATH_GETSIZE", "PATH_JOIN") and len(ins.args) >= 1:
+                if diary:
+                    diary.record_decision(
+                        fn.name,
+                        "PATH_OP",
+                        f"{ins.op}({', '.join(str(a) for a in ins.args)})",
+                        "luthon_path_ffi",
+                        is_native=True,
+                        reason=f"Direct C runtime binding for {ins.op}",
+                        line=ins.src_line,
+                        col=ins.src_col,
+                    )
+
+            elif ins.op == "CALL" and ins.args:
+                cname = resolve_callee(str(ins.args[0]))
+                if ins.args[0] == "_luthon_slice":
+                    if len(ins.args) >= 4:
+                        obj_arg = ins.args[1]
+                        lower_arg = ins.args[2]
+                        upper_arg = ins.args[3]
+                        step_arg = ins.args[4] if len(ins.args) > 4 else "nil"
+                        obj_t = type_map.get(str(obj_arg), ANY_TYPE)
+                        if obj_t == STR_TYPE and step_arg in ("nil", None, 1, "1"):
+                            ins.op = "SLICE_STR"
+                            ins.args = [obj_arg, lower_arg, upper_arg]
+                            changed = True
+                            if diary:
+                                diary.record_decision(fn.name, "SLICE", f"{obj_arg}[{lower_arg}:{upper_arg}]", "string_sub", is_native=True, reason=f"Object {obj_arg} is STR_TYPE with unit step; direct string.sub", line=ins.src_line, col=ins.src_col)
+                        else:
+                            if diary:
+                                diary.record_decision(fn.name, "SLICE", f"{obj_arg}[{lower_arg}:{upper_arg}]", "_luthon_slice", is_native=False, reason=f"Object {obj_arg} ({obj_t}) requires general slicing with bounds checking", line=ins.src_line, col=ins.src_col)
+                elif cname in ("os.path.exists", "path.exists") and len(ins.args) >= 2:
+                    ins.op = "PATH_EXISTS"
+                    ins.args = [ins.args[1]]
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "PATH_OP", f"os.path.exists({ins.args[0]})", "luthon_path_exists", is_native=True, reason="Direct C runtime binding for os.path.exists", line=ins.src_line, col=ins.src_col)
+                elif cname in ("os.path.isdir", "path.isdir") and len(ins.args) >= 2:
+                    ins.op = "PATH_ISDIR"
+                    ins.args = [ins.args[1]]
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "PATH_OP", f"os.path.isdir({ins.args[0]})", "luthon_path_isdir", is_native=True, reason="Direct C runtime binding for os.path.isdir", line=ins.src_line, col=ins.src_col)
+                elif cname in ("os.path.basename", "path.basename") and len(ins.args) >= 2:
+                    ins.op = "PATH_BASENAME"
+                    ins.args = [ins.args[1]]
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "PATH_OP", f"os.path.basename({ins.args[0]})", "luthon_path_basename", is_native=True, reason="Direct C runtime binding for os.path.basename", line=ins.src_line, col=ins.src_col)
+                elif cname in ("os.path.dirname", "path.dirname") and len(ins.args) >= 2:
+                    ins.op = "PATH_DIRNAME"
+                    ins.args = [ins.args[1]]
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "PATH_OP", f"os.path.dirname({ins.args[0]})", "luthon_path_dirname", is_native=True, reason="Direct C runtime binding for os.path.dirname", line=ins.src_line, col=ins.src_col)
+                elif cname in ("os.path.getsize", "path.getsize") and len(ins.args) >= 2:
+                    ins.op = "PATH_GETSIZE"
+                    ins.args = [ins.args[1]]
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "PATH_OP", f"os.path.getsize({ins.args[0]})", "luthon_path_getsize", is_native=True, reason="Direct C runtime binding for os.path.getsize", line=ins.src_line, col=ins.src_col)
+                elif cname in ("os.path.join", "path.join") and len(ins.args) >= 2:
+                    ins.op = "PATH_JOIN"
+                    ins.args = ins.args[1:]
+                    changed = True
+                    if diary:
+                        diary.record_decision(fn.name, "PATH_OP", f"os.path.join({', '.join(str(a) for a in ins.args)})", "luthon_path_join", is_native=True, reason="Direct C runtime binding for os.path.join", line=ins.src_line, col=ins.src_col)
 
             elif ins.op == "BRANCH" and len(ins.args) >= 3:
                 cond_arg = ins.args[0]

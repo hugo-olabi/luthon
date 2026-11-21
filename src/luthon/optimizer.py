@@ -51,7 +51,7 @@ def _is_tmp(s: Any) -> bool:
     return False
 
 # Operations with no side effects whose results can be dropped if unused
-_PURE_OPS = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR", "SLICE_STR", "SUBSCR_FAST_KEY", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX"}
+_PURE_OPS = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR", "SLICE_STR", "SUBSCR_FAST_KEY", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX", "PATH_EXISTS", "PATH_ISDIR", "PATH_BASENAME", "PATH_DIRNAME", "PATH_GETSIZE", "PATH_JOIN"}
 
 
 def constant_fold_function(fn: Function) -> bool:
@@ -619,7 +619,7 @@ def loop_invariant_code_motion_function(fn: Function) -> bool:
                     loop_defs.add(str(ins.args[0]))
 
         # 3. Iteratively hoist invariant instructions
-        hoist_ops = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX", "SUBSCR_FAST_KEY", "SLICE_STR"}
+        hoist_ops = {"CONST", "LOAD", "BINOP", "BINOP_DIRECT", "UNOP", "CMP", "CMP_DIRECT", "GET_ATTR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX", "SUBSCR_FAST_KEY", "SLICE_STR", "PATH_EXISTS", "PATH_ISDIR", "PATH_BASENAME", "PATH_DIRNAME", "PATH_GETSIZE", "PATH_JOIN"}
         hoisted_any = True
         while hoisted_any:
             hoisted_any = False
@@ -641,7 +641,7 @@ def loop_invariant_code_motion_function(fn: Function) -> bool:
                                 if isinstance(arg, str) and arg in loop_defs:
                                     is_invariant = False
                                     break
-                        elif ins.op in ("UNOP", "GET_ATTR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX", "SUBSCR_FAST_KEY", "SLICE_STR") and ins.args:
+                        elif ins.op in ("UNOP", "GET_ATTR", "SUBSCR_DIRECT", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX", "SUBSCR_FAST_KEY", "SLICE_STR", "PATH_EXISTS", "PATH_ISDIR", "PATH_BASENAME", "PATH_DIRNAME", "PATH_GETSIZE", "PATH_JOIN") and ins.args:
                             for arg in ins.args:
                                 if isinstance(arg, str) and arg in loop_defs:
                                     is_invariant = False

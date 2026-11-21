@@ -664,6 +664,31 @@ print(f"DIST:{distance()}")
     assert "+" in body
 
 
+def test_direct_c_runtime_path_lowering():
+    code = """
+import os
+
+def check_paths():
+    p = os.path.join('/tmp', 'sample.txt')
+    b = os.path.basename(p)
+    d = os.path.dirname(p)
+    e = os.path.exists('/tmp')
+    return f"{b}|{d}|{e}"
+
+print(check_paths())
+"""
+    out = _run_lua(code, optimize=True)
+    assert "sample.txt|/tmp|True" in out
+
+    lua = transpile_ir(code, optimize=True)
+    body = lua.split("function check_paths")[1].split("local function _luthon_module_entry")[0]
+    assert "_luthon_fast_path_join2" in body
+    assert "_luthon_fast_path_basename" in body
+    assert "_luthon_fast_path_dirname" in body
+    assert "_luthon_fast_path_exists" in body
+
+
+
 
 
 

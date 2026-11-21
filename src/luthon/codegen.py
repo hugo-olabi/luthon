@@ -256,6 +256,20 @@ end"""
             return f"{ins.result} = {t}[{k}]"
         except (ValueError, TypeError):
             return f"{ins.result} = {t}[{idx} + 1]"
+    if o == "PATH_EXISTS":
+        return f"{ins.result} = _luthon_fast_path_exists({ins.args[0]})"
+    if o == "PATH_ISDIR":
+        return f"{ins.result} = _luthon_fast_path_isdir({ins.args[0]})"
+    if o == "PATH_BASENAME":
+        return f"{ins.result} = _luthon_fast_path_basename({ins.args[0]})"
+    if o == "PATH_DIRNAME":
+        return f"{ins.result} = _luthon_fast_path_dirname({ins.args[0]})"
+    if o == "PATH_GETSIZE":
+        return f"{ins.result} = _luthon_fast_path_getsize({ins.args[0]})"
+    if o == "PATH_JOIN":
+        if len(ins.args) == 2:
+            return f"{ins.result} = _luthon_fast_path_join2({ins.args[0]}, {ins.args[1]})"
+        return f"{ins.result} = os.path.join({', '.join(str(a) for a in ins.args)})"
     if o == "GET_ATTR":
         return ins.result + " = " + ins.args[0] + "." + ins.args[1]
     if o == "SET_ATTR":

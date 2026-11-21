@@ -348,6 +348,24 @@ local function _emit(ins)
     else
       return ins.result .. " = " .. t .. "[" .. args[2] .. " + 1]"
     end
+  elseif o == "PATH_EXISTS" then
+    return ins.result .. " = _luthon_fast_path_exists(" .. args[1] .. ")"
+  elseif o == "PATH_ISDIR" then
+    return ins.result .. " = _luthon_fast_path_isdir(" .. args[1] .. ")"
+  elseif o == "PATH_BASENAME" then
+    return ins.result .. " = _luthon_fast_path_basename(" .. args[1] .. ")"
+  elseif o == "PATH_DIRNAME" then
+    return ins.result .. " = _luthon_fast_path_dirname(" .. args[1] .. ")"
+  elseif o == "PATH_GETSIZE" then
+    return ins.result .. " = _luthon_fast_path_getsize(" .. args[1] .. ")"
+  elseif o == "PATH_JOIN" then
+    if #args == 2 then
+      return ins.result .. " = _luthon_fast_path_join2(" .. args[1] .. ", " .. args[2] .. ")"
+    else
+      local arg_strs = {}
+      for i = 1, #args do table.insert(arg_strs, tostring(args[i])) end
+      return ins.result .. " = os.path.join(" .. table.concat(arg_strs, ", ") .. ")"
+    end
   elseif o == "STORE_SUBSCR" then
     return "__luthon_set(" .. args[1] .. ", " .. args[2] .. ", " .. args[3] .. ")"
   elseif o == "STORE_SUBSCR_DIRECT" then
