@@ -688,6 +688,51 @@ print(check_paths())
     assert "_luthon_fast_path_exists" in body
 
 
+def test_short_circuit_boolean_register_isolation():
+    """Verify that mid-block branches in short-circuit conditions do not cause register reuse collisions across branches."""
+    code = """
+def parse_val(s, f):
+    if s[f:f+1] == '-' and s[f+1:f+2] == '0':
+        return "invalid_negative_zero"
+    elif s[f:f+1] == '0' and len(s) != f + 1:
+        return "invalid_leading_zero"
+    return "ok:" + s[f:]
+
+print(parse_val("1048576", 0))
+print(parse_val("-123", 0))
+print(parse_val("0", 0))
+print(parse_val("0123", 0))
+print(parse_val("-0", 0))
+"""
+    out = _run_lua(code, optimize=True)
+    lines = out.splitlines()
+    assert lines[0] == "ok:1048576"
+    assert lines[1] == "ok:-123"
+    assert lines[2] == "ok:0"
+    assert lines[3] == "invalid_leading_zero"
+    assert lines[4] == "invalid_negative_zero"
+
+
+def test_n_ary_bool_op_short_circuit():
+    """Verify that BoolOp with 3 or more values properly evaluates with short-circuit semantics."""
+    code = """
+def evaluate(a, b, c, d):
+    r1 = a and b and c and d
+    r2 = a or b or c or d
+    return f"{r1}|{r2}"
+
+print(evaluate(True, True, False, True))
+print(evaluate(None, None, None, "fallback"))
+print(evaluate(1, 2, 3, 4))
+"""
+    out = _run_lua(code, optimize=True)
+    lines = out.splitlines()
+    assert lines[0] == "False|True"
+    assert lines[1] == "None|fallback"
+    assert lines[2] == "4|1"
+
+
+
 
 
 
