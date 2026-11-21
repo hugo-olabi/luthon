@@ -92,9 +92,9 @@ def sum_int_list(nums: list[int]) -> int:
         self.assertEqual(type_map["val"], INT_TYPE)
         normalize_to_typed_cir(fn, type_map)
 
-        # nums[i] should be specialized to SUBSCR_DIRECT
-        subscrs = [ins.op for b in fn.blocks for ins in b.instrs if ins.op in ("SUBSCR", "SUBSCR_DIRECT")]
-        self.assertIn("SUBSCR_DIRECT", subscrs)
+        # nums[i] should be specialized to SUBSCR_FAST_VAR_INDEX or SUBSCR_DIRECT
+        subscrs = [ins.op for b in fn.blocks for ins in b.instrs if ins.op in ("SUBSCR", "SUBSCR_DIRECT", "SUBSCR_FAST_VAR_INDEX")]
+        self.assertTrue(any(op in ("SUBSCR_DIRECT", "SUBSCR_FAST_VAR_INDEX") for op in subscrs))
 
     def test_end_to_end_typed_container_execution(self):
         """Verify typed container operations execute correctly in LuaJIT with specialized instructions."""
