@@ -204,7 +204,7 @@ class TypeInferrer:
                     def_t = INT_TYPE
                 elif isinstance(def_val, float):
                     def_t = FLOAT_TYPE
-                elif isinstance(def_val, str):
+                elif isinstance(def_val, (str, bytes)):
                     def_t = STR_TYPE
                 else:
                     def_t = ANY_TYPE
@@ -361,6 +361,8 @@ class TypeInferrer:
             return FLOAT_TYPE
         elif isinstance(arg, bool):
             return BOOL_TYPE
+        elif isinstance(arg, bytes):
+            return STR_TYPE
         elif isinstance(arg, str):
             types = self.type_env.get(arg, None)
             if types is None:
@@ -386,7 +388,7 @@ class TypeInferrer:
                 return {INT_TYPE}
             elif isinstance(val, float):
                 return {FLOAT_TYPE}
-            elif isinstance(val, str):
+            elif isinstance(val, (str, bytes)):
                 return {STR_TYPE}
             return {ANY_TYPE}
 
@@ -655,8 +657,8 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
             if ins.op == "BINOP" and len(ins.args) >= 3:
                 binop = str(ins.args[0]).lower()
                 left_arg, right_arg = ins.args[1], ins.args[2]
-                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (STR_TYPE if isinstance(left_arg, str) else ANY_TYPE)))
-                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (STR_TYPE if isinstance(right_arg, str) else ANY_TYPE)))
+                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (STR_TYPE if isinstance(left_arg, (str, bytes)) else ANY_TYPE)))
+                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (STR_TYPE if isinstance(right_arg, (str, bytes)) else ANY_TYPE)))
 
                 if lt == INT_TYPE and rt == INT_TYPE:
                     method_name = f"int.__typed_{binop}__"
@@ -683,8 +685,8 @@ def normalize_to_typed_cir(fn: Function, type_map: Dict[str, CIRType]) -> bool:
             elif ins.op == "CMP" and len(ins.args) >= 3:
                 cmpop = str(ins.args[0]).lower()
                 left_arg, right_arg = ins.args[1], ins.args[2]
-                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (BOOL_TYPE if isinstance(left_arg, bool) else (STR_TYPE if isinstance(left_arg, str) else ANY_TYPE))))
-                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (BOOL_TYPE if isinstance(right_arg, bool) else (STR_TYPE if isinstance(right_arg, str) else ANY_TYPE))))
+                lt = type_map.get(str(left_arg), INT_TYPE if isinstance(left_arg, int) else (FLOAT_TYPE if isinstance(left_arg, float) else (BOOL_TYPE if isinstance(left_arg, bool) else (STR_TYPE if isinstance(left_arg, (str, bytes)) else ANY_TYPE))))
+                rt = type_map.get(str(right_arg), INT_TYPE if isinstance(right_arg, int) else (FLOAT_TYPE if isinstance(right_arg, float) else (BOOL_TYPE if isinstance(right_arg, bool) else (STR_TYPE if isinstance(right_arg, (str, bytes)) else ANY_TYPE))))
 
                 # Numeric, boolean, and string scalar comparisons can be directly evaluated in Lua
                 # without traversing Python metatable chains or calling _luthon_cmp
