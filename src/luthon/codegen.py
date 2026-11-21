@@ -167,7 +167,28 @@ def _emit(ins):
         return "end"
     if o == "TRY_BEGIN_HOISTED":
         fn_name = ins.args[0]
-        return f"do\nlocal ok, err = pcall({fn_name})"
+        inputs = ins.args[1] if len(ins.args) > 1 and isinstance(ins.args[1], list) else []
+        outputs = ins.args[2] if len(ins.args) > 2 and isinstance(ins.args[2], list) else []
+        inputs_str = ", ".join(inputs)
+        call_arg = f", {inputs_str}" if inputs_str else ""
+        if outputs:
+            status_vars = [f"_r{i+1}" for i in range(len(outputs))]
+            status_str = ", ".join(status_vars)
+            out_str = ", ".join(outputs)
+            return (
+                f"do\n"
+                f"local ok, err\n"
+                f"local _status, {status_str} = pcall({fn_name}{call_arg})\n"
+                f"if _status then\n"
+                f"    ok = true\n"
+                f"    {out_str} = {status_str}\n"
+                f"else\n"
+                f"    ok = false\n"
+                f"    err = _r1\n"
+                f"end"
+            )
+        else:
+            return f"do\nlocal ok, err = pcall({fn_name}{call_arg})"
     if o == "END_TRY_HOISTED":
         return "if not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
     if o in ("TRY_BEGIN", "WITH_BEGIN"):
@@ -402,6 +423,70 @@ end"""
         fn_name = "luthon_simd_v4df_reduce_sum" if elem_t == "f64" else "luthon_simd_v8sf_reduce_sum"
         return f"{ins.result} = _simd_lib.{fn_name}({ins.args[0]})"
     return "-- " + o
+
+
+def _get_ins_reads(ins):
+    op = ins.op
+    if op in ("TRY_BEGIN", "END_TRY", "TRY_BEGIN_HOISTED", "END_TRY_HOISTED", "WITH_BEGIN", "WITH_END"):
+        return []
+    reads = []
+    if op == "LOAD":
+        if ins.args:
+            reads.append(str(ins.args[0]))
+    elif op == "STORE":
+        if len(ins.args) > 1 and isinstance(ins.args[1], str):
+            reads.append(ins.args[1])
+    elif op in ("BINOP", "BINOP_DIRECT", "CMP", "CMP_DIRECT"):
+        if len(ins.args) > 1 and isinstance(ins.args[1], str):
+            reads.append(ins.args[1])
+        if len(ins.args) > 2 and isinstance(ins.args[2], str):
+            reads.append(ins.args[2])
+    elif op == "UNOP":
+        if len(ins.args) > 1 and isinstance(ins.args[1], str):
+            reads.append(ins.args[1])
+    elif op in ("SUBSCR", "SUBSCR_FAST_INDEX", "SUBSCR_FAST_VAR_INDEX", "SUBSCR_FAST_KEY"):
+        if len(ins.args) > 0 and isinstance(ins.args[0], str):
+            reads.append(ins.args[0])
+        if len(ins.args) > 1 and isinstance(ins.args[1], str):
+            reads.append(ins.args[1])
+    elif op == "SUBSCR_STORE":
+        for a in ins.args:
+            if isinstance(a, str):
+                reads.append(a)
+    elif op == "SLICE_STR":
+        for a in ins.args:
+            if isinstance(a, str):
+                reads.append(a)
+    elif op == "CALL":
+        for a in ins.args:
+            if isinstance(a, str):
+                reads.append(a)
+    elif op in ("MAKE_LIST", "MAKE_TUPLE", "MAKE_SET", "MAKE_DICT"):
+        for a in ins.args:
+            if isinstance(a, str):
+                reads.append(a)
+    elif op == "CELL_GET":
+        if ins.args:
+            reads.append(str(ins.args[0]))
+    elif op == "CELL_SET":
+        if len(ins.args) > 1 and isinstance(ins.args[1], str):
+            reads.append(ins.args[1])
+    else:
+        for a in ins.args:
+            if isinstance(a, str) and (a.startswith("_") or a.isidentifier()):
+                reads.append(a)
+    return reads
+
+
+def _get_ins_writes(ins):
+    writes = []
+    if ins.result:
+        writes.append(ins.result)
+    if ins.op == "STORE" and ins.args:
+        writes.append(str(ins.args[0]))
+    elif ins.op == "CELL_SET" and ins.args:
+        writes.append(str(ins.args[0]))
+    return writes
 
 
 def generate(module, sourcemap=None):
@@ -659,6 +744,23 @@ def generate(module, sourcemap=None):
         from .ir import Instr
         from .debug import get_active_diary
         diary = get_active_diary()
+
+        inside_catch = False
+        catch_reads = set()
+        catch_writes = set()
+        for b in fn.blocks:
+            for c_ins in b.instrs:
+                if c_ins.op == "CATCH_BEGIN":
+                    inside_catch = True
+                elif c_ins.op in ("END_ALL_CATCH", "TRY_ELSE", "TRY_CLOSE"):
+                    inside_catch = False
+                elif inside_catch:
+                    for r in _get_ins_reads(c_ins):
+                        if r not in catch_writes:
+                            catch_reads.add(r)
+                    for w in _get_ins_writes(c_ins):
+                        catch_writes.add(w)
+
         for b in fn.blocks:
             new_instrs = []
             idx = 0
@@ -683,26 +785,70 @@ def generate(module, sourcemap=None):
                             for ins in body_instrs
                         )
                         if not has_cf:
-                            closure_counter += 1
-                            safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
-                            closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
-                            scoped_vars = [str(a) for a in ins.args] if ins.args else []
-                            hoisted_closures.append((closure_name, scoped_vars, body_instrs))
-                            new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name]))
-                            new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
-                            if diary:
-                                diary.record_decision(
-                                    fn.name,
-                                    "TRY_BLOCK",
-                                    "pcall",
-                                    "hoisted_closure",
-                                    is_native=True,
-                                    reason="Pure try block without control flow hoisted to eliminate inner anonymous closure (FNEW)",
-                                    line=ins.src_line,
-                                    col=ins.src_col,
-                                )
-                            idx = end_idx + 1
-                            continue
+                            body_ins_ids = {id(b.instrs[k]) for k in range(idx, end_idx + 1)}
+                            outside_reads = set()
+                            for ob in fn.blocks:
+                                for o_ins in ob.instrs:
+                                    if id(o_ins) not in body_ins_ids:
+                                        outside_reads.update(_get_ins_reads(o_ins))
+
+                            fn_scope_vars = set(getattr(fn, "params", [])) | set(getattr(fn, "locals", []))
+                            written_set = set()
+                            all_writes = []
+                            inputs = []
+                            for bins in body_instrs:
+                                reads = _get_ins_reads(bins)
+                                for r in reads:
+                                    if r not in written_set:
+                                        if (r in fn_scope_vars or r.startswith("_t") or r.startswith("_r")) and r not in inputs:
+                                            inputs.append(r)
+                                writes = _get_ins_writes(bins)
+                                for w in writes:
+                                    written_set.add(w)
+                                    all_writes.append(w)
+
+                            outputs = []
+                            for w in all_writes:
+                                if (w in fn_scope_vars or w in outside_reads) and w not in outputs:
+                                    outputs.append(w)
+
+                            if not any(w in catch_reads for w in outputs):
+                                closure_counter += 1
+                                safe_fn_name = fn.name.replace(".", "_").replace("<", "_").replace(">", "_")
+                                closure_name = f"_try_closure_{safe_fn_name}_{closure_counter}"
+                                scoped_vars = [w for w in all_writes if w not in inputs and w not in outputs]
+                                scoped_unique = []
+                                for s in scoped_vars:
+                                    if s not in scoped_unique:
+                                        scoped_unique.append(s)
+                                hoisted_closures.append((closure_name, inputs, outputs, scoped_unique, body_instrs))
+                                new_instrs.append(Instr(op="TRY_BEGIN_HOISTED", args=[closure_name, inputs, outputs]))
+                                new_instrs.append(Instr(op="END_TRY_HOISTED", args=[]))
+                                if diary:
+                                    diary.record_decision(
+                                        fn.name,
+                                        "TRY_BLOCK",
+                                        "pcall",
+                                        "static_module_closure",
+                                        is_native=True,
+                                        reason="Pure try block without control flow hoisted to static function to eliminate inner anonymous closure (FNEW)",
+                                        line=ins.src_line,
+                                        col=ins.src_col,
+                                    )
+                                idx = end_idx + 1
+                                continue
+                            else:
+                                if diary:
+                                    diary.record_decision(
+                                        fn.name,
+                                        "TRY_BLOCK",
+                                        "pcall",
+                                        "anonymous_closure",
+                                        is_native=False,
+                                        reason="Try block writes variables read in catch handler; kept closure unhoisted",
+                                        line=ins.src_line,
+                                        col=ins.src_col,
+                                    )
                         else:
                             if diary:
                                 diary.record_decision(
@@ -720,15 +866,24 @@ def generate(module, sourcemap=None):
                 idx += 1
             b.instrs = new_instrs
 
-        for c_name, c_scoped, c_instrs in hoisted_closures:
-            lines.append(f"{indent}  local {c_name} = function()")
-            if c_scoped:
-                if len(c_scoped) > 180:
-                    c_scoped = c_scoped[:180]
-                lines.append(f"{indent}    local " + ", ".join(c_scoped))
+        pre_lines = []
+        for c_name, c_inputs, c_outputs, c_scoped, c_instrs in hoisted_closures:
+            inputs_str = ", ".join(c_inputs)
+            pre_lines.append(f"{indent}function {c_name}({inputs_str})")
+            local_decls = [v for v in c_scoped if v not in c_inputs]
+            if c_outputs:
+                for out_v in c_outputs:
+                    if out_v not in c_inputs and out_v not in local_decls:
+                        local_decls.append(out_v)
+            if local_decls:
+                if len(local_decls) > 180:
+                    local_decls = local_decls[:180]
+                pre_lines.append(f"{indent}  local " + ", ".join(local_decls))
             for b_ins in c_instrs:
-                lines.append(f"{indent}    " + _emit(b_ins))
-            lines.append(f"{indent}  end")
+                pre_lines.append(f"{indent}  " + _emit(b_ins))
+            if c_outputs:
+                pre_lines.append(f"{indent}  return " + ", ".join(c_outputs))
+            pre_lines.append(f"{indent}end")
 
         for b in fn.blocks:
             lines.append(f"{indent}  ::{b.label}::")
@@ -741,11 +896,11 @@ def generate(module, sourcemap=None):
                     child_lines = _emit_func_lines(
                         child_fn, fn_map, classes, builtins, _fnames, hoisted_set,
                         sourcemap=sourcemap, indent=indent + "  ", is_anon=True, anon_res=ins.result,
-                        base_line_offset=base_line_offset + len(lines)
+                        base_line_offset=base_line_offset + len(pre_lines) + len(lines)
                     )
                     lines.extend(child_lines)
                 else:
-                    gen_line = base_line_offset + len(lines) + 1
+                    gen_line = base_line_offset + len(pre_lines) + len(lines) + 1
                     if sourcemap is not None and getattr(ins, "src_line", 0) > 0:
                         src_file = sourcemap.file or (sourcemap.sources[0] if sourcemap.sources else "")
                         sourcemap.add(
@@ -757,7 +912,7 @@ def generate(module, sourcemap=None):
                         )
                     lines.append(f"{indent}  " + _emit(ins))
         lines.append(f"{indent}end")
-        return lines
+        return pre_lines + lines
 
     for fn in module.functions:
         if getattr(fn, "is_nested", False):

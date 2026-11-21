@@ -249,7 +249,20 @@ local function _emit(ins)
     end
     return args[1] .. "(" .. table.concat(lua_args, ", ") .. ")"
   elseif o == "TRY_BEGIN_HOISTED" then
-    return "do\nlocal ok, err = pcall(" .. args[1] .. ")"
+    local fn_name = tostring(args[1])
+    local inputs = type(args[2]) == "table" and args[2] or {}
+    local outputs = type(args[3]) == "table" and args[3] or {}
+    local inputs_str = table.concat(inputs, ", ")
+    local call_arg = inputs_str ~= "" and (", " .. inputs_str) or ""
+    if #outputs > 0 then
+      local status_vars = {}
+      for i = 1, #outputs do table.insert(status_vars, "_r" .. i) end
+      local status_str = table.concat(status_vars, ", ")
+      local out_str = table.concat(outputs, ", ")
+      return "do\nlocal ok, err\nlocal _status, " .. status_str .. " = pcall(" .. fn_name .. call_arg .. ")\nif _status then\n    ok = true\n    " .. out_str .. " = " .. status_str .. "\nelse\n    ok = false\n    err = _r1\nend"
+    else
+      return "do\nlocal ok, err = pcall(" .. fn_name .. call_arg .. ")"
+    end
   elseif o == "END_TRY_HOISTED" then
     return "if not ok then\n    local _exc = type(err) == \"string\" and (err:match(\"^.-:%d+: (.*)$\") or err) or err\n    local _exc_matched = false"
   elseif o == "TRY_BEGIN" or o == "WITH_BEGIN" then
