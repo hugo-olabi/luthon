@@ -1335,8 +1335,6 @@ class IRLowerer:
         if isinstance(node, ast.Constant):
             t = self._new_tmp()
             v = node.value
-            if isinstance(v, bytes):
-                v = v.decode('latin-1')  # bytes -> string for Lua
             if v is True:
                 self._emit("CONST", [True], result=t)
             elif v is False:
@@ -1496,12 +1494,7 @@ class IRLowerer:
                 if not elts:
                     self._emit("CONST", [not is_in], result=t)
                     return t
-                const_vals = []
-                for elt in elts:
-                    v = elt.value
-                    if isinstance(v, bytes):
-                        v = v.decode("latin-1")
-                    const_vals.append(v)
+                const_vals = [elt.value for elt in elts]
                 op_name = "IN_UNROLL" if is_in else "NOT_IN_UNROLL"
                 self._emit(op_name, [l] + const_vals, result=t)
                 return t

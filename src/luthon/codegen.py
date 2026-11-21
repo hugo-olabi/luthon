@@ -2,17 +2,34 @@ def _op(op):
     return {"add": "+", "sub": "-", "mul": "*", "div": "/", "mod": "%", "pow": "^", "concat": ".."}.get(op, op)
 
 
+def _lua_repr(v):
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if v is None:
+        return "nil"
+    if isinstance(v, bytes):
+        res = ['"']
+        for b in v:
+            if b == 34:
+                res.append('\\"')
+            elif b == 92:
+                res.append('\\\\')
+            elif 32 <= b < 127:
+                res.append(chr(b))
+            else:
+                res.append(f"\\{b:03d}")
+        res.append('"')
+        return "".join(res)
+    return repr(v)
+
+
 def _emit(ins):
     o = ins.op
     if o == "CONST":
         v = ins.args[0]
-        if v is True:
-            return ins.result + " = true"
-        if v is False:
-            return ins.result + " = false"
-        if v is None:
-            return ins.result + " = nil"
-        return ins.result + " = " + repr(v)
+        return ins.result + " = " + _lua_repr(v)
     if o == "LOAD":
         return ins.result + " = " + ins.args[0]
     if o == "STORE":
@@ -129,16 +146,7 @@ def _emit(ins):
         lhs = ins.args[0]
         eqs = []
         for v in ins.args[1:]:
-            if v is True:
-                eqs.append(f"({lhs} == true)")
-            elif v is False:
-                eqs.append(f"({lhs} == false)")
-            elif v is None:
-                eqs.append(f"({lhs} == nil)")
-            elif isinstance(v, str):
-                eqs.append(f"({lhs} == {repr(v)})")
-            else:
-                eqs.append(f"({lhs} == {v})")
+            eqs.append(f"({lhs} == {_lua_repr(v)})")
         joined = " or ".join(eqs)
         if o == "IN_UNROLL":
             return ins.result + " = (" + joined + ")"
